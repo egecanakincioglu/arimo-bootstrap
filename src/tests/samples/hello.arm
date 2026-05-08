@@ -1,0 +1,12 @@
+module arimo.hello;
+
+import arimo.io;
+
+public class HelloWorld {
+    public static main() {
+        String name  = "Arimo";
+        Integer sayi = 42;
+        IO.print("Merhaba ${name}!");
+        IO.print("Sayı: ${sayi}");
+    }
+}
