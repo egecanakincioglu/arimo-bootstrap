@@ -5,7 +5,6 @@
 use crate::lexer::{Token, SpannedToken};
 use crate::ast::*;
 
-// ── Hata tipi ─────────────────────────────────────────────────────────────────
 #[derive(Debug)]
 pub struct ParseError {
     pub message : String,
@@ -21,15 +20,15 @@ impl ParseError {
 
 type ParseResult<T> = Result<T, ParseError>;
 
-// ── Parser ────────────────────────────────────────────────────────────────────
 pub struct Parser {
-    tokens  : Vec<SpannedToken>,
-    pos     : usize,
+    tokens           : Vec<SpannedToken>,
+    pos              : usize,
+    pending_close_gt : bool,   // >> token'ının ikinci > 'si bekliyor
 }
 
 impl Parser {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, pos: 0, pending_close_gt: false }
     }
 
     // ── Token yönetimi ────────────────────────────────────────────────────────
@@ -70,6 +69,37 @@ impl Parser {
         }
     }
 
+    // Generic kapanışı için: Gt veya GtGt'nin birinci > 'si
+    fn eat_close_gt(&mut self) -> bool {
+        if self.pending_close_gt {
+            self.pending_close_gt = false;
+            return true;
+        }
+        if self.current() == &Token::Gt {
+            self.advance();
+            return true;
+        }
+        // >> token'ı: birinci > tüket, ikincisi pending
+        if self.current() == &Token::GtGt {
+            self.advance();
+            self.pending_close_gt = true;
+            return true;
+        }
+        false
+    }
+
+    fn expect_close_gt(&mut self) -> ParseResult<()> {
+        if self.eat_close_gt() {
+            Ok(())
+        } else {
+            let (line, col) = self.current_span();
+            Err(ParseError::new(
+                &format!("Expected '>', found {:?}", self.current()),
+                line, col,
+            ))
+        }
+    }
+
     fn expect_ident(&mut self) -> ParseResult<String> {
         match self.current().clone() {
             Token::Ident(name) => { self.advance(); Ok(name) }
@@ -83,7 +113,6 @@ impl Parser {
         }
     }
 
-    // extends / implements sonrası tip ismi — hem Ident hem TypeException kabul eder
     fn expect_class_name(&mut self) -> ParseResult<String> {
         match self.current().clone() {
             Token::Ident(name)   => { self.advance(); Ok(name) }
@@ -156,7 +185,7 @@ impl Parser {
     // ── Üst düzey tanımlar ────────────────────────────────────────────────────
 
     fn parse_item(&mut self) -> ParseResult<Item> {
-        // @annotation kontrolü
+        // @annotation
         let mut manual = false;
         if self.eat(&Token::At) {
             let annotation = self.expect_ident()?;
@@ -165,20 +194,29 @@ impl Parser {
                 other => {
                     let (line, col) = self.current_span();
                     return Err(ParseError::new(
-                        &format!("unknown annotation '@{}' — only @manual is supported", other),
+                        &format!("unknown annotation '@{}' — @manual, @inline, @nostd destekleniyor", other),
                         line, col,
                     ));
                 }
             }
         }
 
+        // type alias — visibility yok
+        if self.check(&Token::KwType) {
+            return self.parse_type_alias_item();
+        }
+
         let visibility = self.parse_visibility()?;
         let abstract_  = self.eat(&Token::Abstract);
+
+        // const item
+        if self.check(&Token::Const) {
+            return self.parse_const_item(visibility);
+        }
 
         match self.current().clone() {
             Token::Class => {
                 let class = self.parse_class(visibility, abstract_, manual)?;
-                // Extends Exception veya *Exception pattern'ı → ExceptionDecl
                 if let Some(ref parent) = class.extends.clone() {
                     if parent == "Exception" || parent.ends_with("Exception") {
                         return Ok(Item::Exception(ExceptionDecl {
@@ -199,11 +237,31 @@ impl Parser {
             _ => {
                 let (line, col) = self.current_span();
                 Err(ParseError::new(
-                    &format!("Expected class, interface or enum, found {:?}", self.current()),
+                    &format!("Expected class, interface, enum or const, found {:?}", self.current()),
                     line, col,
                 ))
             }
         }
+    }
+
+    fn parse_const_item(&mut self, visibility: Visibility) -> ParseResult<Item> {
+        self.expect(&Token::Const)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::Colon)?;
+        let ty = self.parse_type()?;
+        self.expect(&Token::Eq)?;
+        let value = self.parse_expr(0)?;
+        self.expect(&Token::Semicolon)?;
+        Ok(Item::Const(ConstDecl { visibility, name, ty, value }))
+    }
+
+    fn parse_type_alias_item(&mut self) -> ParseResult<Item> {
+        self.expect(&Token::KwType)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::Eq)?;
+        let ty = self.parse_type()?;
+        self.expect(&Token::Semicolon)?;
+        Ok(Item::TypeAlias(TypeAliasDecl { name, ty }))
     }
 
     fn parse_visibility(&mut self) -> ParseResult<Visibility> {
@@ -244,13 +302,25 @@ impl Parser {
             let abstract_ = self.eat(&Token::Abstract);
             let override_ = self.eat(&Token::Override);
 
+            // const shorthand — public const NAME: Type = value;
+            if self.check(&Token::Const) {
+                self.advance();
+                let fname = self.expect_ident()?;
+                self.expect(&Token::Colon)?;
+                let ty = self.parse_type()?;
+                self.expect(&Token::Eq)?;
+                let value = self.parse_expr(0)?;
+                self.expect(&Token::Semicolon)?;
+                fields.push(Field { visibility: vis, readonly: true, static_: true, name: fname, ty, value: Some(value) });
+                continue;
+            }
+
             match self.current().clone() {
                 Token::Constructor => {
                     self.advance();
                     constructor = Some(self.parse_constructor(vis)?);
                 }
                 _ => {
-                    // Önce Ident + LParen kontrolü — dönüş tipi olmayan metod (main gibi)
                     if let Token::Ident(iname) = self.current().clone() {
                         if self.pos + 1 < self.tokens.len() {
                             let next = &self.tokens[self.pos + 1].token;
@@ -263,7 +333,6 @@ impl Parser {
                                 continue;
                             }
                         }
-                        // Ident : Type → field (readonly + Ident isim kullanımı)
                         if self.pos + 1 < self.tokens.len() {
                             let next = &self.tokens[self.pos + 1].token;
                             if *next == Token::Colon {
@@ -280,19 +349,16 @@ impl Parser {
                         }
                     }
 
-                    // Tip ile başlayan → field veya metod
                     if self.is_type_token() {
                         let ty   = self.parse_type()?;
                         let name = self.expect_ident()?;
 
                         if self.check(&Token::LParen) {
-                            // metod
                             let method = self.parse_method_body(
                                 vis, static_, abstract_, override_, name, Some(ty)
                             )?;
                             methods.push(method);
                         } else {
-                            // field
                             let value = if self.eat(&Token::Eq) {
                                 Some(self.parse_expr(0)?)
                             } else { None };
@@ -311,7 +377,6 @@ impl Parser {
         }
 
         self.expect(&Token::RBrace)?;
-
         Ok(ClassDecl { visibility, abstract_, manual, name, generics, extends, implements, fields, constructor, methods })
     }
 
@@ -334,7 +399,6 @@ impl Parser {
     ) -> ParseResult<Method> {
         let params = self.parse_params()?;
 
-        // : ReturnType — eğer return_ty dışarıdan verilmediyse
         let return_ty = if self.eat(&Token::Colon) {
             Some(self.parse_type()?)
         } else {
@@ -397,14 +461,12 @@ impl Parser {
         let mut variants = Vec::new();
         let mut methods  = Vec::new();
 
-        // Önce variant'ları oku — ; gelene kadar
         while !self.check(&Token::Semicolon) && !self.check(&Token::RBrace) {
             variants.push(self.expect_ident()?);
             if !self.eat(&Token::Comma) { break; }
         }
         self.eat(&Token::Semicolon);
 
-        // Sonra metodları oku
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
             let vis      = self.parse_visibility()?;
             let static_  = self.eat(&Token::Static);
@@ -425,6 +487,8 @@ impl Parser {
             Token::TypeString  | Token::TypeVoid  | Token::TypeList    |
             Token::TypeMap     | Token::TypeHashMap | Token::TypeTreeMap |
             Token::TypePair    | Token::TypeException | Token::TypeRawPtr |
+            Token::TypeU8  | Token::TypeU16 | Token::TypeU32 | Token::TypeU64 |
+            Token::TypeI8  | Token::TypeI16 | Token::TypeI32 | Token::TypeI64 |
             Token::Ident(_)
         )
     }
@@ -438,11 +502,20 @@ impl Parser {
             Token::TypeVoid      => { self.advance(); Type::Void    }
             Token::TypeException => { self.advance(); Type::Named("Exception".to_string()) }
 
+            Token::TypeU8  => { self.advance(); Type::U8  }
+            Token::TypeU16 => { self.advance(); Type::U16 }
+            Token::TypeU32 => { self.advance(); Type::U32 }
+            Token::TypeU64 => { self.advance(); Type::U64 }
+            Token::TypeI8  => { self.advance(); Type::I8  }
+            Token::TypeI16 => { self.advance(); Type::I16 }
+            Token::TypeI32 => { self.advance(); Type::I32 }
+            Token::TypeI64 => { self.advance(); Type::I64 }
+
             Token::TypeRawPtr => {
                 self.advance();
                 self.expect(&Token::Lt)?;
                 let inner = self.parse_type()?;
-                self.expect(&Token::Gt)?;
+                self.expect_close_gt()?;
                 Type::RawPtr(Box::new(inner))
             }
 
@@ -450,7 +523,7 @@ impl Parser {
                 self.advance();
                 self.expect(&Token::Lt)?;
                 let inner = self.parse_type()?;
-                self.expect(&Token::Gt)?;
+                self.expect_close_gt()?;
                 Type::List(Box::new(inner))
             }
             Token::TypeMap | Token::TypeHashMap | Token::TypeTreeMap => {
@@ -461,7 +534,7 @@ impl Parser {
                 let key = self.parse_type()?;
                 self.expect(&Token::Comma)?;
                 let val = self.parse_type()?;
-                self.expect(&Token::Gt)?;
+                self.expect_close_gt()?;
                 if is_hash      { Type::HashMap(Box::new(key), Box::new(val)) }
                 else if is_tree { Type::TreeMap(Box::new(key), Box::new(val)) }
                 else            { Type::Map(Box::new(key), Box::new(val))     }
@@ -472,13 +545,12 @@ impl Parser {
                 let first  = self.parse_type()?;
                 self.expect(&Token::Comma)?;
                 let second = self.parse_type()?;
-                self.expect(&Token::Gt)?;
+                self.expect_close_gt()?;
                 Type::Pair(Box::new(first), Box::new(second))
             }
             Token::Ident(name) => {
                 self.advance();
                 let name = name.clone();
-                // Generics var mı? — Pair<First, Second>
                 if self.check(&Token::Lt) {
                     self.advance();
                     let mut args = Vec::new();
@@ -486,7 +558,7 @@ impl Parser {
                     while self.eat(&Token::Comma) {
                         args.push(self.parse_type()?);
                     }
-                    self.expect(&Token::Gt)?;
+                    self.expect_close_gt()?;
                     Type::Generic(name, args)
                 } else {
                     Type::Named(name)
@@ -501,7 +573,6 @@ impl Parser {
             }
         };
 
-        // Nullable? — String?
         if self.eat(&Token::Question) {
             Ok(Type::Nullable(Box::new(ty)))
         } else {
@@ -527,8 +598,6 @@ impl Parser {
     }
 
     fn parse_param(&mut self) -> ParseResult<Param> {
-        // Arimo param sözdizimi: name: Type
-        // Önce isim gel, sonra : , sonra tip
         let name = self.expect_ident()?;
         self.expect(&Token::Colon)?;
         let ty   = self.parse_type()?;
@@ -544,16 +613,8 @@ impl Parser {
         while self.eat(&Token::Comma) {
             params.push(self.expect_ident()?);
         }
-        self.expect(&Token::Gt)?;
+        self.expect_close_gt()?;
         Ok(params)
-    }
-
-    fn parse_comma_separated_idents(&mut self) -> ParseResult<Vec<String>> {
-        let mut names = vec![self.expect_ident()?];
-        while self.eat(&Token::Comma) {
-            names.push(self.expect_ident()?);
-        }
-        Ok(names)
     }
 
     fn parse_comma_separated_class_names(&mut self) -> ParseResult<Vec<String>> {
@@ -623,10 +684,8 @@ impl Parser {
                 Ok(Stmt::Block(stmts))
             }
 
-            // Tip ile başlayan → değişken tanımı (is_var_decl kontrolü)
             _ if self.is_var_decl() => self.parse_var_decl(),
 
-            // Diğer → expression statement
             _ => {
                 let expr = self.parse_expr(0)?;
                 self.expect(&Token::Semicolon)?;
@@ -645,26 +704,19 @@ impl Parser {
         Ok(Stmt::VarDecl { ty, name, value })
     }
 
-    // Ident + Ident ise var decl, değilse expr stmt
     fn is_var_decl(&self) -> bool {
-        // Mevcut token bir tip token (built-in veya Ident)
-        // Bir sonraki token da Ident (değişken ismi) ise → var decl
         if !self.is_type_token() { return false; }
 
-        // Özel tipler için direkt true
         match self.current() {
             Token::TypeInteger | Token::TypeFloat | Token::TypeBoolean |
             Token::TypeString  | Token::TypeVoid  | Token::TypeList    |
             Token::TypeMap     | Token::TypeHashMap | Token::TypeTreeMap |
-            Token::TypePair    | Token::TypeException | Token::TypeRawPtr => return true,
+            Token::TypePair    | Token::TypeException | Token::TypeRawPtr |
+            Token::TypeU8  | Token::TypeU16 | Token::TypeU32 | Token::TypeU64 |
+            Token::TypeI8  | Token::TypeI16 | Token::TypeI32 | Token::TypeI64 => return true,
             _ => {}
         }
 
-        // Ident ise: arkasına bak
-        // Ident + Ident → var decl (MyClass name = ...)
-        // Ident + Dot   → static call, expr stmt
-        // Ident + LParen → constructor, expr stmt
-        // Ident + Lt    → generic tip (MyClass<T> name = ...)
         if let Token::Ident(_) = self.current() {
             let next = if self.pos + 1 < self.tokens.len() {
                 &self.tokens[self.pos + 1].token
@@ -715,14 +767,10 @@ impl Parser {
         self.expect(&Token::For)?;
         self.expect(&Token::LParen)?;
 
-        // for-each mi klasik for mu?
-        // for (Type name : expr) → for-each
-        // for (Type name = ...; ...; ...) → klasik
         let ty   = self.parse_type()?;
         let name = self.expect_ident()?;
 
         if self.eat(&Token::Colon) {
-            // for-each
             let iter = self.parse_expr(0)?;
             self.expect(&Token::RParen)?;
             self.expect(&Token::LBrace)?;
@@ -730,7 +778,6 @@ impl Parser {
             self.expect(&Token::RBrace)?;
             Ok(Stmt::ForEach { ty, name, iter, body })
         } else {
-            // klasik for
             self.expect(&Token::Eq)?;
             let init_val = self.parse_expr(0)?;
             self.expect(&Token::Semicolon)?;
@@ -808,12 +855,27 @@ impl Parser {
     }
 
     // ── Expression parser — Pratt ─────────────────────────────────────────────
+    //
+    // Precedence table (low → high):
+    //   assign     1/2
+    //   ||         3/4
+    //   &&         5/6
+    //   | (BitOr)  7/8
+    //   ^ (BitXor) 9/10
+    //   & (BitAnd) 11/12
+    //   == !=      13/14
+    //   < <= > >=  15/16
+    //   << >>      17/18
+    //   + -        19/20
+    //   * / %      21/22
+    //   as cast    23 (handled specially, tighter than any binary)
+    //   unary      25
 
     fn parse_expr(&mut self, min_bp: u8) -> ParseResult<Expr> {
         let mut left = self.parse_prefix()?;
 
         loop {
-            // Postfix operatörler — x++ x--
+            // Postfix: x++ x--
             match self.current() {
                 Token::PlusPlus => {
                     self.advance();
@@ -828,7 +890,16 @@ impl Parser {
                 _ => {}
             }
 
-            // Alan erişimi ve metod çağrısı — obj.field  obj.method()
+            // as cast — tightest postfix
+            if self.check(&Token::As) {
+                if 23 < min_bp { break; }
+                self.advance();
+                let cast_ty = self.parse_type()?;
+                left = Expr::Cast { expr: Box::new(left), ty: cast_ty };
+                continue;
+            }
+
+            // Field access / method call
             if self.check(&Token::Dot) {
                 self.advance();
                 let field = self.expect_ident()?;
@@ -848,7 +919,7 @@ impl Parser {
                 continue;
             }
 
-            // Null-safe erişim/çağrı — obj?.field  obj?.method()
+            // Null-safe
             if self.check(&Token::QuestionDot) {
                 self.advance();
                 let field = self.expect_ident()?;
@@ -865,7 +936,7 @@ impl Parser {
                 continue;
             }
 
-            // Ternary — cond ? then : else
+            // Ternary
             if self.check(&Token::Question) {
                 self.advance();
                 let then  = self.parse_expr(0)?;
@@ -879,7 +950,7 @@ impl Parser {
                 continue;
             }
 
-            // Binary operatör
+            // Binary
             let (op, left_bp, right_bp) = match self.infix_binding_power() {
                 Some(x) => x,
                 None    => break,
@@ -897,13 +968,11 @@ impl Parser {
 
     fn parse_prefix(&mut self) -> ParseResult<Expr> {
         match self.current().clone() {
-            // Literaller
             Token::Int(n)   => { self.advance(); Ok(Expr::IntLit(n))   }
             Token::Float(f) => { self.advance(); Ok(Expr::FloatLit(f)) }
             Token::Bool(b)  => { self.advance(); Ok(Expr::BoolLit(b))  }
             Token::Null     => { self.advance(); Ok(Expr::NullLit)      }
 
-            // String — interpolation parçalarını birleştir
             Token::Str(_) | Token::DollarLBrace => {
                 let mut parts: Vec<StringPart> = Vec::new();
 
@@ -916,7 +985,6 @@ impl Parser {
                         Token::DollarLBrace => {
                             self.advance();
                             let expr = self.parse_expr(0)?;
-                            // InterpolEnd token'ı yut
                             self.eat(&Token::InterpolEnd);
                             parts.push(StringPart::Interp(Box::new(expr)));
                         }
@@ -932,12 +1000,10 @@ impl Parser {
                 Ok(Expr::StrInterp(parts))
             }
 
-            // this / super
             Token::This  => { self.advance(); Ok(Expr::This) }
             Token::Super => {
                 self.advance();
                 if self.check(&Token::LParen) {
-                    // super(...) — üst sınıf constructor çağrısı
                     let args = self.parse_args()?;
                     Ok(Expr::StaticCall {
                         class  : "super".to_string(),
@@ -949,17 +1015,14 @@ impl Parser {
                 }
             }
 
-            // Identifier — değişken, static çağrı, constructor çağrısı
             Token::Ident(name) => {
                 self.advance();
                 let name = name.clone();
 
                 if self.check(&Token::LParen) {
-                    // Constructor çağrısı — Task(...)
                     let args = self.parse_args()?;
                     Ok(Expr::ConstructorCall { class: name, args })
                 } else if self.check(&Token::Dot) {
-                    // Static çağrı — Task.create(...)
                     self.advance();
                     let method = self.expect_ident()?;
                     if self.check(&Token::LParen) {
@@ -976,7 +1039,6 @@ impl Parser {
                 }
             }
 
-            // Standart kütüphane — IO.print(...)  Math.sqrt(...)  Math.PI  Time.now()  Memory.alloc()
             Token::StdIO | Token::StdMath | Token::StdTime | Token::StdMemory => {
                 let class = match self.advance().clone() {
                     Token::StdIO     => "IO",
@@ -991,7 +1053,6 @@ impl Parser {
                     let args = self.parse_args()?;
                     Ok(Expr::StaticCall { class, method: member, args })
                 } else {
-                    // Math.PI gibi parantez olmayan sabit erişimi
                     Ok(Expr::FieldAccess {
                         object : Box::new(Expr::Ident(class)),
                         field  : member,
@@ -999,7 +1060,7 @@ impl Parser {
                 }
             }
 
-            // Primitif tip isimleri expression'da — Float.sizeOf()  Integer.sizeOf()
+            // Primitif tip isimleri expression'da — Float.sizeOf()  u32.sizeOf()
             Token::TypeInteger | Token::TypeFloat | Token::TypeBoolean
             | Token::TypeString | Token::TypeVoid => {
                 let class = match self.current() {
@@ -1032,7 +1093,43 @@ impl Parser {
                 }
             }
 
-            // Builtin koleksiyon constructor ve static çağrılar — List()  HashMap()  List.of(...)
+            // Fixed-size integer types in expression — u32.sizeOf()
+            Token::TypeU8  | Token::TypeU16 | Token::TypeU32 | Token::TypeU64 |
+            Token::TypeI8  | Token::TypeI16 | Token::TypeI32 | Token::TypeI64 => {
+                let class = match self.current() {
+                    Token::TypeU8  => "u8",
+                    Token::TypeU16 => "u16",
+                    Token::TypeU32 => "u32",
+                    Token::TypeU64 => "u64",
+                    Token::TypeI8  => "i8",
+                    Token::TypeI16 => "i16",
+                    Token::TypeI32 => "i32",
+                    Token::TypeI64 => "i64",
+                    _              => unreachable!(),
+                }.to_string();
+                self.advance();
+                if self.check(&Token::Dot) {
+                    self.advance();
+                    let method = self.expect_ident()?;
+                    if self.check(&Token::LParen) {
+                        let args = self.parse_args()?;
+                        Ok(Expr::StaticCall { class, method, args })
+                    } else {
+                        Ok(Expr::FieldAccess {
+                            object : Box::new(Expr::Ident(class)),
+                            field  : method,
+                        })
+                    }
+                } else {
+                    let (line, col) = self.current_span();
+                    Err(ParseError::new(
+                        &format!("unexpected type '{}' in expression — did you mean {}.sizeOf()?", class, class),
+                        line, col,
+                    ))
+                }
+            }
+
+            // Builtin koleksiyon constructor ve static çağrılar
             Token::TypeList | Token::TypeMap | Token::TypeHashMap | Token::TypeTreeMap | Token::TypePair => {
                 let class = match self.current() {
                     Token::TypeList    => "List",
@@ -1063,10 +1160,9 @@ impl Parser {
                 }
             }
 
-            // Parantez — (expr)
+            // Parantez — (expr) veya lambda
             Token::LParen => {
                 self.advance();
-                // Lambda mı? — (a, b) -> ...
                 if self.is_lambda() {
                     self.parse_lambda()
                 } else {
@@ -1076,25 +1172,30 @@ impl Parser {
                 }
             }
 
-            // Prefix unary operatörler
+            // Prefix unary
             Token::Minus => {
                 self.advance();
-                let expr = self.parse_expr(20)?;
+                let expr = self.parse_expr(25)?;
                 Ok(Expr::UnaryOp { op: UnaryOp::Neg, expr: Box::new(expr) })
             }
             Token::Bang => {
                 self.advance();
-                let expr = self.parse_expr(20)?;
+                let expr = self.parse_expr(25)?;
                 Ok(Expr::UnaryOp { op: UnaryOp::Not, expr: Box::new(expr) })
+            }
+            Token::Tilde => {
+                self.advance();
+                let expr = self.parse_expr(25)?;
+                Ok(Expr::UnaryOp { op: UnaryOp::BitNot, expr: Box::new(expr) })
             }
             Token::PlusPlus => {
                 self.advance();
-                let expr = self.parse_expr(20)?;
+                let expr = self.parse_expr(25)?;
                 Ok(Expr::UnaryOp { op: UnaryOp::PreInc, expr: Box::new(expr) })
             }
             Token::MinusMinus => {
                 self.advance();
-                let expr = self.parse_expr(20)?;
+                let expr = self.parse_expr(25)?;
                 Ok(Expr::UnaryOp { op: UnaryOp::PreDec, expr: Box::new(expr) })
             }
 
@@ -1111,29 +1212,40 @@ impl Parser {
     // Pratt parser — operatör öncelikleri
     fn infix_binding_power(&self) -> Option<(BinOp, u8, u8)> {
         match self.current() {
+            // Assignments — sağ-asosiyatif (right_bp = left_bp + 1)
             Token::Eq       => Some((BinOp::Assign,    1,  2)),
             Token::PlusEq   => Some((BinOp::AddAssign, 1,  2)),
             Token::MinusEq  => Some((BinOp::SubAssign, 1,  2)),
             Token::StarEq   => Some((BinOp::MulAssign, 1,  2)),
             Token::SlashEq  => Some((BinOp::DivAssign, 1,  2)),
+            // Logical
             Token::PipePipe => Some((BinOp::Or,        3,  4)),
             Token::AndAnd   => Some((BinOp::And,       5,  6)),
-            Token::EqEq     => Some((BinOp::Eq,        7,  8)),
-            Token::BangEq   => Some((BinOp::Ne,        7,  8)),
-            Token::Lt       => Some((BinOp::Lt,        9, 10)),
-            Token::LtEq     => Some((BinOp::Le,        9, 10)),
-            Token::Gt       => Some((BinOp::Gt,        9, 10)),
-            Token::GtEq     => Some((BinOp::Ge,        9, 10)),
-            Token::Plus     => Some((BinOp::Add,      11, 12)),
-            Token::Minus    => Some((BinOp::Sub,      11, 12)),
-            Token::Star     => Some((BinOp::Mul,      13, 14)),
-            Token::Slash    => Some((BinOp::Div,      13, 14)),
-            Token::Percent  => Some((BinOp::Mod,      13, 14)),
+            // Bitwise
+            Token::Pipe     => Some((BinOp::BitOr,     7,  8)),
+            Token::Caret    => Some((BinOp::BitXor,    9, 10)),
+            Token::Amp      => Some((BinOp::BitAnd,   11, 12)),
+            // Comparison
+            Token::EqEq     => Some((BinOp::Eq,       13, 14)),
+            Token::BangEq   => Some((BinOp::Ne,       13, 14)),
+            Token::Lt       => Some((BinOp::Lt,       15, 16)),
+            Token::LtEq     => Some((BinOp::Le,       15, 16)),
+            Token::Gt       => Some((BinOp::Gt,       15, 16)),
+            Token::GtEq     => Some((BinOp::Ge,       15, 16)),
+            // Shift
+            Token::LtLt     => Some((BinOp::Shl,      17, 18)),
+            Token::GtGt     => Some((BinOp::Shr,      17, 18)),
+            // Additive
+            Token::Plus     => Some((BinOp::Add,      19, 20)),
+            Token::Minus    => Some((BinOp::Sub,      19, 20)),
+            // Multiplicative
+            Token::Star     => Some((BinOp::Mul,      21, 22)),
+            Token::Slash    => Some((BinOp::Div,      21, 22)),
+            Token::Percent  => Some((BinOp::Mod,      21, 22)),
             _               => None,
         }
     }
 
-    // Lambda tespiti — (a, b) -> ... ya da (a) -> ...
     fn is_lambda(&self) -> bool {
         let mut i = self.pos;
         loop {

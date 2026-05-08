@@ -118,7 +118,9 @@ impl BorrowChecker {
                 Item::Class(c)     => self.check_class(c),
                 Item::Enum(e)      => self.check_enum(e),
                 Item::Exception(e) => self.check_exception(e),
-                Item::Interface(_) => {}
+                Item::Interface(_)   => {}
+                Item::Const(_)       => {}
+                Item::TypeAlias(_)   => {}
             }
         }
         &self.errors
@@ -127,7 +129,11 @@ impl BorrowChecker {
     // ── Tip yardımcıları ─────────────────────────────────────────────────────
 
     fn is_copy(ty: &Type) -> bool {
-        matches!(ty, Type::Integer | Type::Float | Type::Boolean)
+        matches!(ty,
+            Type::Integer | Type::Float | Type::Boolean |
+            Type::U8 | Type::U16 | Type::U32 | Type::U64 |
+            Type::I8 | Type::I16 | Type::I32 | Type::I64
+        )
     }
 
     // Mutasyon yapan koleksiyon metodları
@@ -461,6 +467,11 @@ impl BorrowChecker {
             Expr::Index { object, index } => {
                 self.check_expr_operand(object, false);
                 self.check_expr_operand(index, false);
+            }
+
+            // Cast — inner expression kontrol edilir
+            Expr::Cast { expr, .. } => {
+                self.check_expr_operand(expr, do_move);
             }
 
             // Literaller ve this/super — kontrol gerekmez

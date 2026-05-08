@@ -89,7 +89,7 @@ pub struct ConstructorInfo {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Scope — local değişkenler
+// Scope
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -128,6 +128,7 @@ impl Scope {
 
 pub struct TypeChecker {
     classes            : HashMap<String, ClassInfo>,
+    type_aliases       : HashMap<String, Type>,
     pub errors         : Vec<TypeError>,
     current_class      : Option<String>,
     current_return_ty  : Option<Option<Type>>,
@@ -139,6 +140,7 @@ impl TypeChecker {
     pub fn new() -> Self {
         let mut tc = TypeChecker {
             classes           : HashMap::new(),
+            type_aliases      : HashMap::new(),
             errors            : Vec::new(),
             current_class     : None,
             current_return_ty : None,
@@ -155,10 +157,12 @@ impl TypeChecker {
         self.collect_symbols(module);
         for item in &module.items {
             match item {
-                Item::Class(c)     => self.check_class(c),
-                Item::Interface(i) => self.check_interface(i),
-                Item::Enum(e)      => self.check_enum(e),
-                Item::Exception(e) => self.check_exception(e),
+                Item::Class(c)          => self.check_class(c),
+                Item::Interface(i)      => self.check_interface(i),
+                Item::Enum(e)           => self.check_enum(e),
+                Item::Exception(e)      => self.check_exception(e),
+                Item::Const(c)          => self.check_const_item(c),
+                Item::TypeAlias(_)      => {} // sadece sembol tablosunda
             }
         }
         &self.errors
@@ -173,6 +177,10 @@ impl TypeChecker {
                 Item::Interface(i) => self.register_interface(i),
                 Item::Enum(e)      => self.register_enum(e),
                 Item::Exception(e) => self.register_exception(e),
+                Item::Const(_)     => {} // check aşamasında kontrol edilecek
+                Item::TypeAlias(a) => {
+                    self.type_aliases.insert(a.name.clone(), a.ty.clone());
+                }
             }
         }
     }
@@ -180,7 +188,6 @@ impl TypeChecker {
     fn register_class(&mut self, c: &ClassDecl) {
         let mut info = ClassInfo {
             kind        : if c.abstract_ { ClassKind::Abstract } else { ClassKind::Concrete },
-            // @manual sınıflar için özel kind eklenebilir, şimdilik Concrete
             generics    : c.generics.clone(),
             extends     : c.extends.clone(),
             implements  : c.implements.clone(),
@@ -306,6 +313,14 @@ impl TypeChecker {
         self.classes.insert(e.name.clone(), info);
     }
 
+    // ── Const item kontrolü ───────────────────────────────────────────────────
+
+    fn check_const_item(&mut self, c: &ConstDecl) {
+        self.check_type_exists(&c.ty, &format!("const '{}'", c.name));
+        let val_ty = self.infer_expr(&c.value);
+        self.check_assignable(&c.ty, &val_ty, &format!("const '{}' initializer", c.name));
+    }
+
     // ── Geçiş 2: detaylı kontrol ──────────────────────────────────────────────
 
     fn check_class(&mut self, c: &ClassDecl) {
@@ -344,7 +359,6 @@ impl TypeChecker {
         }
 
         for f in &c.fields {
-            // @manual sınıflarda RawPtr field'larına izin ver
             if !c.manual {
                 if matches!(f.ty, Type::RawPtr(_)) {
                     self.error(format!(
@@ -386,7 +400,7 @@ impl TypeChecker {
         for m in &i.methods {
             if m.body.is_some() {
                 self.error(format!(
-                    "interface method '{}::{}' cannot have a body — interfaces only declare signatures",
+                    "interface method '{}::{}' cannot have a body",
                     i.name, m.name
                 ));
             }
@@ -672,7 +686,6 @@ impl TypeChecker {
                     self.pop_scope();
                 }
 
-                // Enum exhaustiveness: tüm variant'lar kapsanmalı
                 if let Type::Named(enum_name) = &switch_ty {
                     let enum_name = enum_name.clone();
                     if let Some(info) = self.classes.get(&enum_name).cloned() {
@@ -773,8 +786,8 @@ impl TypeChecker {
 
             Expr::Ident(name) => {
                 if let Some(var) = self.lookup_var(name) {
-                    let ty        = var.ty.clone();
-                    let non_null  = var.non_null_cast;
+                    let ty       = var.ty.clone();
+                    let non_null = var.non_null_cast;
                     if non_null {
                         return self.strip_nullable(ty);
                     }
@@ -819,7 +832,6 @@ impl TypeChecker {
 
             Expr::FieldAccess { object, field } => {
                 let obj_ty = self.infer_expr(object);
-                // Static enforcement: Ident bir class ismi ise (değişken değil) sadece static field'a izin ver
                 if let Expr::Ident(ident_name) = object.as_ref() {
                     if self.lookup_var(ident_name).is_none() && self.classes.contains_key(ident_name.as_str()) {
                         if let Some(info) = self.classes.get(ident_name.as_str()) {
@@ -873,9 +885,6 @@ impl TypeChecker {
                     }
                     return Type::Void;
                 }
-                // Parser Ident+Dot+method() daima StaticCall üretiyor.
-                // Eğer class ismi bilinen bir class değil ama local değişkense
-                // instance method call olarak yönlendir.
                 if !self.classes.contains_key(class.as_str()) {
                     if let Some(var) = self.lookup_var(class) {
                         let var_ty = var.ty.clone();
@@ -887,7 +896,6 @@ impl TypeChecker {
             }
 
             Expr::ConstructorCall { class, args } => {
-                // Builtin koleksiyon constructor'ları — List()  HashMap()  TreeMap()
                 match class.as_str() {
                     "List" => {
                         for a in args { self.infer_expr(a); }
@@ -923,13 +931,9 @@ impl TypeChecker {
                     }
                     Some(info) => {
                         if info.kind == ClassKind::Interface {
-                            self.error(format!(
-                                "cannot instantiate interface '{}'", class
-                            ));
+                            self.error(format!("cannot instantiate interface '{}'", class));
                         } else if info.kind == ClassKind::Abstract {
-                            self.error(format!(
-                                "cannot instantiate abstract class '{}'", class
-                            ));
+                            self.error(format!("cannot instantiate abstract class '{}'", class));
                         }
                         if let Some(con) = info.constructor.clone() {
                             if con.params.len() != arg_types.len() {
@@ -968,30 +972,41 @@ impl TypeChecker {
                 match op {
                     UnaryOp::Not => {
                         if !self.is_boolean(&ty) {
-                            self.error(format!(
-                                "'!' requires Boolean, found {:?}", ty
-                            ));
+                            self.error(format!("'!' requires Boolean, found {:?}", ty));
                         }
                         Type::Boolean
                     }
                     UnaryOp::Neg => {
                         if !self.is_numeric(&ty) {
-                            self.error(format!(
-                                "unary '-' requires numeric type, found {:?}", ty
-                            ));
+                            self.error(format!("unary '-' requires numeric type, found {:?}", ty));
+                        }
+                        ty
+                    }
+                    UnaryOp::BitNot => {
+                        if !self.is_integer_type(&ty) {
+                            self.error(format!("'~' requires integer type, found {:?}", ty));
                         }
                         ty
                     }
                     UnaryOp::PreInc | UnaryOp::PreDec
                     | UnaryOp::PostInc | UnaryOp::PostDec => {
                         if !self.is_numeric(&ty) {
-                            self.error(format!(
-                                "'++/--' requires numeric type, found {:?}", ty
-                            ));
+                            self.error(format!("'++/--' requires numeric type, found {:?}", ty));
                         }
                         ty
                     }
                 }
+            }
+
+            Expr::Cast { expr, ty } => {
+                let source = self.infer_expr(expr);
+                if !self.is_valid_cast(&source, ty) {
+                    self.error(format!(
+                        "invalid cast from {:?} to {:?} — only numeric casts and pointer casts are valid",
+                        source, ty
+                    ));
+                }
+                ty.clone()
             }
 
             Expr::Ternary { cond, then, else_ } => {
@@ -1013,8 +1028,6 @@ impl TypeChecker {
             }
 
             Expr::Lambda { params, body } => {
-                // Lambda parametrelerini Unknown tipte scope'a ekle
-                // (tam tip çıkarımı olmadan false-positive hatayı önlemek için)
                 self.push_scope();
                 for param in params {
                     self.define_var(param, Type::Named("Unknown".to_string()), false);
@@ -1029,9 +1042,9 @@ impl TypeChecker {
                 let idx_ty = self.infer_expr(index);
                 match &obj_ty {
                     Type::List(elem) => {
-                        if !matches!(idx_ty, Type::Integer) {
+                        if !self.is_integer_type(&idx_ty) {
                             self.error(format!(
-                                "List index must be Integer, found {:?}", idx_ty
+                                "List index must be integer type, found {:?}", idx_ty
                             ));
                         }
                         *elem.clone()
@@ -1052,11 +1065,11 @@ impl TypeChecker {
 
     fn infer_binop(
         &mut self,
-        op    : &BinOp,
-        left  : &Type,
-        right : &Type,
+        op         : &BinOp,
+        left       : &Type,
+        right      : &Type,
         left_expr  : &Expr,
-        _right_expr : &Expr,
+        _right_expr: &Expr,
     ) -> Type {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
@@ -1067,11 +1080,55 @@ impl TypeChecker {
                     ));
                     return Type::Integer;
                 }
+                // Float beats everything
                 if matches!(left, Type::Float) || matches!(right, Type::Float) {
-                    Type::Float
-                } else {
-                    Type::Integer
+                    return Type::Float;
                 }
+                // Same type → same type
+                if self.types_equal(left, right) {
+                    return left.clone();
+                }
+                // Integer literal (untyped) + sized type → sized type
+                if matches!(left, Type::Integer) { return right.clone(); }
+                if matches!(right, Type::Integer) { return left.clone(); }
+                // Mixed sized types → error, require explicit cast
+                self.error(format!(
+                    "arithmetic on mixed integer types {:?} and {:?} — use 'as' to cast",
+                    left, right
+                ));
+                left.clone()
+            }
+
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                if !self.is_integer_type(left) || !self.is_integer_type(right) {
+                    self.error(format!(
+                        "bitwise operator requires integer types, found {:?} and {:?}",
+                        left, right
+                    ));
+                    return Type::Integer;
+                }
+                if self.types_equal(left, right) { return left.clone(); }
+                if matches!(left, Type::Integer)  { return right.clone(); }
+                if matches!(right, Type::Integer) { return left.clone(); }
+                self.error(format!(
+                    "bitwise op on mixed integer types {:?} and {:?} — use 'as' to cast",
+                    left, right
+                ));
+                left.clone()
+            }
+
+            BinOp::Shl | BinOp::Shr => {
+                if !self.is_integer_type(left) {
+                    self.error(format!(
+                        "shift operator requires integer type on left, found {:?}", left
+                    ));
+                }
+                if !self.is_integer_type(right) {
+                    self.error(format!(
+                        "shift amount must be integer type, found {:?}", right
+                    ));
+                }
+                left.clone()
             }
 
             BinOp::Eq | BinOp::Ne => {
@@ -1113,6 +1170,26 @@ impl TypeChecker {
                 left.clone()
             }
         }
+    }
+
+    // ── Cast validation ───────────────────────────────────────────────────────
+
+    fn is_valid_cast(&self, from: &Type, to: &Type) -> bool {
+        // integer → integer (including Integer ↔ sized types)
+        if self.is_integer_type(from) && self.is_integer_type(to) { return true; }
+        // integer → float
+        if self.is_integer_type(from) && matches!(to, Type::Float) { return true; }
+        // float → integer
+        if matches!(from, Type::Float) && self.is_integer_type(to) { return true; }
+        // float → float (no-op)
+        if matches!(from, Type::Float) && matches!(to, Type::Float) { return true; }
+        // RawPtr → RawPtr (pointer cast)
+        if matches!(from, Type::RawPtr(_)) && matches!(to, Type::RawPtr(_)) { return true; }
+        // integer → RawPtr (address-as-pointer in @manual code)
+        if self.is_integer_type(from) && matches!(to, Type::RawPtr(_)) { return true; }
+        // same type (no-op)
+        if self.types_equal(from, to) { return true; }
+        false
     }
 
     fn check_assignment_target(&mut self, expr: &Expr) {
@@ -1182,7 +1259,6 @@ impl TypeChecker {
             }
         };
 
-        // Lambda param veya çıkarılamayan tip — sessizce geç
         if class_name == "Unknown" {
             return Type::Named("Unknown".to_string());
         }
@@ -1238,6 +1314,15 @@ impl TypeChecker {
             Type::TreeMap(_, _) => "TreeMap".to_string(),
             Type::Pair(_, _)    => "Pair".to_string(),
             Type::RawPtr(_)     => "RawPtr".to_string(),
+            // Integer types — sizeOf ve diğer static metodlar
+            Type::U8  => "u8".to_string(),
+            Type::U16 => "u16".to_string(),
+            Type::U32 => "u32".to_string(),
+            Type::U64 => "u64".to_string(),
+            Type::I8  => "i8".to_string(),
+            Type::I16 => "i16".to_string(),
+            Type::I32 => "i32".to_string(),
+            Type::I64 => "i64".to_string(),
             _ => {
                 self.error(format!(
                     "cannot call method '{}' on type {:?}", method, ty
@@ -1246,7 +1331,6 @@ impl TypeChecker {
             }
         };
 
-        // Lambda param veya çıkarılamayan tip — sessizce geç
         if class_name == "Unknown" {
             return Type::Named("Unknown".to_string());
         }
@@ -1284,12 +1368,8 @@ impl TypeChecker {
             }
             Some(overloads) => {
                 for mi in &overloads {
-                    if mi.static_ != is_static {
-                        continue;
-                    }
-                    if mi.params.len() != args.len() {
-                        continue;
-                    }
+                    if mi.static_ != is_static { continue; }
+                    if mi.params.len() != args.len() { continue; }
                     self.check_member_visibility(&class_name, method, &mi.vis.clone());
                     for (i, ((_, param_ty), arg_ty)) in
                         mi.params.iter().zip(args.iter()).enumerate()
@@ -1364,7 +1444,7 @@ impl TypeChecker {
             }
             ("Map" | "HashMap" | "TreeMap", "containsKey") => Some(Type::Boolean),
             ("Map" | "HashMap" | "TreeMap", "remove")      => Some(Type::Void),
-            ("Map" | "HashMap" | "TreeMap", "keys")        => {
+            ("Map" | "HashMap" | "TreeMap", "keys") => {
                 match ty {
                     Type::HashMap(k, _) | Type::TreeMap(k, _) | Type::Map(k, _) =>
                         Some(Type::List(k.clone())),
@@ -1419,13 +1499,11 @@ impl TypeChecker {
                 }
             }
 
-            // @manual — Memory stdlib
             ("Memory", "alloc")  => Some(Type::RawPtr(Box::new(Type::Void))),
             ("Memory", "free")   => Some(Type::Void),
             ("Memory", "copy")   => Some(Type::Void),
             ("Memory", "set")    => Some(Type::Void),
 
-            // @manual — RawPtr<T> metodları
             ("RawPtr", "read") => {
                 match ty {
                     Type::RawPtr(inner) => Some(*inner.clone()),
@@ -1435,7 +1513,7 @@ impl TypeChecker {
             ("RawPtr", "write")  => Some(Type::Void),
             ("RawPtr", "offset") => Some(ty.clone()),
 
-            // sizeOf — her tip için geçerli static metod
+            // sizeOf — tüm tipler için
             (_, "sizeOf") => Some(Type::Integer),
 
             ("Exception", "message") => Some(Type::Str),
@@ -1466,6 +1544,15 @@ impl TypeChecker {
 
     // ── Tip uyumluluk ─────────────────────────────────────────────────────────
 
+    fn expand_alias(&self, ty: &Type) -> Type {
+        if let Type::Named(n) = ty {
+            if let Some(aliased) = self.type_aliases.get(n.as_str()) {
+                return self.expand_alias(aliased);
+            }
+        }
+        ty.clone()
+    }
+
     fn check_assignable(&mut self, target: &Type, source: &Type, context: &str) {
         if self.is_assignable(target, source) {
             return;
@@ -1487,22 +1574,37 @@ impl TypeChecker {
     }
 
     fn is_assignable(&self, target: &Type, source: &Type) -> bool {
+        // Expand type aliases before comparison
+        let target_exp = self.expand_alias(target);
+        let source_exp = self.expand_alias(source);
+        let target = &target_exp;
+        let source = &source_exp;
+
         if self.types_equal(target, source) {
             return true;
         }
 
         if let Type::Named(n) = source {
-            if n == "Error" {
-                return true;
-            }
+            if n == "Error" { return true; }
         }
 
+        // Float accepts Integer (untyped literal)
         if matches!(target, Type::Float) && matches!(source, Type::Integer) {
             return true;
         }
 
-        // Boş koleksiyon literal'ı (Unknown wildcard) herhangi bir koleksiyona atanabilir
-        // Örn: List<Task> tasks = List()  →  List<Unknown> → List<Task> OK
+        // Integer literal → any sized integer type
+        if self.is_sized_integer(target) && matches!(source, Type::Integer) {
+            return true;
+        }
+
+        // Sized integer → Integer (untyped bigint)
+        if matches!(target, Type::Integer) && self.is_sized_integer(source) {
+            return true;
+        }
+
+        // No implicit widening between sized types (u8 ← u16 is error)
+
         if let (Type::List(te), Type::List(ts)) = (target, source) {
             if matches!(ts.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
             return self.is_assignable(te, ts);
@@ -1519,7 +1621,6 @@ impl TypeChecker {
             if matches!(sk.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
             return self.is_assignable(tk, sk) && self.is_assignable(tv, sv);
         }
-        // Map (interface) ← HashMap veya TreeMap (implementasyonlar)
         if let Type::Map(tk, tv) = target {
             let (sk, sv) = match source {
                 Type::HashMap(k, v) | Type::TreeMap(k, v) => (k, v),
@@ -1533,54 +1634,39 @@ impl TypeChecker {
             return self.is_assignable(ta, sa) && self.is_assignable(tb, sb);
         }
 
-        // RawPtr<Void> herhangi bir RawPtr<T>'ye atanabilir (C'nin void* gibi)
         if let (Type::RawPtr(_), Type::RawPtr(s_inner)) = (target, source) {
             if matches!(s_inner.as_ref(), Type::Void | Type::Named(_)) { return true; }
         }
 
         if let Type::Nullable(t_inner) = target {
             if let Type::Nullable(s_inner) = source {
-                // null literal (Nullable(Unknown)) can be assigned to any nullable
                 if let Type::Named(n) = s_inner.as_ref() {
-                    if n == "Unknown" {
-                        return true;
-                    }
+                    if n == "Unknown" { return true; }
                 }
                 return self.is_assignable(t_inner, s_inner);
             }
-            // T → T?: non-nullable value is assignable to its nullable counterpart
             return self.is_assignable(t_inner, source);
         }
 
         if let (Type::Named(t), Type::Named(s)) = (target, source) {
-            if self.is_subtype(s, t) {
-                return true;
-            }
+            if self.is_subtype(s, t) { return true; }
         }
 
         if let (Type::Named(t), Type::Named(s)) = (target, source) {
-            if t == "Exception" && self.is_exception_subtype(s) {
-                return true;
-            }
+            if t == "Exception" && self.is_exception_subtype(s) { return true; }
         }
 
         false
     }
 
     fn is_subtype(&self, child: &str, parent: &str) -> bool {
-        if child == parent {
-            return true;
-        }
+        if child == parent { return true; }
         if let Some(info) = self.classes.get(child) {
             if let Some(p) = &info.extends {
-                if self.is_subtype(p, parent) {
-                    return true;
-                }
+                if self.is_subtype(p, parent) { return true; }
             }
             for iface in &info.implements {
-                if self.is_subtype(iface, parent) {
-                    return true;
-                }
+                if self.is_subtype(iface, parent) { return true; }
             }
         }
         false
@@ -1593,6 +1679,14 @@ impl TypeChecker {
             (Type::Boolean,  Type::Boolean)  => true,
             (Type::Str,      Type::Str)      => true,
             (Type::Void,     Type::Void)     => true,
+            (Type::U8,  Type::U8)  => true,
+            (Type::U16, Type::U16) => true,
+            (Type::U32, Type::U32) => true,
+            (Type::U64, Type::U64) => true,
+            (Type::I8,  Type::I8)  => true,
+            (Type::I16, Type::I16) => true,
+            (Type::I32, Type::I32) => true,
+            (Type::I64, Type::I64) => true,
             (Type::Named(a), Type::Named(b)) => a == b,
             (Type::List(a),  Type::List(b))  => self.types_equal(a, b),
             (Type::Nullable(a), Type::Nullable(b)) => self.types_equal(a, b),
@@ -1615,7 +1709,27 @@ impl TypeChecker {
     }
 
     fn is_numeric(&self, ty: &Type) -> bool {
-        matches!(ty, Type::Integer | Type::Float)
+        matches!(ty,
+            Type::Integer | Type::Float |
+            Type::U8 | Type::U16 | Type::U32 | Type::U64 |
+            Type::I8 | Type::I16 | Type::I32 | Type::I64
+        )
+    }
+
+    fn is_integer_type(&self, ty: &Type) -> bool {
+        matches!(ty,
+            Type::Integer |
+            Type::U8 | Type::U16 | Type::U32 | Type::U64 |
+            Type::I8 | Type::I16 | Type::I32 | Type::I64
+        )
+    }
+
+    // Sized integers only (not the generic Integer type)
+    fn is_sized_integer(&self, ty: &Type) -> bool {
+        matches!(ty,
+            Type::U8 | Type::U16 | Type::U32 | Type::U64 |
+            Type::I8 | Type::I16 | Type::I32 | Type::I64
+        )
     }
 
     fn is_boolean(&self, ty: &Type) -> bool {
@@ -1624,21 +1738,15 @@ impl TypeChecker {
 
     fn is_throwable(&self, ty: &Type) -> bool {
         match ty {
-            Type::Named(n) => {
-                n == "Exception" || self.is_exception_subtype(n)
-            }
+            Type::Named(n) => n == "Exception" || self.is_exception_subtype(n),
             _ => false,
         }
     }
 
     fn is_exception_subtype(&self, name: &str) -> bool {
-        if name == "Exception" {
-            return true;
-        }
+        if name == "Exception" { return true; }
         if let Some(info) = self.classes.get(name) {
-            if info.kind == ClassKind::Exception {
-                return true;
-            }
+            if info.kind == ClassKind::Exception { return true; }
             if let Some(parent) = &info.extends {
                 return self.is_exception_subtype(parent);
             }
@@ -1719,12 +1827,10 @@ impl TypeChecker {
                 Stmt::Throw(_)  => return true,
 
                 Stmt::If { then, else_if, else_: Some(else_body), .. } => {
-                    let then_ok    = self.all_paths_return(then);
+                    let then_ok     = self.all_paths_return(then);
                     let else_ifs_ok = else_if.iter().all(|(_, b)| self.all_paths_return(b));
-                    let else_ok    = self.all_paths_return(else_body);
-                    if then_ok && else_ifs_ok && else_ok {
-                        return true;
-                    }
+                    let else_ok     = self.all_paths_return(else_body);
+                    if then_ok && else_ifs_ok && else_ok { return true; }
                 }
 
                 Stmt::Switch { cases, .. } => {
@@ -1734,9 +1840,7 @@ impl TypeChecker {
                 }
 
                 Stmt::Block(b) => {
-                    if self.all_paths_return(b) {
-                        return true;
-                    }
+                    if self.all_paths_return(b) { return true; }
                 }
 
                 Stmt::TryCatch { try_body, catches, finally_body: _ } => {
@@ -1797,9 +1901,7 @@ impl TypeChecker {
     fn method_in_parent(&self, parent: &Option<String>, method_name: &str) -> bool {
         if let Some(p) = parent {
             if let Some(info) = self.classes.get(p.as_str()) {
-                if info.methods.contains_key(method_name) {
-                    return true;
-                }
+                if info.methods.contains_key(method_name) { return true; }
                 return self.method_in_parent(&info.extends, method_name);
             }
         }
@@ -1838,6 +1940,7 @@ impl TypeChecker {
                     self.check_type_exists(p, context);
                 }
             }
+            // Primitives and fixed-size integers are always valid
             _ => {}
         }
     }
@@ -1852,6 +1955,7 @@ impl TypeChecker {
             | "RawPtr" | "Void"
             | "Lambda" | "Unknown" | "Error"
         ) || self.classes.contains_key(name)
+          || self.type_aliases.contains_key(name)
     }
 
     // ── Scope yönetimi ────────────────────────────────────────────────────────

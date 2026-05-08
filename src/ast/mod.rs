@@ -2,14 +2,12 @@
 // Arimo Lang — AST (Abstract Syntax Tree)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── Konum bilgisi ─────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub struct Span {
     pub line : usize,
     pub col  : usize,
 }
 
-// ── Erişim belirteçleri ───────────────────────────────────────────────────────
 #[derive(Debug, Clone, PartialEq)]
 pub enum Visibility {
     Public,
@@ -27,6 +25,10 @@ pub enum Type {
     Boolean,
     Str,
     Void,
+
+    // Fixed-size integer types
+    U8, U16, U32, U64,
+    I8, I16, I32, I64,
 
     // Koleksiyonlar
     List(Box<Type>),
@@ -58,8 +60,7 @@ pub enum Expr {
     StrLit(String),
     NullLit,
 
-    // String interpolation — "Merhaba ${name}!"
-    // Vec<StringPart> — her parça ya metin ya expression
+    // String interpolation
     StrInterp(Vec<StringPart>),
 
     // Değişken / isim
@@ -69,34 +70,34 @@ pub enum Expr {
     This,
     Super,
 
-    // Alan erişimi — this.name  player.score
+    // Alan erişimi
     FieldAccess {
         object : Box<Expr>,
         field  : String,
     },
 
-    // Null-safe erişim/çağrı — user?.name  user?.getName()
+    // Null-safe erişim/çağrı
     NullSafeAccess {
         object : Box<Expr>,
         field  : String,
-        args   : Option<Vec<Expr>>,  // None = field, Some = method call
+        args   : Option<Vec<Expr>>,
     },
 
-    // Metod çağrısı — task.complete()
+    // Metod çağrısı
     MethodCall {
         object : Box<Expr>,
         method : String,
         args   : Vec<Expr>,
     },
 
-    // Statik metod çağrısı — Task.create(...)
+    // Statik metod çağrısı
     StaticCall {
         class  : String,
         method : String,
         args   : Vec<Expr>,
     },
 
-    // Constructor çağrısı — Task(...)
+    // Constructor çağrısı
     ConstructorCall {
         class : String,
         args  : Vec<Expr>,
@@ -115,20 +116,26 @@ pub enum Expr {
         expr : Box<Expr>,
     },
 
-    // Ternary — isUrgent ? "urgent" : "normal"
+    // Type cast — expr as Type
+    Cast {
+        expr : Box<Expr>,
+        ty   : Type,
+    },
+
+    // Ternary
     Ternary {
         cond  : Box<Expr>,
         then  : Box<Expr>,
         else_ : Box<Expr>,
     },
 
-    // Lambda — (task) -> task.isDone()
+    // Lambda
     Lambda {
         params : Vec<String>,
         body   : Box<Expr>,
     },
 
-    // Array/List index — items[0]
+    // Array/List index
     Index {
         object : Box<Expr>,
         index  : Box<Expr>,
@@ -137,8 +144,8 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub enum StringPart {
-    Text(String),       // düz metin parçası
-    Interp(Box<Expr>),  // ${expression}
+    Text(String),
+    Interp(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +153,9 @@ pub enum BinOp {
     Add, Sub, Mul, Div, Mod,
     Eq, Ne, Lt, Le, Gt, Ge,
     And, Or,
+    // Bitwise
+    BitAnd, BitOr, BitXor, Shl, Shr,
+    // Assignments
     Assign,
     AddAssign, SubAssign, MulAssign, DivAssign,
 }
@@ -154,6 +164,7 @@ pub enum BinOp {
 pub enum UnaryOp {
     Neg,        // -x
     Not,        // !x
+    BitNot,     // ~x
     PreInc,     // ++x
     PreDec,     // --x
     PostInc,    // x++
@@ -163,23 +174,18 @@ pub enum UnaryOp {
 // ── Statement ─────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    // Değişken tanımı — String name = "Arimo";
     VarDecl {
         ty    : Type,
         name  : String,
         value : Option<Expr>,
     },
 
-    // Expression statement — task.complete();
     ExprStmt(Expr),
 
-    // return
     Return(Option<Expr>),
 
-    // throw
     Throw(Expr),
 
-    // if / else if / else
     If {
         cond     : Expr,
         then     : Vec<Stmt>,
@@ -187,13 +193,11 @@ pub enum Stmt {
         else_    : Option<Vec<Stmt>>,
     },
 
-    // while
     While {
         cond : Expr,
         body : Vec<Stmt>,
     },
 
-    // for-each — for (Task task : this.tasks)
     ForEach {
         ty   : Type,
         name : String,
@@ -201,7 +205,6 @@ pub enum Stmt {
         body : Vec<Stmt>,
     },
 
-    // klasik for — for (Integer i = 0; i < 10; i++)
     For {
         init : Box<Stmt>,
         cond : Expr,
@@ -209,24 +212,20 @@ pub enum Stmt {
         body : Vec<Stmt>,
     },
 
-    // switch
     Switch {
         expr  : Expr,
         cases : Vec<SwitchCase>,
     },
 
-    // try / catch / finally
     TryCatch {
         try_body     : Vec<Stmt>,
         catches      : Vec<CatchClause>,
         finally_body : Option<Vec<Stmt>>,
     },
 
-    // break / continue
     Break,
     Continue,
 
-    // Blok — { ... }
     Block(Vec<Stmt>),
 }
 
@@ -252,7 +251,7 @@ pub struct Field {
     pub static_    : bool,
     pub name       : String,
     pub ty         : Type,
-    pub value      : Option<Expr>,   // static field'lar için başlangıç değeri
+    pub value      : Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,8 +268,8 @@ pub struct Method {
     pub override_  : bool,
     pub name       : String,
     pub params     : Vec<Param>,
-    pub return_ty  : Option<Type>,   // None = main() gibi dönüş tipi yok
-    pub body       : Option<Vec<Stmt>>, // None = abstract metod
+    pub return_ty  : Option<Type>,
+    pub body       : Option<Vec<Stmt>>,
 }
 
 #[derive(Debug, Clone)]
@@ -286,9 +285,9 @@ pub struct Constructor {
 pub struct ClassDecl {
     pub visibility  : Visibility,
     pub abstract_   : bool,
-    pub manual      : bool,         // @manual annotation — otomatik bellek yönetimi devre dışı
+    pub manual      : bool,
     pub name        : String,
-    pub generics    : Vec<String>,       // class Pair<First, Second>
+    pub generics    : Vec<String>,
     pub extends     : Option<String>,
     pub implements  : Vec<String>,
     pub fields      : Vec<Field>,
@@ -300,7 +299,7 @@ pub struct ClassDecl {
 pub struct InterfaceDecl {
     pub name     : String,
     pub generics : Vec<String>,
-    pub methods  : Vec<Method>,          // sadece imza, body yok
+    pub methods  : Vec<Method>,
 }
 
 #[derive(Debug, Clone)]
@@ -316,18 +315,32 @@ pub struct ExceptionDecl {
     pub visibility  : Visibility,
     pub manual      : bool,
     pub name        : String,
-    pub extends     : String,            // her zaman Exception'dan extends
+    pub extends     : String,
     pub fields      : Vec<Field>,
     pub constructor : Option<Constructor>,
     pub methods     : Vec<Method>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstDecl {
+    pub visibility : Visibility,
+    pub name       : String,
+    pub ty         : Type,
+    pub value      : Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeAliasDecl {
+    pub name : String,
+    pub ty   : Type,
 }
 
 // ── Program (kök node) ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Module {
-    pub path    : String,          // "arimo.task.model"
-    pub imports : Vec<String>,     // ["arimo.io", "arimo.task.exception"]
+    pub path    : String,
+    pub imports : Vec<String>,
     pub items   : Vec<Item>,
 }
 
@@ -337,4 +350,6 @@ pub enum Item {
     Interface(InterfaceDecl),
     Enum(EnumDecl),
     Exception(ExceptionDecl),
+    Const(ConstDecl),
+    TypeAlias(TypeAliasDecl),
 }

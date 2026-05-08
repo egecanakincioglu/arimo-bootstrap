@@ -49,6 +49,16 @@ pub enum Token {
     TypeException,    // Exception — built-in base exception
     TypeRawPtr,       // RawPtr<T> — @manual sınıflarda ham bellek erişimi
 
+    // ── Fixed-size integer types ──────────────────────────────────────────
+    TypeU8,
+    TypeU16,
+    TypeU32,
+    TypeU64,
+    TypeI8,
+    TypeI16,
+    TypeI32,
+    TypeI64,
+
     // ── Standard library ─────────────────────────────────────────────────
     StdIO,            // IO.print() IO.read()
     StdMath,          // Math.sqrt() Math.PI
@@ -72,6 +82,11 @@ pub enum Token {
 
     // ── Null safety ──────────────────────────────────────────────────────
     Null,
+
+    // ── Additional keywords ───────────────────────────────────────────────
+    As,        // as  — type cast
+    Const,     // const — compile-time constant
+    KwType,    // type — type alias declaration
 
     // ── Operators ────────────────────────────────────────────────────────
     Plus,
@@ -98,6 +113,14 @@ pub enum Token {
     Arrow,       // ->  lambda
     Question,    // ?   nullable + ternary (parser bağlama göre ayırt eder)
     QuestionDot, // ?.  null-safe erişim
+
+    // ── Bitwise operators ─────────────────────────────────────────────────
+    Amp,         // &   bitwise AND
+    Pipe,        // |   bitwise OR
+    Caret,       // ^   bitwise XOR
+    Tilde,       // ~   bitwise NOT (prefix unary)
+    LtLt,        // <<  left shift
+    GtGt,        // >>  right shift
 
     // ── Delimiters ───────────────────────────────────────────────────────
     LParen,       // (
@@ -138,8 +161,8 @@ pub struct Lexer<'a> {
     chars         : std::iter::Peekable<std::str::CharIndices<'a>>,
     line          : usize,
     col           : usize,
-    in_interp     : bool,   // string interpolation içinde miyiz?
-    interp_depth  : usize,  // iç içe {} sayısı
+    in_interp     : bool,
+    interp_depth  : usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -206,11 +229,43 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_number(&mut self, first: char) -> Token {
+        // Hex literal: 0x... veya 0X...
+        if first == '0' {
+            match self.peek() {
+                Some('x') | Some('X') => {
+                    self.advance();
+                    let mut hex = String::new();
+                    while let Some(c) = self.peek() {
+                        if c.is_ascii_hexdigit() || c == '_' {
+                            if c != '_' { hex.push(c); }
+                            self.advance();
+                        } else { break; }
+                    }
+                    return Token::Int(i64::from_str_radix(&hex, 16).unwrap_or(0));
+                }
+                Some('b') | Some('B') => {
+                    self.advance();
+                    let mut bin = String::new();
+                    while let Some(c) = self.peek() {
+                        if c == '0' || c == '1' || c == '_' {
+                            if c != '_' { bin.push(c); }
+                            self.advance();
+                        } else { break; }
+                    }
+                    return Token::Int(i64::from_str_radix(&bin, 2).unwrap_or(0));
+                }
+                _ => {}
+            }
+        }
+
         let mut num      = String::from(first);
         let mut is_float = false;
         loop {
             match self.peek() {
-                Some(c) if c.is_ascii_digit() => { num.push(c); self.advance(); }
+                Some(c) if c.is_ascii_digit() || c == '_' => {
+                    if c != '_' { num.push(c); }
+                    self.advance();
+                }
                 Some('.') if !is_float => {
                     if self.peek_next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
                         is_float = true;
@@ -263,9 +318,17 @@ impl<'a> Lexer<'a> {
             "TreeMap"     => Token::TypeTreeMap,
             "Pair"        => Token::TypePair,
             "Exception"   => Token::TypeException,
-
-            // Built-in @manual tipleri
             "RawPtr"      => Token::TypeRawPtr,
+
+            // Fixed-size integer types
+            "u8"          => Token::TypeU8,
+            "u16"         => Token::TypeU16,
+            "u32"         => Token::TypeU32,
+            "u64"         => Token::TypeU64,
+            "i8"          => Token::TypeI8,
+            "i16"         => Token::TypeI16,
+            "i32"         => Token::TypeI32,
+            "i64"         => Token::TypeI64,
 
             // Standard library
             "IO"          => Token::StdIO,
@@ -295,19 +358,20 @@ impl<'a> Lexer<'a> {
             "true"        => Token::Bool(true),
             "false"       => Token::Bool(false),
 
+            // Cast & declarations
+            "as"          => Token::As,
+            "const"       => Token::Const,
+            "type"        => Token::KwType,
+
             _             => Token::Ident(word),
         }
     }
 
-    // String interpolation destekli string okuma
-    // "Merhaba ${name}!" →
-    //   Str("Merhaba ")  DollarLBrace  Ident("name")  InterpolEnd  Str("!")
     fn read_string(&mut self, tokens: &mut Vec<SpannedToken>) {
         let mut buf = String::new();
 
         loop {
             match self.advance() {
-                // String bitti
                 Some((_, '"')) => {
                     if !buf.is_empty() {
                         let span = self.span();
@@ -316,10 +380,8 @@ impl<'a> Lexer<'a> {
                     }
                     break;
                 }
-
-                // Interpolation başlıyor: ${
                 Some((_, '$')) if self.peek() == Some('{') => {
-                    self.advance(); // { yi yut
+                    self.advance();
                     if !buf.is_empty() {
                         let span = self.span();
                         tokens.push(SpannedToken { token: Token::Str(buf.clone()), span });
@@ -327,15 +389,10 @@ impl<'a> Lexer<'a> {
                     }
                     let span = self.span();
                     tokens.push(SpannedToken { token: Token::DollarLBrace, span });
-
-                    // interpolation içindeki expression'ı tokenize et
                     self.tokenize_interpolation(tokens);
-
                     let span = self.span();
                     tokens.push(SpannedToken { token: Token::InterpolEnd, span });
                 }
-
-                // Escape karakterler
                 Some((_, '\\')) => match self.advance() {
                     Some((_, 'n'))  => buf.push('\n'),
                     Some((_, 't'))  => buf.push('\t'),
@@ -344,14 +401,12 @@ impl<'a> Lexer<'a> {
                     Some((_, '$'))  => buf.push('$'),
                     _               => {}
                 },
-
                 Some((_, c)) => buf.push(c),
                 None         => break,
             }
         }
     }
 
-    // Interpolation içindeki expression'ı } gelene kadar tokenize et
     fn tokenize_interpolation(&mut self, tokens: &mut Vec<SpannedToken>) {
         let mut depth = 1usize;
         loop {
@@ -367,7 +422,7 @@ impl<'a> Lexer<'a> {
                 Some('}') => {
                     depth -= 1;
                     if depth == 0 {
-                        self.advance(); // kapanış } yut
+                        self.advance();
                         break;
                     } else {
                         self.advance();
@@ -391,6 +446,10 @@ impl<'a> Lexer<'a> {
                             '*' => Token::Star,
                             '/' => Token::Slash,
                             '%' => Token::Percent,
+                            '&' => if self.peek() == Some('&') { self.advance(); Token::AndAnd } else { Token::Amp },
+                            '|' => if self.peek() == Some('|') { self.advance(); Token::PipePipe } else { Token::Pipe },
+                            '^' => Token::Caret,
+                            '~' => Token::Tilde,
                             other => Token::Unknown(other),
                         }
                     };
@@ -444,12 +503,23 @@ impl<'a> Lexer<'a> {
                         Some('=') => { self.advance(); Token::EqEq }
                         _         => Token::Eq
                     },
-                    '!' => if self.peek() == Some('=') { self.advance(); Token::BangEq } else { Token::Bang    },
-                    '<' => if self.peek() == Some('=') { self.advance(); Token::LtEq   } else { Token::Lt      },
-                    '>' => if self.peek() == Some('=') { self.advance(); Token::GtEq   } else { Token::Gt      },
+                    '!' => if self.peek() == Some('=') { self.advance(); Token::BangEq } else { Token::Bang },
 
-                    '&' => if self.peek() == Some('&') { self.advance(); Token::AndAnd   } else { Token::Unknown('&') },
-                    '|' => if self.peek() == Some('|') { self.advance(); Token::PipePipe } else { Token::Unknown('|') },
+                    '<' => match self.peek() {
+                        Some('<') => { self.advance(); Token::LtLt }
+                        Some('=') => { self.advance(); Token::LtEq }
+                        _         => Token::Lt
+                    },
+                    '>' => match self.peek() {
+                        Some('>') => { self.advance(); Token::GtGt }
+                        Some('=') => { self.advance(); Token::GtEq }
+                        _         => Token::Gt
+                    },
+
+                    '&' => if self.peek() == Some('&') { self.advance(); Token::AndAnd   } else { Token::Amp      },
+                    '|' => if self.peek() == Some('|') { self.advance(); Token::PipePipe } else { Token::Pipe     },
+                    '^' => Token::Caret,
+                    '~' => Token::Tilde,
 
                     '?' => if self.peek() == Some('.') { self.advance(); Token::QuestionDot } else { Token::Question },
 
