@@ -636,8 +636,31 @@ impl Parser {
             Token::TypePair    | Token::TypeException | Token::TypeRawPtr |
             Token::TypeU8  | Token::TypeU16 | Token::TypeU32 | Token::TypeU64 |
             Token::TypeI8  | Token::TypeI16 | Token::TypeI32 | Token::TypeI64 |
+            Token::TypeArray | Token::TypeSlice |
             Token::Ident(_)
         )
+    }
+
+    // (T, T, ...) -> R pattern'ını lookahead ile tespit et
+    fn is_fn_ptr_type_ahead(&self) -> bool {
+        let mut i = self.pos;
+        if !matches!(self.tokens.get(i).map(|t| &t.token), Some(&Token::LParen)) {
+            return false;
+        }
+        i += 1;
+        let mut depth = 1usize;
+        while i < self.tokens.len() {
+            match &self.tokens[i].token {
+                Token::LParen  => { depth += 1; i += 1; }
+                Token::RParen  => {
+                    depth -= 1; i += 1;
+                    if depth == 0 { break; }
+                }
+                Token::Eof => return false,
+                _ => { i += 1; }
+            }
+        }
+        matches!(self.tokens.get(i).map(|t| &t.token), Some(&Token::Arrow))
     }
 
     fn parse_type(&mut self) -> ParseResult<Type> {
@@ -664,6 +687,50 @@ impl Parser {
                 let inner = self.parse_type()?;
                 self.expect_close_gt()?;
                 Type::RawPtr(Box::new(inner))
+            }
+
+            Token::TypeArray => {
+                self.advance();
+                self.expect(&Token::Lt)?;
+                let elem = self.parse_type()?;
+                self.expect(&Token::Comma)?;
+                // N: compile-time integer literal
+                let size = match self.current().clone() {
+                    Token::Int(n) if n >= 0 => { self.advance(); n as usize }
+                    _ => {
+                        let (line, col) = self.current_span();
+                        return Err(ParseError::new(
+                            &format!("Array size must be a non-negative integer literal, found {:?}", self.current()),
+                            line, col,
+                        ));
+                    }
+                };
+                self.expect_close_gt()?;
+                Type::Array(Box::new(elem), size)
+            }
+
+            Token::TypeSlice => {
+                self.advance();
+                self.expect(&Token::Lt)?;
+                let elem = self.parse_type()?;
+                self.expect_close_gt()?;
+                Type::Slice(Box::new(elem))
+            }
+
+            // Function pointer type: (T1, T2) -> R
+            Token::LParen => {
+                self.advance();
+                let mut param_tys = Vec::new();
+                if !self.check(&Token::RParen) {
+                    param_tys.push(self.parse_type()?);
+                    while self.eat(&Token::Comma) {
+                        param_tys.push(self.parse_type()?);
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                self.expect(&Token::Arrow)?;
+                let ret_ty = self.parse_type()?;
+                Type::FnPtr(param_tys, Box::new(ret_ty))
             }
 
             Token::TypeList => {
@@ -852,6 +919,11 @@ impl Parser {
     }
 
     fn is_var_decl(&self) -> bool {
+        // Function pointer var decl: (T, ...) -> R name = ...
+        if self.check(&Token::LParen) {
+            return self.is_fn_ptr_type_ahead();
+        }
+
         if !self.is_type_token() { return false; }
 
         match self.current() {
@@ -860,7 +932,8 @@ impl Parser {
             Token::TypeMap     | Token::TypeHashMap | Token::TypeTreeMap |
             Token::TypePair    | Token::TypeException | Token::TypeRawPtr |
             Token::TypeU8  | Token::TypeU16 | Token::TypeU32 | Token::TypeU64 |
-            Token::TypeI8  | Token::TypeI16 | Token::TypeI32 | Token::TypeI64 => return true,
+            Token::TypeI8  | Token::TypeI16 | Token::TypeI32 | Token::TypeI64 |
+            Token::TypeArray | Token::TypeSlice => return true,
             _ => {}
         }
 
@@ -1035,6 +1108,15 @@ impl Parser {
                     continue;
                 }
                 _ => {}
+            }
+
+            // Index — arr[i]
+            if self.check(&Token::LBracket) {
+                self.advance();
+                let idx = self.parse_expr(0)?;
+                self.expect(&Token::RBracket)?;
+                left = Expr::Index { object: Box::new(left), index: Box::new(idx) };
+                continue;
             }
 
             // as cast — tightest postfix
@@ -1273,6 +1355,31 @@ impl Parser {
                         &format!("unexpected type '{}' in expression — did you mean {}.sizeOf()?", class, class),
                         line, col,
                     ))
+                }
+            }
+
+            // Array ve Slice static çağrılar — Array.zeroed()  Slice.of(ptr, len)
+            Token::TypeArray | Token::TypeSlice => {
+                let class = match self.current() {
+                    Token::TypeArray => "Array",
+                    Token::TypeSlice => "Slice",
+                    _                => unreachable!(),
+                }.to_string();
+                self.advance();
+                if self.check(&Token::Dot) {
+                    self.advance();
+                    let method = self.expect_ident()?;
+                    if self.check(&Token::LParen) {
+                        let args = self.parse_args()?;
+                        Ok(Expr::StaticCall { class, method, args })
+                    } else {
+                        Ok(Expr::FieldAccess {
+                            object : Box::new(Expr::Ident(class)),
+                            field  : method,
+                        })
+                    }
+                } else {
+                    Ok(Expr::Ident(class))
                 }
             }
 

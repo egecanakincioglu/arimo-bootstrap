@@ -141,7 +141,13 @@ impl BorrowChecker {
             Type::Integer | Type::Float | Type::Boolean |
             Type::U8 | Type::U16 | Type::U32 | Type::U64 |
             Type::I8 | Type::I16 | Type::I32 | Type::I64 => true,
-            // Struct tipler copy semantiği — değer kopyalanır, move olmaz
+            // Array<T, N> — value type, tümü kopyalanır (borrow checker katmanında)
+            Type::Array(_, _) => true,
+            // Slice<T> — fat pointer (ptr + len), shallow copy
+            Type::Slice(_)    => true,
+            // Function pointer — sadece adres, copy
+            Type::FnPtr(_, _) => true,
+            // Struct tipler copy semantiği
             Type::Named(n) => self.struct_names.contains(n.as_str()),
             _ => false,
         }

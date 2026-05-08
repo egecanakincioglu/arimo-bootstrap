@@ -48,6 +48,16 @@ pub enum Type {
 
     // Ham pointer — sadece @manual sınıflarda
     RawPtr(Box<Type>),
+
+    // Fixed-size array — Array<Float, 16>
+    // N=0 "unknown size" wildcard (Array.zeroed() gibi literal'lar için)
+    Array(Box<Type>, usize),
+
+    // Slice — fat pointer (ptr + len), non-owning view — Slice<u8>
+    Slice(Box<Type>),
+
+    // Function pointer — (Integer, String) -> Boolean
+    FnPtr(Vec<Type>, Box<Type>),
 }
 
 // ── Expression ────────────────────────────────────────────────────────────────

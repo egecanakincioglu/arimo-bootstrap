@@ -1,0 +1,99 @@
+module arimo.test.phase1d;
+
+// ── Phase 1d: Array<T,N>, Slice<T>, Function Pointers ─────────────────────────
+
+// type alias ile kısa isimler
+type Mat4  = Array<Float, 16>;
+type Bytes = Slice<u8>;
+
+public struct Transform {
+    position : Vec3;
+    rotation : Vec3;
+    scale    : Float;
+}
+
+public struct Vec3 {
+    x : Float;
+    y : Float;
+    z : Float;
+
+    public operator +(other: Vec3) : Vec3 {
+        return Vec3(this.x + other.x, this.y + other.y, this.z + other.z);
+    }
+}
+
+@manual
+public class Renderer {
+
+    private vertexBuffer : RawPtr<Float>;
+    private indexBuffer  : RawPtr<u32>;
+
+    public static readonly VERTEX_STRIDE : u32 = 12;
+
+    public constructor() {
+        this.vertexBuffer = Memory.alloc(1024 * Float.sizeOf());
+        this.indexBuffer  = Memory.alloc(256 * u32.sizeOf());
+    }
+
+    public getVertexSlice(offset: Integer, count: Integer) : Slice<Float> {
+        return Slice.of(this.vertexBuffer, count);
+    }
+
+    public dispose() : Void {
+        Memory.free(this.vertexBuffer);
+        Memory.free(this.indexBuffer);
+    }
+}
+
+public class Systems {
+
+    public static arrayDemo() : Void {
+        // Fixed-size array — stack allocated
+        Array<Float, 4> vec4 = Array.zeroed();
+        vec4[0] = 1.0;
+        vec4[1] = 0.0;
+        vec4[2] = 0.0;
+        vec4[3] = 1.0;
+
+        Integer len = vec4.length();
+
+        // u8 array (OS / systems için)
+        Array<u8, 256> buffer = Array.zeroed();
+        buffer[0] = 0xFF as u8;
+        buffer[1] = 0x00 as u8;
+    }
+
+    public static functionPointerDemo() : Void {
+        // Function pointer — değişkende saklanır
+        (Integer) -> Boolean isPositive = (x) -> x > 0;
+        (Integer) -> Boolean isEven     = (x) -> x == 0;
+
+        Boolean result = isPositive(42);
+
+        // Function pointer parametre olarak geçirilir
+        List<Integer> nums = List();
+        nums.append(1);
+        nums.append(-2);
+        nums.append(3);
+        List<Integer> pos = nums.filter(isPositive);
+
+        // Callback tipi — event system
+        (String) -> Void logger = (msg) -> IO.print(msg);
+        logger("hello");
+
+        // İki parametre
+        (Integer, Integer) -> Integer add = (a, b) -> a + b;
+        Integer sum = add(1, 2);
+    }
+
+    public static sliceDemo() : Void {
+        // Slice — non-owning view
+        Array<Float, 8> data = Array.zeroed();
+        data[0] = 1.0;
+        data[1] = 2.0;
+
+        Slice<Float> view = data.asSlice();
+        Integer viewLen = view.length();
+        Float first = view[0];
+    }
+}

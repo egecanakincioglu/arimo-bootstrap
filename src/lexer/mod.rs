@@ -50,6 +50,8 @@ pub enum Token {
     TypePair,
     TypeException,    // Exception — built-in base exception
     TypeRawPtr,       // RawPtr<T> — @manual sınıflarda ham bellek erişimi
+    TypeArray,        // Array<T, N> — fixed-size stack array
+    TypeSlice,        // Slice<T> — fat pointer (ptr + len), non-owning view
 
     // ── Fixed-size integer types ──────────────────────────────────────────
     TypeU8,
@@ -322,6 +324,8 @@ impl<'a> Lexer<'a> {
             "Pair"        => Token::TypePair,
             "Exception"   => Token::TypeException,
             "RawPtr"      => Token::TypeRawPtr,
+            "Array"       => Token::TypeArray,
+            "Slice"       => Token::TypeSlice,
 
             // Fixed-size integer types
             "u8"          => Token::TypeU8,

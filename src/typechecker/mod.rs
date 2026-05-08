@@ -986,6 +986,25 @@ impl TypeChecker {
             }
 
             Expr::ConstructorCall { class, args } => {
+                // Function pointer çağrısı: pred(42) → class = "pred", local var of FnPtr type
+                if let Some(var) = self.lookup_var(class) {
+                    let var_ty = var.ty.clone();
+                    if let Type::FnPtr(param_tys, ret_ty) = var_ty {
+                        let arg_types: Vec<Type> = args.iter().map(|a| self.infer_expr(a)).collect();
+                        if arg_types.len() != param_tys.len() {
+                            self.error(format!(
+                                "function call '{}' expects {} argument(s), got {}",
+                                class, param_tys.len(), arg_types.len()
+                            ));
+                        } else {
+                            for (i, (pt, at)) in param_tys.iter().zip(arg_types.iter()).enumerate() {
+                                self.check_assignable(pt, at, &format!("fn call '{}' arg {}", class, i + 1));
+                            }
+                        }
+                        return *ret_ty;
+                    }
+                }
+
                 match class.as_str() {
                     "List" => {
                         for a in args { self.infer_expr(a); }
@@ -1134,9 +1153,19 @@ impl TypeChecker {
                 match &obj_ty {
                     Type::List(elem) => {
                         if !self.is_integer_type(&idx_ty) {
-                            self.error(format!(
-                                "List index must be integer type, found {:?}", idx_ty
-                            ));
+                            self.error(format!("List index must be integer type, found {:?}", idx_ty));
+                        }
+                        *elem.clone()
+                    }
+                    Type::Array(elem, _) => {
+                        if !self.is_integer_type(&idx_ty) {
+                            self.error(format!("Array index must be integer type, found {:?}", idx_ty));
+                        }
+                        *elem.clone()
+                    }
+                    Type::Slice(elem) => {
+                        if !self.is_integer_type(&idx_ty) {
+                            self.error(format!("Slice index must be integer type, found {:?}", idx_ty));
                         }
                         *elem.clone()
                     }
@@ -1154,6 +1183,10 @@ impl TypeChecker {
 
     // ── Binary operatör ───────────────────────────────────────────────────────
 
+    fn is_unknown(ty: &Type) -> bool {
+        matches!(ty, Type::Named(n) if n == "Unknown")
+    }
+
     fn infer_binop(
         &mut self,
         op         : &BinOp,
@@ -1162,6 +1195,17 @@ impl TypeChecker {
         left_expr  : &Expr,
         _right_expr: &Expr,
     ) -> Type {
+        // Lambda parametresi (Unknown) içeren ifadeler — sessizce geç
+        if Self::is_unknown(left) || Self::is_unknown(right) {
+            return match op {
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le |
+                BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or => Type::Boolean,
+                BinOp::Assign | BinOp::AddAssign | BinOp::SubAssign |
+                BinOp::MulAssign | BinOp::DivAssign => left.clone(),
+                _ => Type::Named("Unknown".to_string()),
+            };
+        }
+
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 if !self.is_numeric(left) || !self.is_numeric(right) {
@@ -1321,6 +1365,7 @@ impl TypeChecker {
                     }
                 }
             }
+            Expr::Index { .. } => {} // Array/Slice index assignment — her zaman izinli
             Expr::FieldAccess { object, field } => {
                 let obj_ty = self.infer_expr(object);
                 let class_name = match &obj_ty {
@@ -1432,7 +1477,8 @@ impl TypeChecker {
             Type::TreeMap(_, _) => "TreeMap".to_string(),
             Type::Pair(_, _)    => "Pair".to_string(),
             Type::RawPtr(_)     => "RawPtr".to_string(),
-            // Integer types — sizeOf ve diğer static metodlar
+            Type::Array(_, _)   => "Array".to_string(),
+            Type::Slice(_)      => "Slice".to_string(),
             Type::U8  => "u8".to_string(),
             Type::U16 => "u16".to_string(),
             Type::U32 => "u32".to_string(),
@@ -1617,6 +1663,40 @@ impl TypeChecker {
                 }
             }
 
+            // Array<T, N> metodları
+            ("Array", "length")  => Some(Type::Integer),
+            ("Array", "zeroed")  => Some(Type::Array(Box::new(Type::Named("Unknown".to_string())), 0)),
+            ("Array", "get")     => {
+                match ty {
+                    Type::Array(elem, _) => Some(*elem.clone()),
+                    _ => Some(Type::Named("Unknown".to_string())),
+                }
+            }
+            ("Array", "set")     => Some(Type::Void),
+            ("Array", "asSlice") => {
+                match ty {
+                    Type::Array(elem, _) => Some(Type::Slice(elem.clone())),
+                    _ => Some(Type::Slice(Box::new(Type::Named("Unknown".to_string())))),
+                }
+            }
+            ("Array", "slice")   => {
+                match ty {
+                    Type::Array(elem, _) => Some(Type::Slice(elem.clone())),
+                    _ => Some(Type::Slice(Box::new(Type::Named("Unknown".to_string())))),
+                }
+            }
+
+            // Slice<T> metodları
+            ("Slice", "length")  => Some(Type::Integer),
+            ("Slice", "get")     => {
+                match ty {
+                    Type::Slice(elem) => Some(*elem.clone()),
+                    _ => Some(Type::Named("Unknown".to_string())),
+                }
+            }
+            ("Slice", "set")     => Some(Type::Void),
+            ("Slice", "of")      => Some(Type::Slice(Box::new(Type::Named("Unknown".to_string())))),
+
             ("Memory", "alloc")  => Some(Type::RawPtr(Box::new(Type::Void))),
             ("Memory", "free")   => Some(Type::Void),
             ("Memory", "copy")   => Some(Type::Void),
@@ -1756,6 +1836,30 @@ impl TypeChecker {
             if matches!(s_inner.as_ref(), Type::Void | Type::Named(_)) { return true; }
         }
 
+        // Array: Unknown wildcard (Array.zeroed() sonucu) herhangi bir Array'e atanabilir
+        if let (Type::Array(te, _tn), Type::Array(se, sn)) = (target, source) {
+            if *sn == 0 || matches!(se.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
+            return self.is_assignable(te, se);
+        }
+
+        // Slice: Unknown wildcard herhangi bir Slice'a atanabilir
+        if let (Type::Slice(te), Type::Slice(se)) = (target, source) {
+            if matches!(se.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
+            return self.is_assignable(te, se);
+        }
+
+        // FnPtr: Lambda herhangi bir function pointer'a atanabilir (tip uyumu ileriki aşamada)
+        if matches!(target, Type::FnPtr(_, _)) {
+            if matches!(source, Type::Named(n) if n == "Lambda") { return true; }
+        }
+
+        // FnPtr ↔ FnPtr: tam eşleşme gerekir (types_equal ile handle edildi)
+        if let (Type::FnPtr(tp, tr), Type::FnPtr(sp, sr)) = (target, source) {
+            if tp.len() != sp.len() { return false; }
+            return self.is_assignable(tr, sr)
+                && tp.iter().zip(sp.iter()).all(|(t, s)| self.is_assignable(t, s));
+        }
+
         if let Type::Nullable(t_inner) = target {
             if let Type::Nullable(s_inner) = source {
                 if let Type::Named(n) = s_inner.as_ref() {
@@ -1816,6 +1920,13 @@ impl TypeChecker {
                 self.types_equal(k1, k2) && self.types_equal(v1, v2),
             (Type::Pair(a1, b1), Type::Pair(a2, b2)) =>
                 self.types_equal(a1, a2) && self.types_equal(b1, b2),
+            (Type::Array(e1, n1), Type::Array(e2, n2)) =>
+                n1 == n2 && self.types_equal(e1, e2),
+            (Type::Slice(e1), Type::Slice(e2)) => self.types_equal(e1, e2),
+            (Type::FnPtr(p1, r1), Type::FnPtr(p2, r2)) =>
+                p1.len() == p2.len()
+                && self.types_equal(r1, r2)
+                && p1.iter().zip(p2.iter()).all(|(a, b)| self.types_equal(a, b)),
             _ => false,
         }
     }
@@ -2048,6 +2159,12 @@ impl TypeChecker {
             }
             Type::Nullable(inner) => self.check_type_exists(inner, context),
             Type::RawPtr(inner)   => self.check_type_exists(inner, context),
+            Type::Array(inner, _) => self.check_type_exists(inner, context),
+            Type::Slice(inner)    => self.check_type_exists(inner, context),
+            Type::FnPtr(params, ret) => {
+                for p in params { self.check_type_exists(p, context); }
+                self.check_type_exists(ret, context);
+            }
             Type::Generic(name, params) => {
                 if !self.is_known_type(name) {
                     self.error(format!(
@@ -2058,7 +2175,6 @@ impl TypeChecker {
                     self.check_type_exists(p, context);
                 }
             }
-            // Primitives and fixed-size integers are always valid
             _ => {}
         }
     }
