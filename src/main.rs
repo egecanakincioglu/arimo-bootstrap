@@ -9,6 +9,7 @@ use std::{env, fs, process};
 use lexer::Lexer;
 use parser::Parser;
 use typechecker::TypeChecker;
+use borrow::BorrowChecker;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -87,7 +88,7 @@ fn main() {
 
     // Type Checker
     println!("");
-    let mut tc     = TypeChecker::new();
+    let mut tc      = TypeChecker::new();
     let type_errors = tc.check(&module);
 
     if type_errors.is_empty() {
@@ -95,6 +96,20 @@ fn main() {
     } else {
         for err in type_errors {
             eprintln!("arc: type error — {}", err);
+        }
+        process::exit(1);
+    }
+
+    // Borrow Checker
+    let mut bc       = BorrowChecker::new();
+    let borrow_errors = bc.check(&module);
+
+    if borrow_errors.is_empty() {
+        println!("arc: borrow check OK");
+        println!("arc: drop schedule — {} scope(s) tracked", bc.drops.len());
+    } else {
+        for err in borrow_errors {
+            eprintln!("arc: {}", err);
         }
         process::exit(1);
     }
