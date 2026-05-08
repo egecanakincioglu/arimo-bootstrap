@@ -77,9 +77,6 @@ fn main() {
                     ast::Item::Exception(e) => {
                         println!("  exception {} extends {}", e.name, e.extends);
                     }
-                    ast::Item::Const(c) => {
-                        println!("  const {} : {:?}", c.name, c.ty);
-                    }
                     ast::Item::TypeAlias(a) => {
                         println!("  type {} = {:?}", a.name, a.ty);
                     }

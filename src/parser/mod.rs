@@ -209,11 +209,6 @@ impl Parser {
         let visibility = self.parse_visibility()?;
         let abstract_  = self.eat(&Token::Abstract);
 
-        // const item
-        if self.check(&Token::Const) {
-            return self.parse_const_item(visibility);
-        }
-
         match self.current().clone() {
             Token::Class => {
                 let class = self.parse_class(visibility, abstract_, manual)?;
@@ -242,17 +237,6 @@ impl Parser {
                 ))
             }
         }
-    }
-
-    fn parse_const_item(&mut self, visibility: Visibility) -> ParseResult<Item> {
-        self.expect(&Token::Const)?;
-        let name = self.expect_ident()?;
-        self.expect(&Token::Colon)?;
-        let ty = self.parse_type()?;
-        self.expect(&Token::Eq)?;
-        let value = self.parse_expr(0)?;
-        self.expect(&Token::Semicolon)?;
-        Ok(Item::Const(ConstDecl { visibility, name, ty, value }))
     }
 
     fn parse_type_alias_item(&mut self) -> ParseResult<Item> {
@@ -301,19 +285,6 @@ impl Parser {
             let readonly = self.eat(&Token::Readonly);
             let abstract_ = self.eat(&Token::Abstract);
             let override_ = self.eat(&Token::Override);
-
-            // const shorthand — public const NAME: Type = value;
-            if self.check(&Token::Const) {
-                self.advance();
-                let fname = self.expect_ident()?;
-                self.expect(&Token::Colon)?;
-                let ty = self.parse_type()?;
-                self.expect(&Token::Eq)?;
-                let value = self.parse_expr(0)?;
-                self.expect(&Token::Semicolon)?;
-                fields.push(Field { visibility: vis, readonly: true, static_: true, name: fname, ty, value: Some(value) });
-                continue;
-            }
 
             match self.current().clone() {
                 Token::Constructor => {

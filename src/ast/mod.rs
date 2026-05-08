@@ -322,14 +322,6 @@ pub struct ExceptionDecl {
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstDecl {
-    pub visibility : Visibility,
-    pub name       : String,
-    pub ty         : Type,
-    pub value      : Expr,
-}
-
-#[derive(Debug, Clone)]
 pub struct TypeAliasDecl {
     pub name : String,
     pub ty   : Type,
@@ -350,6 +342,5 @@ pub enum Item {
     Interface(InterfaceDecl),
     Enum(EnumDecl),
     Exception(ExceptionDecl),
-    Const(ConstDecl),
     TypeAlias(TypeAliasDecl),
 }

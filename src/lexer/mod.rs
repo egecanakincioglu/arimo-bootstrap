@@ -85,7 +85,6 @@ pub enum Token {
 
     // ── Additional keywords ───────────────────────────────────────────────
     As,        // as  — type cast
-    Const,     // const — compile-time constant
     KwType,    // type — type alias declaration
 
     // ── Operators ────────────────────────────────────────────────────────
@@ -358,9 +357,8 @@ impl<'a> Lexer<'a> {
             "true"        => Token::Bool(true),
             "false"       => Token::Bool(false),
 
-            // Cast & declarations
+            // Cast & type alias
             "as"          => Token::As,
-            "const"       => Token::Const,
             "type"        => Token::KwType,
 
             _             => Token::Ident(word),

@@ -119,7 +119,6 @@ impl BorrowChecker {
                 Item::Enum(e)      => self.check_enum(e),
                 Item::Exception(e) => self.check_exception(e),
                 Item::Interface(_)   => {}
-                Item::Const(_)       => {}
                 Item::TypeAlias(_)   => {}
             }
         }

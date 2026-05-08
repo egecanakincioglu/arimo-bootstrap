@@ -157,12 +157,11 @@ impl TypeChecker {
         self.collect_symbols(module);
         for item in &module.items {
             match item {
-                Item::Class(c)          => self.check_class(c),
-                Item::Interface(i)      => self.check_interface(i),
-                Item::Enum(e)           => self.check_enum(e),
-                Item::Exception(e)      => self.check_exception(e),
-                Item::Const(c)          => self.check_const_item(c),
-                Item::TypeAlias(_)      => {} // sadece sembol tablosunda
+                Item::Class(c)     => self.check_class(c),
+                Item::Interface(i) => self.check_interface(i),
+                Item::Enum(e)      => self.check_enum(e),
+                Item::Exception(e) => self.check_exception(e),
+                Item::TypeAlias(_) => {} // sadece sembol tablosunda
             }
         }
         &self.errors
@@ -177,7 +176,6 @@ impl TypeChecker {
                 Item::Interface(i) => self.register_interface(i),
                 Item::Enum(e)      => self.register_enum(e),
                 Item::Exception(e) => self.register_exception(e),
-                Item::Const(_)     => {} // check aşamasında kontrol edilecek
                 Item::TypeAlias(a) => {
                     self.type_aliases.insert(a.name.clone(), a.ty.clone());
                 }
@@ -311,14 +309,6 @@ impl TypeChecker {
             });
         }
         self.classes.insert(e.name.clone(), info);
-    }
-
-    // ── Const item kontrolü ───────────────────────────────────────────────────
-
-    fn check_const_item(&mut self, c: &ConstDecl) {
-        self.check_type_exists(&c.ty, &format!("const '{}'", c.name));
-        let val_ty = self.infer_expr(&c.value);
-        self.check_assignable(&c.ty, &val_ty, &format!("const '{}' initializer", c.name));
     }
 
     // ── Geçiş 2: detaylı kontrol ──────────────────────────────────────────────

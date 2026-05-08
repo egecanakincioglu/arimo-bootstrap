@@ -1,11 +1,7 @@
 module arimo.test.phase1a;
 
 // ── Phase 1a: Fixed-size integers, bitwise ops, as cast ───────────────────────
-// ── Phase 1b: const, type alias ──────────────────────────────────────────────
-
-// Module-level const
-const MAX_SIZE  : u32 = 1024;
-const PAGE_BITS : u8  = 12;
+// ── Phase 1b: type alias ──────────────────────────────────────────────────────
 
 // Module-level type alias
 type NodeId   = u32;
@@ -17,12 +13,14 @@ public class BitwiseDemo {
     private flags : u32;
     private data  : RawPtr<u8>;
 
+    public static readonly MAX_SIZE : u32 = 1024;
+    public static readonly PAGE_BITS : u8 = 12;
+
     public constructor(initial: u32) {
         this.flags = initial;
         this.data  = Memory.alloc(256 * u8.sizeOf());
     }
 
-    // Bitwise ops
     public setFlag(mask: u32) : Void {
         this.flags = this.flags | mask;
     }
@@ -43,7 +41,6 @@ public class BitwiseDemo {
         return this.flags >> n;
     }
 
-    // as cast
     public toU8() : u8 {
         return this.flags as u8;
     }
@@ -59,37 +56,31 @@ public class BitwiseDemo {
 
 public class IntegerTypes {
 
-    public static const VERSION : u32 = 2;
+    public static readonly VERSION : u32 = 2;
 
     public static demo() : Void {
-        // Sized integer literals
-        u8  byte    = 255;
-        u16 short   = 65535;
-        u32 word    = 0xDEADBEEF;
-        u64 qword   = 0xFFFFFFFFFFFFFFFF;
-        i8  sbyte   = -128;
-        i16 sshort  = -32768;
-        i32 sint    = -2147483648;
-        i64 slong   = -1;
+        u8  byte     = 255;
+        u16 short_   = 65535;
+        u32 word     = 0xDEADBEEF;
+        u64 qword    = 0xFFFFFFFFFFFFFFFF;
+        i8  sbyte    = -128;
+        i16 sshort   = -32768;
+        i32 sint     = -2147483648;
+        i64 slong    = -1;
 
-        // Hex literal
-        u32 flags   = 0xFF00FF00;
+        u32 flags    = 0xFF00FF00;
+        u8  mask     = 0b10101010;
 
-        // Binary literal
-        u8  mask    = 0b10101010;
-
-        // Bitwise operations
-        u32 result  = flags & 0xFF;
-        u32 orTest  = flags | 0x00FF;
-        u32 xorTest = flags ^ 0xAAAA;
-        u32 shifted = flags << 4;
+        u32 result   = flags & 0xFF;
+        u32 orTest   = flags | 0x00FF;
+        u32 xorTest  = flags ^ 0xAAAA;
+        u32 shifted  = flags << 4;
         u32 rshifted = flags >> 2;
         u8  inverted = ~mask;
 
-        // as cast
-        u8  low     = flags as u8;
-        i32 signed  = flags as i32;
-        u32 fromInt = 42 as u32;
+        u8  low      = flags as u8;
+        i32 signed   = flags as i32;
+        u32 fromInt  = 42 as u32;
 
         IO.print("Integer types OK");
     }
