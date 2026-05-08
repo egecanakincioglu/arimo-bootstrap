@@ -1002,8 +1002,15 @@ impl TypeChecker {
                 then_ty
             }
 
-            Expr::Lambda { params: _, body } => {
+            Expr::Lambda { params, body } => {
+                // Lambda parametrelerini Unknown tipte scope'a ekle
+                // (tam tip çıkarımı olmadan false-positive hatayı önlemek için)
+                self.push_scope();
+                for param in params {
+                    self.define_var(param, Type::Named("Unknown".to_string()), false);
+                }
                 self.infer_expr(body);
+                self.pop_scope();
                 Type::Named("Lambda".to_string())
             }
 
@@ -1155,6 +1162,7 @@ impl TypeChecker {
             Type::Map(_, _)     => "Map".to_string(),
             Type::HashMap(_, _) => "HashMap".to_string(),
             Type::TreeMap(_, _) => "TreeMap".to_string(),
+            Type::Pair(_, _)    => "Pair".to_string(),
             _ => {
                 self.error(format!(
                     "cannot access field '{}' on type {:?}", field, ty
@@ -1162,6 +1170,11 @@ impl TypeChecker {
                 return Type::Named("Error".to_string());
             }
         };
+
+        // Lambda param veya çıkarılamayan tip — sessizce geç
+        if class_name == "Unknown" {
+            return Type::Named("Unknown".to_string());
+        }
 
         if let Some(builtin) = self.resolve_builtin_member(&class_name, field, ty) {
             return builtin;
@@ -1212,6 +1225,7 @@ impl TypeChecker {
             Type::Map(_, _)     => "Map".to_string(),
             Type::HashMap(_, _) => "HashMap".to_string(),
             Type::TreeMap(_, _) => "TreeMap".to_string(),
+            Type::Pair(_, _)    => "Pair".to_string(),
             _ => {
                 self.error(format!(
                     "cannot call method '{}' on type {:?}", method, ty
@@ -1219,6 +1233,11 @@ impl TypeChecker {
                 return Type::Named("Error".to_string());
             }
         };
+
+        // Lambda param veya çıkarılamayan tip — sessizce geç
+        if class_name == "Unknown" {
+            return Type::Named("Unknown".to_string());
+        }
 
         if let Some(ret) = self.resolve_builtin_method(&class_name, method, ty, args) {
             return ret;

@@ -1,0 +1,195 @@
+module arimo.test.comprehensive;
+
+// ── Enum: metodlu, switch exhaustiveness ─────────────────────────────────────
+
+public enum TaskStatus {
+    Todo,
+    InProgress,
+    Done;
+
+    public label() : String {
+        switch (this) {
+            case TaskStatus.Todo:       return "Todo";
+            case TaskStatus.InProgress: return "In Progress";
+            case TaskStatus.Done:       return "Done";
+        }
+    }
+}
+
+public enum Priority {
+    Low,
+    Medium,
+    High,
+    Critical;
+
+    public isUrgent() : Boolean {
+        return this == Priority.High || this == Priority.Critical;
+    }
+
+    public label() : String {
+        switch (this) {
+            case Priority.Low:      return "Low";
+            case Priority.Medium:   return "Medium";
+            case Priority.High:     return "High";
+            case Priority.Critical: return "Critical";
+        }
+    }
+}
+
+// ── Exception ─────────────────────────────────────────────────────────────────
+
+public class TaskNotFoundException extends Exception {
+
+    private readonly taskId : String;
+
+    public constructor(taskId: String) {
+        super("Task not found: ${taskId}");
+        this.taskId = taskId;
+    }
+
+    public getTaskId() : String { return this.taskId; }
+}
+
+// ── Interface ─────────────────────────────────────────────────────────────────
+
+interface Describable {
+    describe() : String;
+}
+
+// ── Abstract class ────────────────────────────────────────────────────────────
+
+public abstract class BaseItem implements Describable {
+
+    private readonly id : String;
+
+    protected constructor(id: String) {
+        this.id = id;
+    }
+
+    public getId() : String { return this.id; }
+
+    public abstract describe() : String;
+}
+
+// ── Concrete class: inheritance, generics, null safety ───────────────────────
+
+public class Task extends BaseItem {
+
+    private readonly title    : String;
+    private          status   : TaskStatus;
+    private          priority : Priority;
+    private          note     : String?;
+
+    public constructor(id: String, title: String, priority: Priority) {
+        super(id);
+        this.title    = title;
+        this.status   = TaskStatus.Todo;
+        this.priority = priority;
+        this.note     = null;
+    }
+
+    public static create(title: String, priority: Priority) : Task {
+        return Task(Time.generateId(), title, priority);
+    }
+
+    public getTitle()    : String     { return this.title;    }
+    public getStatus()   : TaskStatus { return this.status;   }
+    public getPriority() : Priority   { return this.priority; }
+    public getNote()     : String?    { return this.note;     }
+
+    public isDone()   : Boolean { return this.status == TaskStatus.Done;    }
+    public isUrgent() : Boolean { return this.priority.isUrgent();          }
+
+    public setNote(note: String) : Void {
+        this.note = note;
+    }
+
+    public complete() : Void {
+        if (this.isDone()) {
+            throw TaskNotFoundException(this.getId());
+        }
+        this.status = TaskStatus.Done;
+    }
+
+    public describe() : String {
+        return "[${this.status}] ${this.title} (${this.priority.label()})";
+    }
+}
+
+// ── Entry point: collections, lambda, for-each, try/catch, null check ────────
+
+public class TaskApplication {
+
+    public static readonly NAME    : String = "Arimo Tasks";
+    public static readonly VERSION : String = "1.0.0";
+
+    public static main() {
+        IO.print("${TaskApplication.NAME}  v${TaskApplication.VERSION}");
+
+        // Koleksiyon constructors
+        List<Task> tasks = List();
+        Map<String, Integer> scores = HashMap();
+
+        // Static create + append
+        Task t1 = Task.create("Fix critical bug", Priority.Critical);
+        Task t2 = Task.create("Write docs",       Priority.Low);
+        Task t3 = Task.create("Code review",      Priority.High);
+
+        tasks.append(t1);
+        tasks.append(t2);
+        tasks.append(t3);
+
+        // Map kullanımı
+        scores.set("alice", 100);
+        scores.set("bob",   85);
+        Integer aliceScore = scores.getOrDefault("alice", 0);
+        IO.print("Alice score: ${aliceScore}");
+
+        // for-each
+        for (Task task : tasks) {
+            IO.print(task.describe());
+        }
+
+        // Klasik for
+        Integer total = 0;
+        for (Integer i = 0; i < 3; i++) {
+            total = total + 1;
+        }
+        IO.print("Total: ${total}");
+
+        // while
+        Integer count = tasks.length();
+        while (count > 0) {
+            count = count - 1;
+        }
+
+        // Null safety + smart cast
+        String? maybeNote = t1.getNote();
+        if (maybeNote != null) {
+            IO.print("Note: ${maybeNote}");
+        }
+
+        // Ternary
+        String urgentLabel = t1.isUrgent() ? "URGENT" : "normal";
+        IO.print("Status: ${urgentLabel}");
+
+        // try / catch / finally
+        try {
+            t1.complete();
+            IO.print("Completed: ${t1.getTitle()}");
+        } catch (TaskNotFoundException e) {
+            IO.print("Error: ${e.message()}");
+        } finally {
+            IO.print("Done.");
+        }
+
+        // Lambda + koleksiyon zinciri
+        List<Task> urgent = tasks.filter((t) -> t.isUrgent());
+        Integer urgentCount = urgent.length();
+        IO.print("Urgent tasks: ${urgentCount}");
+
+        // Pair
+        Pair<String, Integer> entry = Pair("top-task", 1);
+        IO.print("Entry: ${entry.getFirst()}");
+    }
+}
