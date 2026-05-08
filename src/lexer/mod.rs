@@ -19,11 +19,13 @@ pub enum Token {
 
     // ── Class keywords ───────────────────────────────────────────────────
     Class,
+    Struct,      // struct — value type, stack-allocated
     Abstract,
     Interface,
     Enum,
     Extends,
     Implements,
+    Operator,    // operator — metod seviyesinde operator overloading
 
     // ── Member modifiers ─────────────────────────────────────────────────
     Static,
@@ -293,7 +295,9 @@ impl<'a> Lexer<'a> {
             "protected"   => Token::Protected,
             "internal"    => Token::Internal,
             "class"       => Token::Class,
+            "struct"      => Token::Struct,
             "abstract"    => Token::Abstract,
+            "operator"    => Token::Operator,
             "interface"   => Token::Interface,
             "enum"        => Token::Enum,
             "extends"     => Token::Extends,

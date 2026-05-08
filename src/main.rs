@@ -77,6 +77,12 @@ fn main() {
                     ast::Item::Exception(e) => {
                         println!("  exception {} extends {}", e.name, e.extends);
                     }
+                    ast::Item::Struct(s) => {
+                        println!("  struct {} {{", s.name);
+                        println!("    fields  : {}", s.fields.len());
+                        println!("    methods : {}", s.methods.len());
+                        println!("  }}");
+                    }
                     ast::Item::TypeAlias(a) => {
                         println!("  type {} = {:?}", a.name, a.ty);
                     }

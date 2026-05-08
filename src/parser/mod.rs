@@ -227,12 +227,13 @@ impl Parser {
                 }
                 Ok(Item::Class(class))
             }
+            Token::Struct    => Ok(Item::Struct(self.parse_struct(visibility)?)),
             Token::Interface => Ok(Item::Interface(self.parse_interface()?)),
             Token::Enum      => Ok(Item::Enum(self.parse_enum(visibility)?)),
             _ => {
                 let (line, col) = self.current_span();
                 Err(ParseError::new(
-                    &format!("Expected class, interface, enum or const, found {:?}", self.current()),
+                    &format!("Expected class, struct, interface or enum, found {:?}", self.current()),
                     line, col,
                 ))
             }
@@ -280,11 +281,38 @@ impl Parser {
         let mut methods     = Vec::new();
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
-            let vis      = self.parse_visibility()?;
-            let static_  = self.eat(&Token::Static);
-            let readonly = self.eat(&Token::Readonly);
+            // @inline annotation
+            let mut inline_ = false;
+            if self.check(&Token::At) {
+                self.advance();
+                let ann = self.expect_ident()?;
+                match ann.as_str() {
+                    "inline" => { inline_ = true; }
+                    other => {
+                        let (line, col) = self.current_span();
+                        return Err(ParseError::new(
+                            &format!("unknown method annotation '@{}' — only @inline is supported here", other),
+                            line, col,
+                        ));
+                    }
+                }
+            }
+
+            let vis       = self.parse_visibility()?;
+            let static_   = self.eat(&Token::Static);
+            let readonly  = self.eat(&Token::Readonly);
             let abstract_ = self.eat(&Token::Abstract);
             let override_ = self.eat(&Token::Override);
+
+            // operator overloading — public operator +(other: Vec3) : Vec3 { ... }
+            if self.check(&Token::Operator) {
+                self.advance();
+                let op_sym = self.parse_operator_symbol()?;
+                let method_name = format!("operator{}", op_sym);
+                let method = self.parse_method_body(vis, static_, abstract_, override_, inline_, method_name, None)?;
+                methods.push(method);
+                continue;
+            }
 
             match self.current().clone() {
                 Token::Constructor => {
@@ -298,7 +326,7 @@ impl Parser {
                             if *next == Token::LParen {
                                 self.advance();
                                 let method = self.parse_method_body(
-                                    vis, static_, abstract_, override_, iname, None
+                                    vis, static_, abstract_, override_, inline_, iname, None
                                 )?;
                                 methods.push(method);
                                 continue;
@@ -326,7 +354,7 @@ impl Parser {
 
                         if self.check(&Token::LParen) {
                             let method = self.parse_method_body(
-                                vis, static_, abstract_, override_, name, Some(ty)
+                                vis, static_, abstract_, override_, inline_, name, Some(ty)
                             )?;
                             methods.push(method);
                         } else {
@@ -365,6 +393,7 @@ impl Parser {
         static_    : bool,
         abstract_  : bool,
         override_  : bool,
+        inline_    : bool,
         name       : String,
         return_ty  : Option<Type>,
     ) -> ParseResult<Method> {
@@ -386,7 +415,153 @@ impl Parser {
             Some(stmts)
         };
 
-        Ok(Method { visibility, static_, abstract_, override_, name, params, return_ty, body })
+        Ok(Method { visibility, static_, abstract_, override_, inline_, name, params, return_ty, body })
+    }
+
+    fn parse_operator_symbol(&mut self) -> ParseResult<String> {
+        let sym = match self.current() {
+            Token::Plus    => "+",
+            Token::Minus   => "-",
+            Token::Star    => "*",
+            Token::Slash   => "/",
+            Token::Percent => "%",
+            Token::EqEq    => "==",
+            Token::BangEq  => "!=",
+            Token::Lt      => "<",
+            Token::LtEq    => "<=",
+            Token::Gt      => ">",
+            Token::GtEq    => ">=",
+            Token::LBracket => {
+                self.advance();
+                self.expect(&Token::RBracket)?;
+                return Ok("[]".to_string());
+            }
+            _ => {
+                let (line, col) = self.current_span();
+                return Err(ParseError::new(
+                    &format!("Expected operator symbol (+, -, *, /, ==, !=, <, >, etc.), found {:?}", self.current()),
+                    line, col,
+                ));
+            }
+        };
+        self.advance();
+        Ok(sym.to_string())
+    }
+
+    // ── Struct parser ─────────────────────────────────────────────────────────
+
+    fn parse_struct(&mut self, visibility: Visibility) -> ParseResult<StructDecl> {
+        self.expect(&Token::Struct)?;
+        let name     = self.expect_ident()?;
+        let generics = self.parse_generics_decl()?;
+
+        // struct extends etmez, sadece implements
+        let implements = if self.eat(&Token::Implements) {
+            self.parse_comma_separated_class_names()?
+        } else { Vec::new() };
+
+        self.expect(&Token::LBrace)?;
+
+        let mut fields      = Vec::new();
+        let mut constructor = None;
+        let mut methods     = Vec::new();
+
+        while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
+            // @inline annotation
+            let mut inline_ = false;
+            if self.check(&Token::At) {
+                self.advance();
+                let ann = self.expect_ident()?;
+                match ann.as_str() {
+                    "inline" => { inline_ = true; }
+                    other => {
+                        let (line, col) = self.current_span();
+                        return Err(ParseError::new(
+                            &format!("unknown method annotation '@{}' — only @inline is supported here", other),
+                            line, col,
+                        ));
+                    }
+                }
+            }
+
+            let vis       = self.parse_visibility()?;
+            let static_   = self.eat(&Token::Static);
+            let _readonly = self.eat(&Token::Readonly); // struct fields are value-copied, readonly is on field
+            let override_ = self.eat(&Token::Override);
+
+            // operator overloading
+            if self.check(&Token::Operator) {
+                self.advance();
+                let op_sym = self.parse_operator_symbol()?;
+                let method_name = format!("operator{}", op_sym);
+                let method = self.parse_method_body(vis, static_, false, override_, inline_, method_name, None)?;
+                methods.push(method);
+                continue;
+            }
+
+            match self.current().clone() {
+                Token::Constructor => {
+                    self.advance();
+                    constructor = Some(self.parse_constructor(vis)?);
+                }
+                _ => {
+                    if let Token::Ident(iname) = self.current().clone() {
+                        if self.pos + 1 < self.tokens.len() {
+                            let next = &self.tokens[self.pos + 1].token;
+                            if *next == Token::LParen {
+                                self.advance();
+                                let method = self.parse_method_body(
+                                    vis, static_, false, override_, inline_, iname, None
+                                )?;
+                                methods.push(method);
+                                continue;
+                            }
+                        }
+                        // field: name : Type
+                        if self.pos + 1 < self.tokens.len() {
+                            let next = &self.tokens[self.pos + 1].token;
+                            if *next == Token::Colon {
+                                let fname = self.expect_ident()?;
+                                self.expect(&Token::Colon)?;
+                                let ty = self.parse_type()?;
+                                let value = if self.eat(&Token::Eq) {
+                                    Some(self.parse_expr(0)?)
+                                } else { None };
+                                self.expect(&Token::Semicolon)?;
+                                fields.push(Field { visibility: vis, readonly: false, static_: static_, name: fname, ty, value });
+                                continue;
+                            }
+                        }
+                    }
+
+                    if self.is_type_token() {
+                        let ty   = self.parse_type()?;
+                        let name = self.expect_ident()?;
+                        if self.check(&Token::LParen) {
+                            let method = self.parse_method_body(
+                                vis, static_, false, override_, inline_, name, Some(ty)
+                            )?;
+                            methods.push(method);
+                        } else {
+                            let value = if self.eat(&Token::Eq) {
+                                Some(self.parse_expr(0)?)
+                            } else { None };
+                            self.expect(&Token::Semicolon)?;
+                            fields.push(Field { visibility: vis, readonly: false, static_: static_, name, ty, value });
+                        }
+                    } else {
+                        let (line, col) = self.current_span();
+                        return Err(ParseError::new(
+                            &format!("Unexpected token in struct body: {:?}", self.current()),
+                            line, col,
+                        ));
+                    }
+                }
+            }
+        }
+
+        self.expect(&Token::RBrace)?;
+        Ok(StructDecl { visibility, name, generics, implements, fields, constructor, methods })
     }
 
     // ── Interface parser ──────────────────────────────────────────────────────
@@ -411,6 +586,7 @@ impl Parser {
                 static_    : false,
                 abstract_  : true,
                 override_  : false,
+                inline_    : false,
                 name,
                 params,
                 return_ty  : Some(return_ty),
@@ -439,10 +615,10 @@ impl Parser {
         self.eat(&Token::Semicolon);
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
-            let vis      = self.parse_visibility()?;
-            let static_  = self.eat(&Token::Static);
-            let name     = self.expect_ident()?;
-            let method   = self.parse_method_body(vis, static_, false, false, name, None)?;
+            let vis     = self.parse_visibility()?;
+            let static_ = self.eat(&Token::Static);
+            let name    = self.expect_ident()?;
+            let method  = self.parse_method_body(vis, static_, false, false, false, name, None)?;
             methods.push(method);
         }
 

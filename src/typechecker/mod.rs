@@ -52,6 +52,7 @@ pub enum ClassKind {
     Interface,
     Enum,
     Exception,
+    Struct,     // value type — copy semantics, stack-allocated
 }
 
 #[derive(Debug, Clone)]
@@ -158,10 +159,11 @@ impl TypeChecker {
         for item in &module.items {
             match item {
                 Item::Class(c)     => self.check_class(c),
+                Item::Struct(s)    => self.check_struct(s),
                 Item::Interface(i) => self.check_interface(i),
                 Item::Enum(e)      => self.check_enum(e),
                 Item::Exception(e) => self.check_exception(e),
-                Item::TypeAlias(_) => {} // sadece sembol tablosunda
+                Item::TypeAlias(_) => {}
             }
         }
         &self.errors
@@ -173,6 +175,7 @@ impl TypeChecker {
         for item in &module.items {
             match item {
                 Item::Class(c)     => self.register_class(c),
+                Item::Struct(s)    => self.register_struct(s),
                 Item::Interface(i) => self.register_interface(i),
                 Item::Enum(e)      => self.register_enum(e),
                 Item::Exception(e) => self.register_exception(e),
@@ -181,6 +184,56 @@ impl TypeChecker {
                 }
             }
         }
+    }
+
+    fn register_struct(&mut self, s: &StructDecl) {
+        let mut info = ClassInfo {
+            kind        : ClassKind::Struct,
+            generics    : s.generics.clone(),
+            extends     : None, // struct cannot extend
+            implements  : s.implements.clone(),
+            fields      : HashMap::new(),
+            methods     : HashMap::new(),
+            constructor : None,
+        };
+        for f in &s.fields {
+            info.fields.insert(f.name.clone(), FieldInfo {
+                ty       : f.ty.clone(),
+                readonly : f.readonly,
+                static_  : f.static_,
+                vis      : f.visibility.clone(),
+            });
+        }
+        for m in &s.methods {
+            let mi = MethodInfo {
+                params    : m.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
+                return_ty : m.return_ty.clone(),
+                static_   : m.static_,
+                abstract_ : m.abstract_,
+                vis       : m.visibility.clone(),
+            };
+            info.methods.entry(m.name.clone()).or_default().push(mi);
+        }
+        // Auto-constructor from fields if no explicit constructor
+        if let Some(con) = &s.constructor {
+            info.constructor = Some(ConstructorInfo {
+                params : con.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
+                vis    : con.visibility.clone(),
+            });
+        } else if !s.fields.is_empty() {
+            // Generate positional constructor: StructName(field1, field2, ...)
+            let params: Vec<(String, Type)> = s.fields.iter()
+                .filter(|f| !f.static_)
+                .map(|f| (f.name.clone(), f.ty.clone()))
+                .collect();
+            if !params.is_empty() {
+                info.constructor = Some(ConstructorInfo {
+                    params,
+                    vis : Visibility::Public,
+                });
+            }
+        }
+        self.classes.insert(s.name.clone(), info);
     }
 
     fn register_class(&mut self, c: &ClassDecl) {
@@ -381,6 +434,53 @@ impl TypeChecker {
 
         for m in &c.methods.clone() {
             self.check_method(m, &c.name.clone());
+        }
+
+        self.current_class = None;
+    }
+
+    fn check_struct(&mut self, s: &StructDecl) {
+        self.current_class = Some(s.name.clone());
+
+        for iface in &s.implements {
+            match self.classes.get(iface.as_str()) {
+                None => self.error(format!(
+                    "struct '{}' implements unknown interface '{}'", s.name, iface
+                )),
+                Some(info) if info.kind != ClassKind::Interface => self.error(format!(
+                    "'{}' is not an interface — struct '{}' cannot implement it",
+                    iface, s.name
+                )),
+                _ => {}
+            }
+        }
+
+        for f in &s.fields {
+            self.check_type_exists(&f.ty, &format!("struct field '{}'", f.name));
+            if let Some(val) = &f.value {
+                let val_ty = self.infer_expr(val);
+                self.check_assignable(&f.ty, &val_ty, &format!("struct field '{}' initializer", f.name));
+            }
+        }
+
+        if let Some(con) = &s.constructor.clone() {
+            self.push_scope();
+            self.in_constructor = true;
+            for p in &con.params {
+                self.check_type_exists(&p.ty, &format!("constructor param '{}'", p.name));
+                self.define_var(&p.name, p.ty.clone(), false);
+            }
+            self.current_return_ty = None;
+            for stmt in &con.body {
+                self.check_stmt(stmt);
+            }
+            self.in_constructor = false;
+            self.pop_scope();
+        }
+
+        for m in &s.methods.clone() {
+            // operator methods are validated the same as regular methods
+            self.check_method(m, &s.name.clone());
         }
 
         self.current_class = None;
@@ -925,6 +1025,7 @@ impl TypeChecker {
                         } else if info.kind == ClassKind::Abstract {
                             self.error(format!("cannot instantiate abstract class '{}'", class));
                         }
+                        // Struct: copy type — oluşturma normaldir
                         if let Some(con) = info.constructor.clone() {
                             if con.params.len() != arg_types.len() {
                                 self.error(format!(
@@ -1064,6 +1165,15 @@ impl TypeChecker {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 if !self.is_numeric(left) || !self.is_numeric(right) {
+                    // operator overload denemesi
+                    let op_sym = match op {
+                        BinOp::Add => "+", BinOp::Sub => "-",
+                        BinOp::Mul => "*", BinOp::Div => "/", BinOp::Mod => "%",
+                        _ => unreachable!(),
+                    };
+                    if let Some(ret) = self.try_operator_overload(left, op_sym, right) {
+                        return ret;
+                    }
                     self.error(format!(
                         "arithmetic operator requires numeric types, found {:?} and {:?}",
                         left, right
@@ -1160,6 +1270,24 @@ impl TypeChecker {
                 left.clone()
             }
         }
+    }
+
+    // ── Operator overload resolution ──────────────────────────────────────────
+
+    fn try_operator_overload(&mut self, left: &Type, op: &str, _right: &Type) -> Option<Type> {
+        let class_name = match left {
+            Type::Named(n) => n.clone(),
+            _ => return None,
+        };
+        let method_name = format!("operator{}", op);
+        let info = self.classes.get(&class_name)?.clone();
+        let overloads = info.methods.get(&method_name)?.clone();
+        for mi in &overloads {
+            if !mi.static_ && mi.params.len() == 1 {
+                return Some(mi.return_ty.clone().unwrap_or(Type::Void));
+            }
+        }
+        None
     }
 
     // ── Cast validation ───────────────────────────────────────────────────────

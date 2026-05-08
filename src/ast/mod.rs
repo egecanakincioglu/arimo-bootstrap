@@ -266,6 +266,7 @@ pub struct Method {
     pub static_    : bool,
     pub abstract_  : bool,
     pub override_  : bool,
+    pub inline_    : bool,   // @inline annotation
     pub name       : String,
     pub params     : Vec<Param>,
     pub return_ty  : Option<Type>,
@@ -327,6 +328,19 @@ pub struct TypeAliasDecl {
     pub ty   : Type,
 }
 
+// ── Struct (value type, stack-allocated) ──────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct StructDecl {
+    pub visibility  : Visibility,
+    pub name        : String,
+    pub generics    : Vec<String>,
+    pub implements  : Vec<String>,
+    pub fields      : Vec<Field>,
+    pub constructor : Option<Constructor>,  // None → auto-generate from fields
+    pub methods     : Vec<Method>,
+}
+
 // ── Program (kök node) ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -339,6 +353,7 @@ pub struct Module {
 #[derive(Debug, Clone)]
 pub enum Item {
     Class(ClassDecl),
+    Struct(StructDecl),
     Interface(InterfaceDecl),
     Enum(EnumDecl),
     Exception(ExceptionDecl),

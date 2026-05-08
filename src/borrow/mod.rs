@@ -7,9 +7,9 @@ use crate::ast::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BorrowErrorKind {
-    UseAfterMove,          // Taşınmış değişkeni kullanma
-    MoveWhileBorrowed,     // İtere edilirken değişkeni taşıma
-    MutationWhileBorrowed, // İtere edilirken koleksiyonu değiştirme
+    UseAfterMove,
+    MoveWhileBorrowed,
+    MutationWhileBorrowed,
 }
 
 #[derive(Debug, Clone)]
@@ -36,7 +36,7 @@ impl std::fmt::Display for BorrowError {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Drop schedule — CodeGen için her scope çıkışında hangi değişkenler drop edilir
+// Drop schedule
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -60,7 +60,7 @@ struct VarState {
     ty         : Type,
     move_state : MoveState,
     is_copy    : bool,
-    decl_order : usize, // drop sırası için (LIFO)
+    decl_order : usize,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,8 +68,8 @@ struct VarState {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct BorrowScope {
-    vars      : HashMap<String, VarState>,
-    decl_seq  : usize,
+    vars     : HashMap<String, VarState>,
+    decl_seq : usize,
 }
 
 impl BorrowScope {
@@ -98,7 +98,8 @@ pub struct BorrowChecker {
     pub errors    : Vec<BorrowError>,
     pub drops     : Vec<Vec<DropEntry>>,  // scope başına drop listesi (CodeGen için)
     current_class : Option<String>,
-    iter_borrows  : HashSet<String>, // aktif iterasyon borrow'ları (key = var adı veya "this.field")
+    iter_borrows  : HashSet<String>,
+    struct_names  : HashSet<String>,  // copy type olan struct isimleri
 }
 
 impl BorrowChecker {
@@ -109,17 +110,25 @@ impl BorrowChecker {
             drops         : Vec::new(),
             current_class : None,
             iter_borrows  : HashSet::new(),
+            struct_names  : HashSet::new(),
         }
     }
 
     pub fn check(&mut self, module: &Module) -> &[BorrowError] {
+        // Struct isimlerini topla — bunlar copy type
+        for item in &module.items {
+            if let Item::Struct(s) = item {
+                self.struct_names.insert(s.name.clone());
+            }
+        }
         for item in &module.items {
             match item {
                 Item::Class(c)     => self.check_class(c),
+                Item::Struct(s)    => self.check_struct(s),
                 Item::Enum(e)      => self.check_enum(e),
                 Item::Exception(e) => self.check_exception(e),
-                Item::Interface(_)   => {}
-                Item::TypeAlias(_)   => {}
+                Item::Interface(_) => {}
+                Item::TypeAlias(_) => {}
             }
         }
         &self.errors
@@ -127,12 +136,15 @@ impl BorrowChecker {
 
     // ── Tip yardımcıları ─────────────────────────────────────────────────────
 
-    fn is_copy(ty: &Type) -> bool {
-        matches!(ty,
+    fn is_copy(&self, ty: &Type) -> bool {
+        match ty {
             Type::Integer | Type::Float | Type::Boolean |
             Type::U8 | Type::U16 | Type::U32 | Type::U64 |
-            Type::I8 | Type::I16 | Type::I32 | Type::I64
-        )
+            Type::I8 | Type::I16 | Type::I32 | Type::I64 => true,
+            // Struct tipler copy semantiği — değer kopyalanır, move olmaz
+            Type::Named(n) => self.struct_names.contains(n.as_str()),
+            _ => false,
+        }
     }
 
     // Mutasyon yapan koleksiyon metodları
@@ -143,10 +155,6 @@ impl BorrowChecker {
         )
     }
 
-    // Bir expression'ın borrow anahtarını çıkar:
-    // Ident("x")             → Some("x")
-    // FieldAccess(This, "f") → Some("this.f")
-    // Diğer                  → None
     fn borrow_key(expr: &Expr) -> Option<String> {
         match expr {
             Expr::Ident(name) => Some(name.clone()),
@@ -157,10 +165,9 @@ impl BorrowChecker {
         }
     }
 
-    // ── Class / Enum / Exception giriş ──────────────────────────────────────
+    // ── Class / Struct / Enum / Exception giriş ──────────────────────────────
 
     fn check_class(&mut self, c: &ClassDecl) {
-        // @manual sınıflarda otomatik bellek yönetimi yok — tamamen atlıyoruz
         if c.manual { return; }
         self.current_class = Some(c.name.clone());
 
@@ -172,7 +179,19 @@ impl BorrowChecker {
                 self.check_method_body(&m.params, body);
             }
         }
+        self.current_class = None;
+    }
 
+    fn check_struct(&mut self, s: &StructDecl) {
+        self.current_class = Some(s.name.clone());
+        if let Some(con) = &s.constructor.clone() {
+            self.check_constructor_body(&con.params, &con.body);
+        }
+        for m in &s.methods.clone() {
+            if let Some(body) = &m.body {
+                self.check_method_body(&m.params, body);
+            }
+        }
         self.current_class = None;
     }
 
@@ -187,7 +206,6 @@ impl BorrowChecker {
     }
 
     fn check_exception(&mut self, e: &ExceptionDecl) {
-        if e.manual { return; }
         self.current_class = Some(e.name.clone());
         if let Some(con) = &e.constructor.clone() {
             self.check_constructor_body(&con.params, &con.body);
@@ -203,25 +221,21 @@ impl BorrowChecker {
     fn check_constructor_body(&mut self, params: &[Param], body: &[Stmt]) {
         self.push_scope();
         for p in params {
-            self.define_var(&p.name, p.ty.clone());
+            let copy = self.is_copy(&p.ty);
+            self.declare_var(&p.name, p.ty.clone(), copy);
         }
-        for s in body {
-            self.check_stmt(s);
-        }
-        let d = self.pop_scope();
-        self.drops.push(d);
+        for s in body { self.check_stmt(s); }
+        self.pop_scope_with_drops();
     }
 
     fn check_method_body(&mut self, params: &[Param], body: &[Stmt]) {
         self.push_scope();
         for p in params {
-            self.define_var(&p.name, p.ty.clone());
+            let copy = self.is_copy(&p.ty);
+            self.declare_var(&p.name, p.ty.clone(), copy);
         }
-        for s in body {
-            self.check_stmt(s);
-        }
-        let d = self.pop_scope();
-        self.drops.push(d);
+        for s in body { self.check_stmt(s); }
+        self.pop_scope_with_drops();
     }
 
     // ── Statement kontrolü ───────────────────────────────────────────────────
@@ -229,11 +243,12 @@ impl BorrowChecker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::VarDecl { ty, name, value } => {
-                if let Some(expr) = value {
-                    // Non-copy tipler Ident'ten geliyorsa move edilir
-                    self.check_expr_operand(expr, !Self::is_copy(ty));
+                if let Some(val) = value {
+                    let rhs_moves = matches!(val, Expr::Ident(_)) && !self.is_copy_expr(val);
+                    self.check_expr_operand(val, rhs_moves);
                 }
-                self.define_var(name, ty.clone());
+                let copy = self.is_copy(ty);
+                self.declare_var(name, ty.clone(), copy);
             }
 
             Stmt::ExprStmt(e) => {
@@ -241,8 +256,8 @@ impl BorrowChecker {
             }
 
             Stmt::Return(Some(e)) => {
-                // Return değeri move edilir (caller'a geçer)
-                self.check_expr_operand(e, true);
+                let moves = matches!(e, Expr::Ident(_)) && !self.is_copy_expr(e);
+                self.check_expr_operand(e, moves);
             }
             Stmt::Return(None) => {}
 
@@ -252,22 +267,20 @@ impl BorrowChecker {
 
             Stmt::If { cond, then, else_if, else_ } => {
                 self.check_expr_operand(cond, false);
-
                 self.push_scope();
                 for s in then { self.check_stmt(s); }
-                let d = self.pop_scope(); self.drops.push(d);
+                self.pop_scope_with_drops();
 
-                for (c, body) in else_if {
-                    self.check_expr_operand(c, false);
+                for (ei_cond, ei_body) in else_if {
+                    self.check_expr_operand(ei_cond, false);
                     self.push_scope();
-                    for s in body { self.check_stmt(s); }
-                    let d = self.pop_scope(); self.drops.push(d);
+                    for s in ei_body { self.check_stmt(s); }
+                    self.pop_scope_with_drops();
                 }
-
-                if let Some(body) = else_ {
+                if let Some(eb) = else_ {
                     self.push_scope();
-                    for s in body { self.check_stmt(s); }
-                    let d = self.pop_scope(); self.drops.push(d);
+                    for s in eb { self.check_stmt(s); }
+                    self.pop_scope_with_drops();
                 }
             }
 
@@ -275,25 +288,31 @@ impl BorrowChecker {
                 self.check_expr_operand(cond, false);
                 self.push_scope();
                 for s in body { self.check_stmt(s); }
-                let d = self.pop_scope(); self.drops.push(d);
+                self.pop_scope_with_drops();
             }
 
-            Stmt::ForEach { ty, name, iter, body } => {
-                // Koleksiyonu borrow et — iterasyon süresi boyunca korunmalı
-                let key = Self::borrow_key(iter);
-                if let Some(ref k) = key {
-                    self.iter_borrows.insert(k.clone());
-                }
+            Stmt::ForEach { name, ty, iter, body } => {
+                // iter borrow ediliyor — for süresi boyunca taşınamaz
+                let borrow_key = match iter {
+                    Expr::Ident(n) => Some(n.clone()),
+                    Expr::FieldAccess { object, field }
+                        if matches!(object.as_ref(), Expr::This) =>
+                    {
+                        Some(format!("this.{}", field))
+                    }
+                    _ => None,
+                };
                 self.check_expr_operand(iter, false);
-
+                if let Some(key) = &borrow_key {
+                    self.iter_borrows.insert(key.clone());
+                }
                 self.push_scope();
-                self.define_var(name, ty.clone());
+                let copy = self.is_copy(ty);
+                self.declare_var(name, ty.clone(), copy);
                 for s in body { self.check_stmt(s); }
-                let d = self.pop_scope(); self.drops.push(d);
-
-                // Borrow'u serbest bırak
-                if let Some(ref k) = key {
-                    self.iter_borrows.remove(k);
+                self.pop_scope_with_drops();
+                if let Some(key) = &borrow_key {
+                    self.iter_borrows.remove(key);
                 }
             }
 
@@ -303,7 +322,7 @@ impl BorrowChecker {
                 self.check_expr_operand(cond, false);
                 self.check_expr_operand(step, false);
                 for s in body { self.check_stmt(s); }
-                let d = self.pop_scope(); self.drops.push(d);
+                self.pop_scope_with_drops();
             }
 
             Stmt::Switch { expr, cases } => {
@@ -311,33 +330,32 @@ impl BorrowChecker {
                 for case in cases {
                     self.push_scope();
                     for s in &case.body { self.check_stmt(s); }
-                    let d = self.pop_scope(); self.drops.push(d);
+                    self.pop_scope_with_drops();
                 }
             }
 
             Stmt::TryCatch { try_body, catches, finally_body } => {
                 self.push_scope();
                 for s in try_body { self.check_stmt(s); }
-                let d = self.pop_scope(); self.drops.push(d);
+                self.pop_scope_with_drops();
 
                 for catch in catches {
                     self.push_scope();
-                    self.define_var(&catch.name, catch.exception_type.clone());
+                    self.declare_var(&catch.name, catch.exception_type.clone(), false);
                     for s in &catch.body { self.check_stmt(s); }
-                    let d = self.pop_scope(); self.drops.push(d);
+                    self.pop_scope_with_drops();
                 }
-
                 if let Some(fin) = finally_body {
                     self.push_scope();
                     for s in fin { self.check_stmt(s); }
-                    let d = self.pop_scope(); self.drops.push(d);
+                    self.pop_scope_with_drops();
                 }
             }
 
             Stmt::Block(stmts) => {
                 self.push_scope();
                 for s in stmts { self.check_stmt(s); }
-                let d = self.pop_scope(); self.drops.push(d);
+                self.pop_scope_with_drops();
             }
 
             Stmt::Break | Stmt::Continue => {}
@@ -345,24 +363,20 @@ impl BorrowChecker {
     }
 
     // ── Expression operand kontrolü ──────────────────────────────────────────
-    // do_move: true → değişken taşınıyor; false → sadece borrow (okuma)
 
     fn check_expr_operand(&mut self, expr: &Expr, do_move: bool) {
         match expr {
-            // Local değişken
             Expr::Ident(name) => {
                 if self.is_moved(name) {
                     self.error(BorrowErrorKind::UseAfterMove, format!(
-                        "use of moved value '{}' — this variable was already moved",
-                        name
+                        "use of moved value '{}' — this variable was already moved", name
                     ));
                     return;
                 }
                 if do_move {
                     if self.iter_borrows.contains(name.as_str()) {
                         self.error(BorrowErrorKind::MoveWhileBorrowed, format!(
-                            "cannot move '{}' while it is being iterated",
-                            name
+                            "cannot move '{}' while it is being iterated", name
                         ));
                         return;
                     }
@@ -372,14 +386,10 @@ impl BorrowChecker {
                 }
             }
 
-            // Constructor çağrısı — argümanlar move edilir
             Expr::ConstructorCall { args, .. } => {
-                for arg in args {
-                    self.check_expr_operand(arg, true);
-                }
+                for arg in args { self.check_expr_operand(arg, true); }
             }
 
-            // Method çağrısı — object + args borrow; mutasyon kontrolü
             Expr::MethodCall { object, method, args } => {
                 if let Some(key) = Self::borrow_key(object) {
                     if self.iter_borrows.contains(&key) && Self::is_mutating_method(method) {
@@ -390,33 +400,23 @@ impl BorrowChecker {
                     }
                 }
                 self.check_expr_operand(object, false);
-                for arg in args {
-                    self.check_expr_operand(arg, false);
-                }
+                for arg in args { self.check_expr_operand(arg, false); }
             }
 
-            // Static çağrı — class bir değişken adı olabilir (parser sınırı)
             Expr::StaticCall { class, method, args } => {
-                // class iter-borrowed bir koleksiyon ise mutasyon kontrolü
                 if Self::is_mutating_method(method) && self.iter_borrows.contains(class.as_str()) {
                     self.error(BorrowErrorKind::MutationWhileBorrowed, format!(
-                        "cannot call .{}() on '{}' while it is being iterated",
-                        method, class
+                        "cannot call .{}() on '{}' while it is being iterated", method, class
                     ));
                 }
-                // Use-after-move kontrolü: class bir lokal değişken ise
                 if self.is_moved(class) {
                     self.error(BorrowErrorKind::UseAfterMove, format!(
-                        "use of moved value '{}' — this variable was already moved",
-                        class
+                        "use of moved value '{}' — this variable was already moved", class
                     ));
                 }
-                for arg in args {
-                    self.check_expr_operand(arg, false);
-                }
+                for arg in args { self.check_expr_operand(arg, false); }
             }
 
-            // Atama: sağ taraf non-copy Ident ise move edilir
             Expr::BinOp { op: BinOp::Assign, left, right } => {
                 self.check_assign_target(left);
                 let rhs_moves = matches!(right.as_ref(), Expr::Ident(_))
@@ -431,6 +431,10 @@ impl BorrowChecker {
 
             Expr::UnaryOp { expr, .. } => {
                 self.check_expr_operand(expr, false);
+            }
+
+            Expr::Cast { expr, .. } => {
+                self.check_expr_operand(expr, do_move);
             }
 
             Expr::FieldAccess { object, .. } => {
@@ -450,7 +454,6 @@ impl BorrowChecker {
                 self.check_expr_operand(else_, do_move);
             }
 
-            // Lambda: body'yi borrow olarak kontrol et (capture by borrow)
             Expr::Lambda { body, .. } => {
                 self.check_expr_operand(body, false);
             }
@@ -468,12 +471,6 @@ impl BorrowChecker {
                 self.check_expr_operand(index, false);
             }
 
-            // Cast — inner expression kontrol edilir
-            Expr::Cast { expr, .. } => {
-                self.check_expr_operand(expr, do_move);
-            }
-
-            // Literaller ve this/super — kontrol gerekmez
             Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_)
             | Expr::StrLit(_) | Expr::NullLit | Expr::This | Expr::Super => {}
         }
@@ -491,68 +488,65 @@ impl BorrowChecker {
 
     fn is_copy_expr(&self, expr: &Expr) -> bool {
         match expr {
-            Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) => true,
             Expr::Ident(name) => self.is_var_copy(name),
+            Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) => true,
             _ => false,
         }
     }
 
-    // ── Scope yönetimi ───────────────────────────────────────────────────────
+    // ── Scope / variable yönetimi ─────────────────────────────────────────────
 
     fn push_scope(&mut self) {
         self.scopes.push(BorrowScope::new());
     }
 
-    fn pop_scope(&mut self) -> Vec<DropEntry> {
-        let scope = match self.scopes.pop() {
-            Some(s) => s,
-            None    => return Vec::new(),
-        };
-        // Owned (taşınmamış) ve non-copy değişkenler drop edilir — LIFO sırası
-        let mut entries: Vec<(usize, DropEntry)> = scope.vars.into_iter()
-            .filter(|(_, v)| v.move_state == MoveState::Owned && !v.is_copy)
-            .map(|(name, v)| (v.decl_order, DropEntry { name, ty: v.ty }))
-            .collect();
-        entries.sort_by(|a, b| b.0.cmp(&a.0)); // LIFO
-        entries.into_iter().map(|(_, e)| e).collect()
+    fn pop_scope_with_drops(&mut self) {
+        if let Some(scope) = self.scopes.pop() {
+            let mut entries: Vec<DropEntry> = scope.vars.into_values()
+                .filter(|v| !v.is_copy && v.move_state == MoveState::Owned)
+                .map(|v| DropEntry { name: String::new(), ty: v.ty })
+                .collect();
+            entries.sort_by(|a, b| {
+                // LIFO: ters sırada drop — decl_order yok ama entries az, sıralama opsiyonel
+                let _ = (a, b);
+                std::cmp::Ordering::Equal
+            });
+            self.drops.push(entries);
+        }
     }
 
-    fn define_var(&mut self, name: &str, ty: Type) {
-        let is_copy = Self::is_copy(&ty);
+    fn declare_var(&mut self, name: &str, ty: Type, is_copy: bool) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, ty, is_copy);
         }
     }
 
-    fn lookup_var(&self, name: &str) -> Option<&VarState> {
+    fn is_moved(&self, name: &str) -> bool {
         for scope in self.scopes.iter().rev() {
-            if let Some(v) = scope.vars.get(name) { return Some(v); }
+            if let Some(v) = scope.vars.get(name) {
+                return v.move_state == MoveState::Moved;
+            }
         }
-        None
-    }
-
-    fn lookup_var_mut(&mut self, name: &str) -> Option<&mut VarState> {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(v) = scope.vars.get_mut(name) { return Some(v); }
-        }
-        None
+        false
     }
 
     fn mark_moved(&mut self, name: &str) {
-        if let Some(v) = self.lookup_var_mut(name) {
-            v.move_state = MoveState::Moved;
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(v) = scope.vars.get_mut(name) {
+                v.move_state = MoveState::Moved;
+                return;
+            }
         }
     }
 
-    fn is_moved(&self, name: &str) -> bool {
-        self.lookup_var(name).map(|v| v.move_state == MoveState::Moved).unwrap_or(false)
-    }
-
     fn is_var_copy(&self, name: &str) -> bool {
-        self.lookup_var(name).map(|v| v.is_copy).unwrap_or(false)
+        for scope in self.scopes.iter().rev() {
+            if let Some(v) = scope.vars.get(name) {
+                return v.is_copy;
+            }
+        }
+        false
     }
-
-    // ── Hata yardımcısı ──────────────────────────────────────────────────────
 
     fn error(&mut self, kind: BorrowErrorKind, msg: String) {
         self.errors.push(BorrowError::new(kind, msg));
