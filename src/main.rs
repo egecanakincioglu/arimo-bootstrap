@@ -8,6 +8,7 @@ mod codegen;
 use std::{env, fs, process};
 use lexer::Lexer;
 use parser::Parser;
+use typechecker::TypeChecker;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -38,29 +39,29 @@ fn main() {
 
     // Parser
     let mut parser = Parser::new(tokens);
-    match parser.parse() {
-        Ok(module) => {
+    let module = match parser.parse() {
+        Ok(m) => {
             println!("arc: parse OK");
             println!("");
-            println!("Module   : {}", module.path);
-            println!("Imports  : {:?}", module.imports);
-            println!("Items    : {}", module.items.len());
+            println!("Module   : {}", m.path);
+            println!("Imports  : {:?}", m.imports);
+            println!("Items    : {}", m.items.len());
             println!("");
-            for item in &module.items {
+            for item in &m.items {
                 match item {
                     ast::Item::Class(c) => {
                         println!("  class {} {{", c.name);
                         println!("    fields      : {}", c.fields.len());
                         println!("    constructor : {}", c.constructor.is_some());
                         println!("    methods     : {}", c.methods.len());
-                        for m in &c.methods {
-                            let ret = match &m.return_ty {
+                        for method in &c.methods {
+                            let ret = match &method.return_ty {
                                 Some(t) => format!("{:?}", t),
                                 None    => "—".to_string(),
                             };
-                            println!("      {} {}() : {}", 
-                                if m.static_ { "static" } else { "      " },
-                                m.name, ret
+                            println!("      {} {}() : {}",
+                                if method.static_ { "static" } else { "      " },
+                                method.name, ret
                             );
                         }
                         println!("  }}");
@@ -72,14 +73,29 @@ fn main() {
                         println!("  enum {} {:?}", e.name, e.variants);
                     }
                     ast::Item::Exception(e) => {
-                        println!("  exception {}", e.name);
+                        println!("  exception {} extends {}", e.name, e.extends);
                     }
                 }
             }
+            m
         }
         Err(e) => {
             eprintln!("arc: parse error at {}:{} — {}", e.line, e.col, e.message);
             process::exit(1);
         }
+    };
+
+    // Type Checker
+    println!("");
+    let mut tc     = TypeChecker::new();
+    let type_errors = tc.check(&module);
+
+    if type_errors.is_empty() {
+        println!("arc: type check OK");
+    } else {
+        for err in type_errors {
+            eprintln!("arc: type error — {}", err);
+        }
+        process::exit(1);
     }
 }

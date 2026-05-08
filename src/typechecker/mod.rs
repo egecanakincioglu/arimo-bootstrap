@@ -863,11 +863,48 @@ impl TypeChecker {
                     }
                     return Type::Void;
                 }
+                // Parser Ident+Dot+method() daima StaticCall üretiyor.
+                // Eğer class ismi bilinen bir class değil ama local değişkense
+                // instance method call olarak yönlendir.
+                if !self.classes.contains_key(class.as_str()) {
+                    if let Some(var) = self.lookup_var(class) {
+                        let var_ty = var.ty.clone();
+                        return self.resolve_method_call(&var_ty, method, &arg_types, false);
+                    }
+                }
                 let class_ty = Type::Named(class.clone());
                 self.resolve_method_call(&class_ty, method, &arg_types, true)
             }
 
             Expr::ConstructorCall { class, args } => {
+                // Builtin koleksiyon constructor'ları — List()  HashMap()  TreeMap()
+                match class.as_str() {
+                    "List" => {
+                        for a in args { self.infer_expr(a); }
+                        return Type::List(Box::new(Type::Named("Unknown".to_string())));
+                    }
+                    "HashMap" => {
+                        for a in args { self.infer_expr(a); }
+                        return Type::HashMap(
+                            Box::new(Type::Named("Unknown".to_string())),
+                            Box::new(Type::Named("Unknown".to_string())),
+                        );
+                    }
+                    "TreeMap" => {
+                        for a in args { self.infer_expr(a); }
+                        return Type::TreeMap(
+                            Box::new(Type::Named("Unknown".to_string())),
+                            Box::new(Type::Named("Unknown".to_string())),
+                        );
+                    }
+                    "Pair" if args.len() == 2 => {
+                        let f = self.infer_expr(&args[0]);
+                        let s = self.infer_expr(&args[1]);
+                        return Type::Pair(Box::new(f), Box::new(s));
+                    }
+                    _ => {}
+                }
+
                 let arg_types : Vec<Type> = args.iter().map(|a| self.infer_expr(a)).collect();
                 match self.classes.get(class.as_str()).cloned() {
                     None => {
@@ -1412,6 +1449,38 @@ impl TypeChecker {
 
         if matches!(target, Type::Float) && matches!(source, Type::Integer) {
             return true;
+        }
+
+        // Boş koleksiyon literal'ı (Unknown wildcard) herhangi bir koleksiyona atanabilir
+        // Örn: List<Task> tasks = List()  →  List<Unknown> → List<Task> OK
+        if let (Type::List(te), Type::List(ts)) = (target, source) {
+            if matches!(ts.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
+            return self.is_assignable(te, ts);
+        }
+        if let (Type::HashMap(tk, tv), Type::HashMap(sk, sv)) = (target, source) {
+            if matches!(sk.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
+            return self.is_assignable(tk, sk) && self.is_assignable(tv, sv);
+        }
+        if let (Type::TreeMap(tk, tv), Type::TreeMap(sk, sv)) = (target, source) {
+            if matches!(sk.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
+            return self.is_assignable(tk, sk) && self.is_assignable(tv, sv);
+        }
+        if let (Type::Map(tk, tv), Type::Map(sk, sv)) = (target, source) {
+            if matches!(sk.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
+            return self.is_assignable(tk, sk) && self.is_assignable(tv, sv);
+        }
+        // Map (interface) ← HashMap veya TreeMap (implementasyonlar)
+        if let Type::Map(tk, tv) = target {
+            let (sk, sv) = match source {
+                Type::HashMap(k, v) | Type::TreeMap(k, v) => (k, v),
+                _ => return false,
+            };
+            if matches!(sk.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
+            return self.is_assignable(tk, sk) && self.is_assignable(tv, sv);
+        }
+        if let (Type::Pair(ta, tb), Type::Pair(sa, sb)) = (target, source) {
+            if matches!(sa.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
+            return self.is_assignable(ta, sa) && self.is_assignable(tb, sb);
         }
 
         if let Type::Nullable(t_inner) = target {

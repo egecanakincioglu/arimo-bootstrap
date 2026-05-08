@@ -83,6 +83,21 @@ impl Parser {
         }
     }
 
+    // extends / implements sonrası tip ismi — hem Ident hem TypeException kabul eder
+    fn expect_class_name(&mut self) -> ParseResult<String> {
+        match self.current().clone() {
+            Token::Ident(name)   => { self.advance(); Ok(name) }
+            Token::TypeException => { self.advance(); Ok("Exception".to_string()) }
+            _ => {
+                let (line, col) = self.current_span();
+                Err(ParseError::new(
+                    &format!("Expected class name, found {:?}", self.current()),
+                    line, col,
+                ))
+            }
+        }
+    }
+
     fn check(&self, tok: &Token) -> bool {
         self.current() == tok
     }
@@ -145,7 +160,23 @@ impl Parser {
         let abstract_  = self.eat(&Token::Abstract);
 
         match self.current().clone() {
-            Token::Class     => Ok(Item::Class(self.parse_class(visibility, abstract_)?)),
+            Token::Class => {
+                let class = self.parse_class(visibility, abstract_)?;
+                // Extends Exception veya *Exception pattern'ı → ExceptionDecl
+                if let Some(ref parent) = class.extends.clone() {
+                    if parent == "Exception" || parent.ends_with("Exception") {
+                        return Ok(Item::Exception(ExceptionDecl {
+                            visibility  : class.visibility,
+                            name        : class.name,
+                            extends     : parent.clone(),
+                            fields      : class.fields,
+                            constructor : class.constructor,
+                            methods     : class.methods,
+                        }));
+                    }
+                }
+                Ok(Item::Class(class))
+            }
             Token::Interface => Ok(Item::Interface(self.parse_interface()?)),
             Token::Enum      => Ok(Item::Enum(self.parse_enum(visibility)?)),
             _ => {
@@ -176,11 +207,11 @@ impl Parser {
         let generics = self.parse_generics_decl()?;
 
         let extends = if self.eat(&Token::Extends) {
-            Some(self.expect_ident()?)
+            Some(self.expect_class_name()?)
         } else { None };
 
         let implements = if self.eat(&Token::Implements) {
-            self.parse_comma_separated_idents()?
+            self.parse_comma_separated_class_names()?
         } else { Vec::new() };
 
         self.expect(&Token::LBrace)?;
@@ -495,6 +526,14 @@ impl Parser {
         let mut names = vec![self.expect_ident()?];
         while self.eat(&Token::Comma) {
             names.push(self.expect_ident()?);
+        }
+        Ok(names)
+    }
+
+    fn parse_comma_separated_class_names(&mut self) -> ParseResult<Vec<String>> {
+        let mut names = vec![self.expect_class_name()?];
+        while self.eat(&Token::Comma) {
+            names.push(self.expect_class_name()?);
         }
         Ok(names)
     }
@@ -868,8 +907,21 @@ impl Parser {
             }
 
             // this / super
-            Token::This  => { self.advance(); Ok(Expr::This)  }
-            Token::Super => { self.advance(); Ok(Expr::Super) }
+            Token::This  => { self.advance(); Ok(Expr::This) }
+            Token::Super => {
+                self.advance();
+                if self.check(&Token::LParen) {
+                    // super(...) — üst sınıf constructor çağrısı
+                    let args = self.parse_args()?;
+                    Ok(Expr::StaticCall {
+                        class  : "super".to_string(),
+                        method : "__constructor__".to_string(),
+                        args,
+                    })
+                } else {
+                    Ok(Expr::Super)
+                }
+            }
 
             // Identifier — değişken, static çağrı, constructor çağrısı
             Token::Ident(name) => {
@@ -898,7 +950,7 @@ impl Parser {
                 }
             }
 
-            // Standart kütüphane — IO.print(...)  Math.sqrt(...)  Time.now()
+            // Standart kütüphane — IO.print(...)  Math.sqrt(...)  Math.PI  Time.now()
             Token::StdIO | Token::StdMath | Token::StdTime => {
                 let class = match self.advance().clone() {
                     Token::StdIO   => "IO",
@@ -907,9 +959,48 @@ impl Parser {
                     _              => unreachable!(),
                 }.to_string();
                 self.expect(&Token::Dot)?;
-                let method = self.expect_ident()?;
-                let args   = self.parse_args()?;
-                Ok(Expr::StaticCall { class, method, args })
+                let member = self.expect_ident()?;
+                if self.check(&Token::LParen) {
+                    let args = self.parse_args()?;
+                    Ok(Expr::StaticCall { class, method: member, args })
+                } else {
+                    // Math.PI gibi parantez olmayan sabit erişimi
+                    Ok(Expr::FieldAccess {
+                        object : Box::new(Expr::Ident(class)),
+                        field  : member,
+                    })
+                }
+            }
+
+            // Builtin koleksiyon constructor ve static çağrılar — List()  HashMap()  List.of(...)
+            Token::TypeList | Token::TypeMap | Token::TypeHashMap | Token::TypeTreeMap | Token::TypePair => {
+                let class = match self.current() {
+                    Token::TypeList    => "List",
+                    Token::TypeMap     => "Map",
+                    Token::TypeHashMap => "HashMap",
+                    Token::TypeTreeMap => "TreeMap",
+                    Token::TypePair    => "Pair",
+                    _                  => unreachable!(),
+                }.to_string();
+                self.advance();
+                if self.check(&Token::LParen) {
+                    let args = self.parse_args()?;
+                    Ok(Expr::ConstructorCall { class, args })
+                } else if self.check(&Token::Dot) {
+                    self.advance();
+                    let method = self.expect_ident()?;
+                    if self.check(&Token::LParen) {
+                        let args = self.parse_args()?;
+                        Ok(Expr::StaticCall { class, method, args })
+                    } else {
+                        Ok(Expr::FieldAccess {
+                            object : Box::new(Expr::Ident(class)),
+                            field  : method,
+                        })
+                    }
+                } else {
+                    Ok(Expr::Ident(class))
+                }
             }
 
             // Parantez — (expr)
@@ -959,27 +1050,27 @@ impl Parser {
 
     // Pratt parser — operatör öncelikleri
     fn infix_binding_power(&self) -> Option<(BinOp, u8, u8)> {
-        let op = match self.current() {
-            Token::Eq      => return Some((BinOp::Assign,    1,  2)),
-            Token::PlusEq  => return Some((BinOp::AddAssign, 1,  2)),
-            Token::MinusEq => return Some((BinOp::SubAssign, 1,  2)),
-            Token::StarEq  => return Some((BinOp::MulAssign, 1,  2)),
-            Token::SlashEq => return Some((BinOp::DivAssign, 1,  2)),
-            Token::PipePipe => return Some((BinOp::Or,       3,  4)),
-            Token::AndAnd   => return Some((BinOp::And,      5,  6)),
-            Token::EqEq    => return Some((BinOp::Eq,        7,  8)),
-            Token::BangEq  => return Some((BinOp::Ne,        7,  8)),
-            Token::Lt      => return Some((BinOp::Lt,        9, 10)),
-            Token::LtEq    => return Some((BinOp::Le,        9, 10)),
-            Token::Gt      => return Some((BinOp::Gt,        9, 10)),
-            Token::GtEq    => return Some((BinOp::Ge,        9, 10)),
-            Token::Plus    => return Some((BinOp::Add,      11, 12)),
-            Token::Minus   => return Some((BinOp::Sub,      11, 12)),
-            Token::Star    => return Some((BinOp::Mul,      13, 14)),
-            Token::Slash   => return Some((BinOp::Div,      13, 14)),
-            Token::Percent => return Some((BinOp::Mod,      13, 14)),
-            _ => return None,
-        };
+        match self.current() {
+            Token::Eq       => Some((BinOp::Assign,    1,  2)),
+            Token::PlusEq   => Some((BinOp::AddAssign, 1,  2)),
+            Token::MinusEq  => Some((BinOp::SubAssign, 1,  2)),
+            Token::StarEq   => Some((BinOp::MulAssign, 1,  2)),
+            Token::SlashEq  => Some((BinOp::DivAssign, 1,  2)),
+            Token::PipePipe => Some((BinOp::Or,        3,  4)),
+            Token::AndAnd   => Some((BinOp::And,       5,  6)),
+            Token::EqEq     => Some((BinOp::Eq,        7,  8)),
+            Token::BangEq   => Some((BinOp::Ne,        7,  8)),
+            Token::Lt       => Some((BinOp::Lt,        9, 10)),
+            Token::LtEq     => Some((BinOp::Le,        9, 10)),
+            Token::Gt       => Some((BinOp::Gt,        9, 10)),
+            Token::GtEq     => Some((BinOp::Ge,        9, 10)),
+            Token::Plus     => Some((BinOp::Add,      11, 12)),
+            Token::Minus    => Some((BinOp::Sub,      11, 12)),
+            Token::Star     => Some((BinOp::Mul,      13, 14)),
+            Token::Slash    => Some((BinOp::Div,      13, 14)),
+            Token::Percent  => Some((BinOp::Mod,      13, 14)),
+            _               => None,
+        }
     }
 
     // Lambda tespiti — (a, b) -> ... ya da (a) -> ...
