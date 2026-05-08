@@ -155,6 +155,8 @@ impl BorrowChecker {
     // ── Class / Enum / Exception giriş ──────────────────────────────────────
 
     fn check_class(&mut self, c: &ClassDecl) {
+        // @manual sınıflarda otomatik bellek yönetimi yok — tamamen atlıyoruz
+        if c.manual { return; }
         self.current_class = Some(c.name.clone());
 
         if let Some(con) = &c.constructor.clone() {
@@ -180,6 +182,7 @@ impl BorrowChecker {
     }
 
     fn check_exception(&mut self, e: &ExceptionDecl) {
+        if e.manual { return; }
         self.current_class = Some(e.name.clone());
         if let Some(con) = &e.constructor.clone() {
             self.check_constructor_body(&con.params, &con.body);

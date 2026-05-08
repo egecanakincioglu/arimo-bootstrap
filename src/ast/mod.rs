@@ -43,6 +43,9 @@ pub enum Type {
 
     // Generics — Pair<First, Second>
     Generic(String, Vec<Type>),
+
+    // Ham pointer — sadece @manual sınıflarda
+    RawPtr(Box<Type>),
 }
 
 // ── Expression ────────────────────────────────────────────────────────────────
@@ -283,6 +286,7 @@ pub struct Constructor {
 pub struct ClassDecl {
     pub visibility  : Visibility,
     pub abstract_   : bool,
+    pub manual      : bool,         // @manual annotation — otomatik bellek yönetimi devre dışı
     pub name        : String,
     pub generics    : Vec<String>,       // class Pair<First, Second>
     pub extends     : Option<String>,
@@ -310,6 +314,7 @@ pub struct EnumDecl {
 #[derive(Debug, Clone)]
 pub struct ExceptionDecl {
     pub visibility  : Visibility,
+    pub manual      : bool,
     pub name        : String,
     pub extends     : String,            // her zaman Exception'dan extends
     pub fields      : Vec<Field>,

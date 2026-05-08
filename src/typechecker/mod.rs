@@ -180,6 +180,7 @@ impl TypeChecker {
     fn register_class(&mut self, c: &ClassDecl) {
         let mut info = ClassInfo {
             kind        : if c.abstract_ { ClassKind::Abstract } else { ClassKind::Concrete },
+            // @manual sınıflar için özel kind eklenebilir, şimdilik Concrete
             generics    : c.generics.clone(),
             extends     : c.extends.clone(),
             implements  : c.implements.clone(),
@@ -343,6 +344,15 @@ impl TypeChecker {
         }
 
         for f in &c.fields {
+            // @manual sınıflarda RawPtr field'larına izin ver
+            if !c.manual {
+                if matches!(f.ty, Type::RawPtr(_)) {
+                    self.error(format!(
+                        "field '{}': RawPtr<T> only allowed in @manual classes",
+                        f.name
+                    ));
+                }
+            }
             self.check_type_exists(&f.ty, &format!("field '{}'", f.name));
             if let Some(val) = &f.value {
                 let val_ty = self.infer_expr(val);
@@ -1163,6 +1173,7 @@ impl TypeChecker {
             Type::HashMap(_, _) => "HashMap".to_string(),
             Type::TreeMap(_, _) => "TreeMap".to_string(),
             Type::Pair(_, _)    => "Pair".to_string(),
+            Type::RawPtr(_)     => "RawPtr".to_string(),
             _ => {
                 self.error(format!(
                     "cannot access field '{}' on type {:?}", field, ty
@@ -1226,6 +1237,7 @@ impl TypeChecker {
             Type::HashMap(_, _) => "HashMap".to_string(),
             Type::TreeMap(_, _) => "TreeMap".to_string(),
             Type::Pair(_, _)    => "Pair".to_string(),
+            Type::RawPtr(_)     => "RawPtr".to_string(),
             _ => {
                 self.error(format!(
                     "cannot call method '{}' on type {:?}", method, ty
@@ -1407,6 +1419,25 @@ impl TypeChecker {
                 }
             }
 
+            // @manual — Memory stdlib
+            ("Memory", "alloc")  => Some(Type::RawPtr(Box::new(Type::Void))),
+            ("Memory", "free")   => Some(Type::Void),
+            ("Memory", "copy")   => Some(Type::Void),
+            ("Memory", "set")    => Some(Type::Void),
+
+            // @manual — RawPtr<T> metodları
+            ("RawPtr", "read") => {
+                match ty {
+                    Type::RawPtr(inner) => Some(*inner.clone()),
+                    _ => Some(Type::Named("Unknown".to_string())),
+                }
+            }
+            ("RawPtr", "write")  => Some(Type::Void),
+            ("RawPtr", "offset") => Some(ty.clone()),
+
+            // sizeOf — her tip için geçerli static metod
+            (_, "sizeOf") => Some(Type::Integer),
+
             ("Exception", "message") => Some(Type::Str),
             (_, "message") => {
                 if self.classes.get(class)
@@ -1500,6 +1531,11 @@ impl TypeChecker {
         if let (Type::Pair(ta, tb), Type::Pair(sa, sb)) = (target, source) {
             if matches!(sa.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
             return self.is_assignable(ta, sa) && self.is_assignable(tb, sb);
+        }
+
+        // RawPtr<Void> herhangi bir RawPtr<T>'ye atanabilir (C'nin void* gibi)
+        if let (Type::RawPtr(_), Type::RawPtr(s_inner)) = (target, source) {
+            if matches!(s_inner.as_ref(), Type::Void | Type::Named(_)) { return true; }
         }
 
         if let Type::Nullable(t_inner) = target {
@@ -1790,7 +1826,8 @@ impl TypeChecker {
                 self.check_type_exists(a, context);
                 self.check_type_exists(b, context);
             }
-            Type::Nullable(inner)  => self.check_type_exists(inner, context),
+            Type::Nullable(inner) => self.check_type_exists(inner, context),
+            Type::RawPtr(inner)   => self.check_type_exists(inner, context),
             Type::Generic(name, params) => {
                 if !self.is_known_type(name) {
                     self.error(format!(
@@ -1809,9 +1846,10 @@ impl TypeChecker {
         matches!(
             name,
             "Integer" | "Float" | "Boolean" | "String" | "Void"
-            | "IO" | "Math" | "Time"
+            | "IO" | "Math" | "Time" | "Memory"
             | "Exception" | "Object"
             | "List" | "Map" | "HashMap" | "TreeMap" | "Pair"
+            | "RawPtr" | "Void"
             | "Lambda" | "Unknown" | "Error"
         ) || self.classes.contains_key(name)
     }

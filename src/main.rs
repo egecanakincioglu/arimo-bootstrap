@@ -51,7 +51,8 @@ fn main() {
             for item in &m.items {
                 match item {
                     ast::Item::Class(c) => {
-                        println!("  class {} {{", c.name);
+                        let manual_tag = if c.manual { " [@manual]" } else { "" };
+                        println!("  class {}{} {{", c.name, manual_tag);
                         println!("    fields      : {}", c.fields.len());
                         println!("    constructor : {}", c.constructor.is_some());
                         println!("    methods     : {}", c.methods.len());

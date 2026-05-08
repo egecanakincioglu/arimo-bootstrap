@@ -156,17 +156,34 @@ impl Parser {
     // ── Üst düzey tanımlar ────────────────────────────────────────────────────
 
     fn parse_item(&mut self) -> ParseResult<Item> {
+        // @annotation kontrolü
+        let mut manual = false;
+        if self.eat(&Token::At) {
+            let annotation = self.expect_ident()?;
+            match annotation.as_str() {
+                "manual" => { manual = true; }
+                other => {
+                    let (line, col) = self.current_span();
+                    return Err(ParseError::new(
+                        &format!("unknown annotation '@{}' — only @manual is supported", other),
+                        line, col,
+                    ));
+                }
+            }
+        }
+
         let visibility = self.parse_visibility()?;
         let abstract_  = self.eat(&Token::Abstract);
 
         match self.current().clone() {
             Token::Class => {
-                let class = self.parse_class(visibility, abstract_)?;
+                let class = self.parse_class(visibility, abstract_, manual)?;
                 // Extends Exception veya *Exception pattern'ı → ExceptionDecl
                 if let Some(ref parent) = class.extends.clone() {
                     if parent == "Exception" || parent.ends_with("Exception") {
                         return Ok(Item::Exception(ExceptionDecl {
                             visibility  : class.visibility,
+                            manual      : class.manual,
                             name        : class.name,
                             extends     : parent.clone(),
                             fields      : class.fields,
@@ -201,7 +218,7 @@ impl Parser {
 
     // ── Class parser ──────────────────────────────────────────────────────────
 
-    fn parse_class(&mut self, visibility: Visibility, abstract_: bool) -> ParseResult<ClassDecl> {
+    fn parse_class(&mut self, visibility: Visibility, abstract_: bool, manual: bool) -> ParseResult<ClassDecl> {
         self.expect(&Token::Class)?;
         let name     = self.expect_ident()?;
         let generics = self.parse_generics_decl()?;
@@ -295,7 +312,7 @@ impl Parser {
 
         self.expect(&Token::RBrace)?;
 
-        Ok(ClassDecl { visibility, abstract_, name, generics, extends, implements, fields, constructor, methods })
+        Ok(ClassDecl { visibility, abstract_, manual, name, generics, extends, implements, fields, constructor, methods })
     }
 
     fn parse_constructor(&mut self, visibility: Visibility) -> ParseResult<Constructor> {
@@ -407,7 +424,8 @@ impl Parser {
             Token::TypeInteger | Token::TypeFloat | Token::TypeBoolean |
             Token::TypeString  | Token::TypeVoid  | Token::TypeList    |
             Token::TypeMap     | Token::TypeHashMap | Token::TypeTreeMap |
-            Token::TypePair    | Token::TypeException | Token::Ident(_)
+            Token::TypePair    | Token::TypeException | Token::TypeRawPtr |
+            Token::Ident(_)
         )
     }
 
@@ -419,6 +437,14 @@ impl Parser {
             Token::TypeString    => { self.advance(); Type::Str     }
             Token::TypeVoid      => { self.advance(); Type::Void    }
             Token::TypeException => { self.advance(); Type::Named("Exception".to_string()) }
+
+            Token::TypeRawPtr => {
+                self.advance();
+                self.expect(&Token::Lt)?;
+                let inner = self.parse_type()?;
+                self.expect(&Token::Gt)?;
+                Type::RawPtr(Box::new(inner))
+            }
 
             Token::TypeList => {
                 self.advance();
@@ -630,7 +656,7 @@ impl Parser {
             Token::TypeInteger | Token::TypeFloat | Token::TypeBoolean |
             Token::TypeString  | Token::TypeVoid  | Token::TypeList    |
             Token::TypeMap     | Token::TypeHashMap | Token::TypeTreeMap |
-            Token::TypePair    | Token::TypeException => return true,
+            Token::TypePair    | Token::TypeException | Token::TypeRawPtr => return true,
             _ => {}
         }
 
@@ -950,13 +976,14 @@ impl Parser {
                 }
             }
 
-            // Standart kütüphane — IO.print(...)  Math.sqrt(...)  Math.PI  Time.now()
-            Token::StdIO | Token::StdMath | Token::StdTime => {
+            // Standart kütüphane — IO.print(...)  Math.sqrt(...)  Math.PI  Time.now()  Memory.alloc()
+            Token::StdIO | Token::StdMath | Token::StdTime | Token::StdMemory => {
                 let class = match self.advance().clone() {
-                    Token::StdIO   => "IO",
-                    Token::StdMath => "Math",
-                    Token::StdTime => "Time",
-                    _              => unreachable!(),
+                    Token::StdIO     => "IO",
+                    Token::StdMath   => "Math",
+                    Token::StdTime   => "Time",
+                    Token::StdMemory => "Memory",
+                    _                => unreachable!(),
                 }.to_string();
                 self.expect(&Token::Dot)?;
                 let member = self.expect_ident()?;
@@ -969,6 +996,39 @@ impl Parser {
                         object : Box::new(Expr::Ident(class)),
                         field  : member,
                     })
+                }
+            }
+
+            // Primitif tip isimleri expression'da — Float.sizeOf()  Integer.sizeOf()
+            Token::TypeInteger | Token::TypeFloat | Token::TypeBoolean
+            | Token::TypeString | Token::TypeVoid => {
+                let class = match self.current() {
+                    Token::TypeInteger => "Integer",
+                    Token::TypeFloat   => "Float",
+                    Token::TypeBoolean => "Boolean",
+                    Token::TypeString  => "String",
+                    Token::TypeVoid    => "Void",
+                    _                  => unreachable!(),
+                }.to_string();
+                self.advance();
+                if self.check(&Token::Dot) {
+                    self.advance();
+                    let method = self.expect_ident()?;
+                    if self.check(&Token::LParen) {
+                        let args = self.parse_args()?;
+                        Ok(Expr::StaticCall { class, method, args })
+                    } else {
+                        Ok(Expr::FieldAccess {
+                            object : Box::new(Expr::Ident(class)),
+                            field  : method,
+                        })
+                    }
+                } else {
+                    let (line, col) = self.current_span();
+                    Err(ParseError::new(
+                        &format!("unexpected type '{}' in expression — did you mean {}.sizeOf()?", class, class),
+                        line, col,
+                    ))
                 }
             }
 

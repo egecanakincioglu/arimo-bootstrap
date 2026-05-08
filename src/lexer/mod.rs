@@ -47,11 +47,13 @@ pub enum Token {
     TypeTreeMap,
     TypePair,
     TypeException,    // Exception — built-in base exception
+    TypeRawPtr,       // RawPtr<T> — @manual sınıflarda ham bellek erişimi
 
     // ── Standard library ─────────────────────────────────────────────────
     StdIO,            // IO.print() IO.read()
     StdMath,          // Math.sqrt() Math.PI
     StdTime,          // Time.now() Time.generateId()
+    StdMemory,        // Memory.alloc() Memory.free() Memory.copy()
 
     // ── Control flow ─────────────────────────────────────────────────────
     If,
@@ -110,6 +112,9 @@ pub enum Token {
     Dot,          // .
     DollarLBrace, // ${  string interpolation başlangıcı
     InterpolEnd,  // }   string interpolation bitişi (string içinde)
+
+    // ── Annotations ──────────────────────────────────────────────────────
+    At,             // @  annotation işareti
 
     // ── Special ──────────────────────────────────────────────────────────
     Eof,
@@ -259,10 +264,14 @@ impl<'a> Lexer<'a> {
             "Pair"        => Token::TypePair,
             "Exception"   => Token::TypeException,
 
+            // Built-in @manual tipleri
+            "RawPtr"      => Token::TypeRawPtr,
+
             // Standard library
             "IO"          => Token::StdIO,
             "Math"        => Token::StdMath,
             "Time"        => Token::StdTime,
+            "Memory"      => Token::StdMemory,
 
             // Control flow
             "if"          => Token::If,
@@ -455,6 +464,7 @@ impl<'a> Lexer<'a> {
                     ']' => Token::RBracket,
                     ',' => Token::Comma,
                     ';' => Token::Semicolon,
+                    '@' => Token::At,
 
                     other => Token::Unknown(other),
                 }
