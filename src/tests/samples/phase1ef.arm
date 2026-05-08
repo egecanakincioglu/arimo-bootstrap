@@ -1,0 +1,126 @@
+module arimo.test.phase1ef;
+
+// ── Phase 1e: Generic bounds ──────────────────────────────────────────────────
+// ── Phase 1f: Enum with data, match, Result<T,E> ─────────────────────────────
+
+// ── 1. Enum with data ─────────────────────────────────────────────────────────
+
+public enum Shape {
+    Circle(Float),
+    Rectangle(Float, Float),
+    Triangle(Float, Float, Float),
+    Point;
+
+    public area() : Float {
+        return match this {
+            Shape.Circle(r)           => Math.PI * r * r,
+            Shape.Rectangle(w, h)     => w * h,
+            Shape.Triangle(a, b, c)   => a,
+            Shape.Point               => 0.0,
+        };
+    }
+
+    public name() : String {
+        return match this {
+            Shape.Circle(r)       => "circle",
+            Shape.Rectangle(w, h) => "rectangle",
+            Shape.Triangle(a, b, c) => "triangle",
+            Shape.Point           => "point",
+        };
+    }
+}
+
+// ── 2. match expression ───────────────────────────────────────────────────────
+
+public enum Color {
+    Red,
+    Green,
+    Blue;
+
+    public label() : String {
+        switch (this) {
+            case Color.Red:   return "Red";
+            case Color.Green: return "Green";
+            case Color.Blue:  return "Blue";
+        }
+    }
+}
+
+// ── 3. Result<T, E> built-in ─────────────────────────────────────────────────
+
+public class FileSystem {
+
+    public static read(path: String) : Result<String, String> {
+        return Result.Ok("file contents");
+    }
+
+    public static readFail(path: String) : Result<String, String> {
+        return Result.Err("file not found");
+    }
+
+    public static demo() : Void {
+        Result<String, String> ok  = FileSystem.read("/etc/hosts");
+        Result<String, String> err = FileSystem.readFail("/missing");
+
+        Boolean isOk  = ok.isOk();
+        Boolean isErr = err.isErr();
+
+        match ok {
+            Result.Ok(content) => IO.print("Content: ${content}"),
+            Result.Err(msg)    => IO.print("Error: ${msg}"),
+        }
+
+        match err {
+            Result.Ok(content) => IO.print("Content: ${content}"),
+            Result.Err(msg)    => IO.print("Error: ${msg}"),
+            _ => IO.print("unexpected"),
+        }
+    }
+}
+
+// ── 4. Generic bounds ─────────────────────────────────────────────────────────
+
+interface Printable {
+    print() : Void;
+}
+
+interface Comparable {
+    compareTo(other: String) : Integer;
+}
+
+// Generic class with bound: T: Printable
+public class Printer<T: Printable> {
+
+    private item : T;
+
+    public constructor(item: T) {
+        this.item = item;
+    }
+
+    public run() : Void {
+        this.item.print();
+    }
+}
+
+// ── 5. Entry point ────────────────────────────────────────────────────────────
+
+public class TestApp {
+
+    public static main() : Void {
+        // Enum with data
+        Shape circle = Shape.Circle(5.0);
+        Float area   = circle.area();
+        IO.print("Area: ${area}");
+
+        // match as expression result (inside return/assignment via method)
+        Shape rect = Shape.Rectangle(4.0, 3.0);
+        Float rArea = rect.area();
+
+        // Result
+        FileSystem.demo();
+
+        // Pure enum still works
+        Color c = Color.Red;
+        IO.print(c.label());
+    }
+}

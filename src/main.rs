@@ -105,7 +105,7 @@ fn main() {
         println!("arc: type check OK");
     } else {
         for err in type_errors {
-            eprintln!("arc: type error — {}", err);
+            eprintln!("arc: {}", err);
         }
         process::exit(1);
     }

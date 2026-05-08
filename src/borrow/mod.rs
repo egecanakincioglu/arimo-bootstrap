@@ -477,6 +477,25 @@ impl BorrowChecker {
                 self.check_expr_operand(index, false);
             }
 
+            Expr::Match { expr, arms } => {
+                self.check_expr_operand(expr, false);
+                for arm in arms {
+                    // Pattern binding'ler: copy type olarak ekle (Unknown type)
+                    self.push_scope();
+                    match &arm.pattern {
+                        MatchPattern::Variant { bindings, .. } => {
+                            for b in bindings {
+                                // Binding tipini bilmiyoruz — Unknown → copy olarak ekle
+                                self.declare_var(b, Type::Named("Unknown".to_string()), true);
+                            }
+                        }
+                        MatchPattern::Wildcard => {}
+                    }
+                    self.check_expr_operand(&arm.body, false);
+                    self.pop_scope_with_drops();
+                }
+            }
+
             Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_)
             | Expr::StrLit(_) | Expr::NullLit | Expr::This | Expr::Super => {}
         }

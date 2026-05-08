@@ -79,6 +79,7 @@ pub enum Token {
     Continue,
     Switch,
     Case,
+    Match,       // match — pattern matching
     Throw,
     Try,
     Catch,
@@ -114,6 +115,7 @@ pub enum Token {
     StarEq,      // *=
     SlashEq,     // /=
     Arrow,       // ->  lambda
+    FatArrow,    // =>  match arm
     Question,    // ?   nullable + ternary (parser bağlama göre ayırt eder)
     QuestionDot, // ?.  null-safe erişim
 
@@ -353,6 +355,7 @@ impl<'a> Lexer<'a> {
             "continue"    => Token::Continue,
             "switch"      => Token::Switch,
             "case"        => Token::Case,
+            "match"       => Token::Match,
             "throw"       => Token::Throw,
             "try"         => Token::Try,
             "catch"       => Token::Catch,
@@ -506,7 +509,8 @@ impl<'a> Lexer<'a> {
                     '%' => Token::Percent,
 
                     '=' => match self.peek() {
-                        Some('=') => { self.advance(); Token::EqEq }
+                        Some('=') => { self.advance(); Token::EqEq    }
+                        Some('>') => { self.advance(); Token::FatArrow }
                         _         => Token::Eq
                     },
                     '!' => if self.peek() == Some('=') { self.advance(); Token::BangEq } else { Token::Bang },

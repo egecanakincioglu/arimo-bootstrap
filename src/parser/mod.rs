@@ -609,7 +609,23 @@ impl Parser {
         let mut methods  = Vec::new();
 
         while !self.check(&Token::Semicolon) && !self.check(&Token::RBrace) {
-            variants.push(self.expect_ident()?);
+            let vname = self.expect_ident()?;
+            // Veri tipler opsiyonel: Circle(Float)  Rectangle(Float, Float)
+            let data = if self.check(&Token::LParen) {
+                self.advance();
+                let mut types = Vec::new();
+                if !self.check(&Token::RParen) {
+                    types.push(self.parse_type()?);
+                    while self.eat(&Token::Comma) {
+                        types.push(self.parse_type()?);
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                types
+            } else {
+                Vec::new()
+            };
+            variants.push(EnumVariant { name: vname, data });
             if !self.eat(&Token::Comma) { break; }
         }
         self.eat(&Token::Semicolon);
@@ -820,15 +836,30 @@ impl Parser {
 
     // ── Generics tanımı ───────────────────────────────────────────────────────
 
-    fn parse_generics_decl(&mut self) -> ParseResult<Vec<String>> {
+    fn parse_generics_decl(&mut self) -> ParseResult<Vec<GenericParam>> {
         if !self.check(&Token::Lt) { return Ok(Vec::new()); }
         self.advance();
-        let mut params = vec![self.expect_ident()?];
+        let mut params = vec![self.parse_generic_param()?];
         while self.eat(&Token::Comma) {
-            params.push(self.expect_ident()?);
+            params.push(self.parse_generic_param()?);
         }
         self.expect_close_gt()?;
         Ok(params)
+    }
+
+    fn parse_generic_param(&mut self) -> ParseResult<GenericParam> {
+        let name = self.expect_ident()?;
+        // Optional bound: T: Interface
+        let bounds = if self.eat(&Token::Colon) {
+            let mut b = vec![self.expect_ident()?];
+            while self.eat(&Token::Plus) {
+                b.push(self.expect_ident()?);
+            }
+            b
+        } else {
+            Vec::new()
+        };
+        Ok(GenericParam { name, bounds })
     }
 
     fn parse_comma_separated_class_names(&mut self) -> ParseResult<Vec<String>> {
@@ -887,6 +918,12 @@ impl Parser {
             Token::Switch => self.parse_switch(),
 
             Token::Try => self.parse_try_catch(),
+
+            // match — blok ile biter, ; gerekmez
+            Token::Match => {
+                let expr = self.parse_expr(0)?;
+                Ok(Stmt::ExprStmt(expr))
+            }
 
             Token::Break    => { self.advance(); self.expect(&Token::Semicolon)?; Ok(Stmt::Break)    }
             Token::Continue => { self.advance(); self.expect(&Token::Semicolon)?; Ok(Stmt::Continue) }
@@ -1442,6 +1479,11 @@ impl Parser {
                 let expr = self.parse_expr(25)?;
                 Ok(Expr::UnaryOp { op: UnaryOp::BitNot, expr: Box::new(expr) })
             }
+
+            Token::Match => {
+                self.advance();
+                self.parse_match_expr()
+            }
             Token::PlusPlus => {
                 self.advance();
                 let expr = self.parse_expr(25)?;
@@ -1544,5 +1586,58 @@ impl Parser {
 
         self.expect(&Token::RParen)?;
         Ok(args)
+    }
+
+    // ── Match expression parser ───────────────────────────────────────────────
+
+    fn parse_match_expr(&mut self) -> ParseResult<Expr> {
+        // 'match' zaten tüketildi (parse_prefix'te)
+        let expr = self.parse_expr(0)?;
+        self.expect(&Token::LBrace)?;
+
+        let mut arms = Vec::new();
+
+        while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
+            let pattern = self.parse_match_pattern()?;
+            self.expect(&Token::FatArrow)?;
+            let body = self.parse_expr(0)?;
+            arms.push(MatchArm { pattern, body: Box::new(body) });
+            self.eat(&Token::Comma); // opsiyonel virgül
+        }
+
+        self.expect(&Token::RBrace)?;
+        Ok(Expr::Match { expr: Box::new(expr), arms })
+    }
+
+    fn parse_match_pattern(&mut self) -> ParseResult<MatchPattern> {
+        // Wildcard: _
+        if let Token::Ident(name) = self.current().clone() {
+            if name == "_" {
+                self.advance();
+                return Ok(MatchPattern::Wildcard);
+            }
+        }
+
+        // Enum.Variant veya Enum.Variant(a, b, ...)
+        let enum_name = self.expect_ident()?;
+        self.expect(&Token::Dot)?;
+        let variant = self.expect_ident()?;
+
+        let bindings = if self.check(&Token::LParen) {
+            self.advance();
+            let mut names = Vec::new();
+            if !self.check(&Token::RParen) {
+                names.push(self.expect_ident()?);
+                while self.eat(&Token::Comma) {
+                    names.push(self.expect_ident()?);
+                }
+            }
+            self.expect(&Token::RParen)?;
+            names
+        } else {
+            Vec::new()
+        };
+
+        Ok(MatchPattern::Variant { enum_name, variant, bindings })
     }
 }

@@ -150,6 +150,30 @@ pub enum Expr {
         object : Box<Expr>,
         index  : Box<Expr>,
     },
+
+    // Pattern matching — match expr { Enum.Variant(a, b) => expr, _ => expr }
+    Match {
+        expr : Box<Expr>,
+        arms : Vec<MatchArm>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern : MatchPattern,
+    pub body    : Box<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchPattern {
+    // Enum.Variant veya Enum.Variant(a, b, ...)
+    Variant {
+        enum_name : String,
+        variant   : String,
+        bindings  : Vec<String>,
+    },
+    // _ wildcard
+    Wildcard,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +276,16 @@ pub struct CatchClause {
     pub body           : Vec<Stmt>,
 }
 
+// ── Generic parametre — bound opsiyonel ──────────────────────────────────────
+// <T>         → GenericParam { name: "T", bounds: [] }
+// <T: Drawable> → GenericParam { name: "T", bounds: ["Drawable"] }
+
+#[derive(Debug, Clone)]
+pub struct GenericParam {
+    pub name   : String,
+    pub bounds : Vec<String>,  // interface isimleri
+}
+
 // ── Üye tanımları ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -298,7 +332,7 @@ pub struct ClassDecl {
     pub abstract_   : bool,
     pub manual      : bool,
     pub name        : String,
-    pub generics    : Vec<String>,
+    pub generics    : Vec<GenericParam>,
     pub extends     : Option<String>,
     pub implements  : Vec<String>,
     pub fields      : Vec<Field>,
@@ -309,15 +343,24 @@ pub struct ClassDecl {
 #[derive(Debug, Clone)]
 pub struct InterfaceDecl {
     pub name     : String,
-    pub generics : Vec<String>,
+    pub generics : Vec<GenericParam>,
     pub methods  : Vec<Method>,
+}
+
+// Enum variant — veri taşıyabilir veya saf olabilir
+// Circle(Float) → EnumVariant { name: "Circle", data: [Float] }
+// Low           → EnumVariant { name: "Low",    data: []      }
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub name : String,
+    pub data : Vec<Type>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub visibility : Visibility,
     pub name       : String,
-    pub variants   : Vec<String>,
+    pub variants   : Vec<EnumVariant>,
     pub methods    : Vec<Method>,
 }
 
@@ -344,7 +387,7 @@ pub struct TypeAliasDecl {
 pub struct StructDecl {
     pub visibility  : Visibility,
     pub name        : String,
-    pub generics    : Vec<String>,
+    pub generics    : Vec<GenericParam>,
     pub implements  : Vec<String>,
     pub fields      : Vec<Field>,
     pub constructor : Option<Constructor>,  // None → auto-generate from fields

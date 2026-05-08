@@ -57,13 +57,15 @@ pub enum ClassKind {
 
 #[derive(Debug, Clone)]
 pub struct ClassInfo {
-    pub kind        : ClassKind,
-    pub generics    : Vec<String>,
-    pub extends     : Option<String>,
-    pub implements  : Vec<String>,
-    pub fields      : HashMap<String, FieldInfo>,
-    pub methods     : HashMap<String, Vec<MethodInfo>>,
-    pub constructor : Option<ConstructorInfo>,
+    pub kind         : ClassKind,
+    pub generics     : Vec<String>,           // parametre isimleri: ["T", "E"]
+    pub generic_bounds: HashMap<String, Vec<String>>,  // "T" → ["Drawable"]
+    pub extends      : Option<String>,
+    pub implements   : Vec<String>,
+    pub fields       : HashMap<String, FieldInfo>,
+    pub methods      : HashMap<String, Vec<MethodInfo>>,
+    pub constructor  : Option<ConstructorInfo>,
+    pub variant_data : HashMap<String, Vec<Type>>,  // enum varyant → veri tipleri
 }
 
 #[derive(Debug, Clone)]
@@ -188,13 +190,16 @@ impl TypeChecker {
 
     fn register_struct(&mut self, s: &StructDecl) {
         let mut info = ClassInfo {
-            kind        : ClassKind::Struct,
-            generics    : s.generics.clone(),
-            extends     : None, // struct cannot extend
-            implements  : s.implements.clone(),
-            fields      : HashMap::new(),
-            methods     : HashMap::new(),
-            constructor : None,
+            kind          : ClassKind::Struct,
+            generics      : s.generics.iter().map(|gp| gp.name.clone()).collect(),
+            generic_bounds: s.generics.iter().filter(|gp| !gp.bounds.is_empty())
+                             .map(|gp| (gp.name.clone(), gp.bounds.clone())).collect(),
+            extends       : None,
+            implements    : s.implements.clone(),
+            fields        : HashMap::new(),
+            methods       : HashMap::new(),
+            constructor   : None,
+            variant_data  : HashMap::new(),
         };
         for f in &s.fields {
             info.fields.insert(f.name.clone(), FieldInfo {
@@ -237,14 +242,22 @@ impl TypeChecker {
     }
 
     fn register_class(&mut self, c: &ClassDecl) {
+        let mut bounds_map = HashMap::new();
+        for gp in &c.generics {
+            if !gp.bounds.is_empty() {
+                bounds_map.insert(gp.name.clone(), gp.bounds.clone());
+            }
+        }
         let mut info = ClassInfo {
-            kind        : if c.abstract_ { ClassKind::Abstract } else { ClassKind::Concrete },
-            generics    : c.generics.clone(),
-            extends     : c.extends.clone(),
-            implements  : c.implements.clone(),
-            fields      : HashMap::new(),
-            methods     : HashMap::new(),
-            constructor : None,
+            kind          : if c.abstract_ { ClassKind::Abstract } else { ClassKind::Concrete },
+            generics      : c.generics.iter().map(|gp| gp.name.clone()).collect(),
+            generic_bounds: bounds_map,
+            extends       : c.extends.clone(),
+            implements    : c.implements.clone(),
+            fields        : HashMap::new(),
+            methods       : HashMap::new(),
+            constructor   : None,
+            variant_data  : HashMap::new(),
         };
         for f in &c.fields {
             info.fields.insert(f.name.clone(), FieldInfo {
@@ -275,13 +288,16 @@ impl TypeChecker {
 
     fn register_interface(&mut self, i: &InterfaceDecl) {
         let mut info = ClassInfo {
-            kind        : ClassKind::Interface,
-            generics    : i.generics.clone(),
-            extends     : None,
-            implements  : Vec::new(),
-            fields      : HashMap::new(),
-            methods     : HashMap::new(),
-            constructor : None,
+            kind          : ClassKind::Interface,
+            generics      : i.generics.iter().map(|gp| gp.name.clone()).collect(),
+            generic_bounds: i.generics.iter().filter(|gp| !gp.bounds.is_empty())
+                             .map(|gp| (gp.name.clone(), gp.bounds.clone())).collect(),
+            extends       : None,
+            implements    : Vec::new(),
+            fields        : HashMap::new(),
+            methods       : HashMap::new(),
+            constructor   : None,
+            variant_data  : HashMap::new(),
         };
         for m in &i.methods {
             let mi = MethodInfo {
@@ -298,21 +314,25 @@ impl TypeChecker {
 
     fn register_enum(&mut self, e: &EnumDecl) {
         let mut info = ClassInfo {
-            kind        : ClassKind::Enum,
-            generics    : Vec::new(),
-            extends     : None,
-            implements  : Vec::new(),
-            fields      : HashMap::new(),
-            methods     : HashMap::new(),
-            constructor : None,
+            kind          : ClassKind::Enum,
+            generics      : Vec::new(),
+            generic_bounds: HashMap::new(),
+            extends       : None,
+            implements    : Vec::new(),
+            fields        : HashMap::new(),
+            methods       : HashMap::new(),
+            constructor   : None,
+            variant_data  : HashMap::new(),
         };
         for v in &e.variants {
-            info.fields.insert(v.clone(), FieldInfo {
+            // Her variant hem fields'ta (Priority.High erişimi için) hem variant_data'da
+            info.fields.insert(v.name.clone(), FieldInfo {
                 ty       : Type::Named(e.name.clone()),
                 readonly : true,
                 static_  : true,
                 vis      : Visibility::Public,
             });
+            info.variant_data.insert(v.name.clone(), v.data.clone());
         }
         for m in &e.methods {
             let mi = MethodInfo {
@@ -329,13 +349,15 @@ impl TypeChecker {
 
     fn register_exception(&mut self, e: &ExceptionDecl) {
         let mut info = ClassInfo {
-            kind        : ClassKind::Exception,
-            generics    : Vec::new(),
-            extends     : Some(e.extends.clone()),
-            implements  : Vec::new(),
-            fields      : HashMap::new(),
-            methods     : HashMap::new(),
-            constructor : None,
+            kind          : ClassKind::Exception,
+            generics      : Vec::new(),
+            generic_bounds: HashMap::new(),
+            extends       : Some(e.extends.clone()),
+            implements    : Vec::new(),
+            fields        : HashMap::new(),
+            methods       : HashMap::new(),
+            constructor   : None,
+            variant_data  : HashMap::new(),
         };
         for f in &e.fields {
             info.fields.insert(f.name.clone(), FieldInfo {
@@ -893,6 +915,10 @@ impl TypeChecker {
                 if self.classes.contains_key(name.as_str()) {
                     return Type::Named(name.clone());
                 }
+                // Stdlib isimleri expression context'te Ident olarak gelebilir (Math.PI gibi)
+                if matches!(name.as_str(), "IO" | "Math" | "Time" | "Memory") {
+                    return Type::Named(name.clone());
+                }
                 self.error(format!("undefined variable '{}'", name));
                 Type::Named("Error".to_string())
             }
@@ -974,6 +1000,10 @@ impl TypeChecker {
                         self.error("super() can only be called inside a constructor".to_string());
                     }
                     return Type::Void;
+                }
+                // Enum variant constructor: Shape.Circle(1.5) veya Result.Ok("hello")
+                if let Some(result_ty) = self.try_enum_variant_constructor(class, method, &arg_types) {
+                    return result_ty;
                 }
                 if !self.classes.contains_key(class.as_str()) {
                     if let Some(var) = self.lookup_var(class) {
@@ -1147,6 +1177,36 @@ impl TypeChecker {
                 Type::Named("Lambda".to_string())
             }
 
+            Expr::Match { expr, arms } => {
+                let scrutinee_ty = self.infer_expr(expr);
+                let mut result_ty: Option<Type> = None;
+
+                for arm in arms {
+                    match &arm.pattern {
+                        MatchPattern::Wildcard => {
+                            let arm_ty = self.infer_expr(&arm.body);
+                            if result_ty.is_none() { result_ty = Some(arm_ty); }
+                        }
+                        MatchPattern::Variant { enum_name, variant, bindings } => {
+                            self.push_scope();
+                            let binding_tys = self.resolve_variant_binding_types(
+                                enum_name, variant, &scrutinee_ty
+                            );
+                            for (i, b) in bindings.iter().enumerate() {
+                                let ty = binding_tys.get(i).cloned()
+                                    .unwrap_or_else(|| Type::Named("Unknown".to_string()));
+                                self.define_var(b, ty, false);
+                            }
+                            let arm_ty = self.infer_expr(&arm.body);
+                            self.pop_scope();
+                            if result_ty.is_none() { result_ty = Some(arm_ty); }
+                        }
+                    }
+                }
+
+                result_ty.unwrap_or(Type::Void)
+            }
+
             Expr::Index { object, index } => {
                 let obj_ty = self.infer_expr(object);
                 let idx_ty = self.infer_expr(index);
@@ -1316,6 +1376,102 @@ impl TypeChecker {
         }
     }
 
+    // ── Generic substitution & variant binding ────────────────────────────────
+
+    fn substitute_generics(&self, ty: &Type, params: &[String], args: &[Type]) -> Type {
+        match ty {
+            Type::Named(n) => {
+                if let Some(idx) = params.iter().position(|p| p == n) {
+                    args.get(idx).cloned().unwrap_or_else(|| Type::Named("Unknown".to_string()))
+                } else {
+                    ty.clone()
+                }
+            }
+            Type::Nullable(inner) =>
+                Type::Nullable(Box::new(self.substitute_generics(inner, params, args))),
+            Type::List(inner) =>
+                Type::List(Box::new(self.substitute_generics(inner, params, args))),
+            Type::Generic(n, a) =>
+                Type::Generic(n.clone(), a.iter().map(|t| self.substitute_generics(t, params, args)).collect()),
+            _ => ty.clone(),
+        }
+    }
+
+    fn resolve_variant_binding_types(
+        &self,
+        enum_name    : &str,
+        variant      : &str,
+        scrutinee_ty : &Type,
+    ) -> Vec<Type> {
+        let info = match self.classes.get(enum_name) {
+            Some(i) => i.clone(),
+            None    => return Vec::new(),
+        };
+        let data_types = match info.variant_data.get(variant) {
+            Some(d) => d.clone(),
+            None    => return Vec::new(),
+        };
+        // Generic parametre substitution
+        let type_args: Vec<Type> = match scrutinee_ty {
+            Type::Generic(_, args) => args.clone(),
+            _ => Vec::new(),
+        };
+        if type_args.is_empty() || info.generics.is_empty() {
+            data_types
+        } else {
+            data_types.iter()
+                .map(|ty| self.substitute_generics(ty, &info.generics, &type_args))
+                .collect()
+        }
+    }
+
+    // Enum variant constructor çağrısı: Shape.Circle(1.5) veya Result.Ok("hello")
+    fn try_enum_variant_constructor(
+        &mut self,
+        class    : &str,
+        variant  : &str,
+        arg_types: &[Type],
+    ) -> Option<Type> {
+        let info = self.classes.get(class)?.clone();
+        if info.kind != ClassKind::Enum { return None; }
+        let data_types = info.variant_data.get(variant)?.clone();
+
+        if arg_types.len() != data_types.len() {
+            self.error(format!(
+                "enum variant '{}::{}' expects {} argument(s), got {}",
+                class, variant, data_types.len(), arg_types.len()
+            ));
+            return Some(Type::Named(class.to_string()));
+        }
+
+        // Generic enum: Result.Ok("hello") → Result<String, Unknown>
+        if !info.generics.is_empty() {
+            let mut type_args: Vec<Type> = info.generics.iter()
+                .map(|_| Type::Named("Unknown".to_string()))
+                .collect();
+            for (i, (data_ty, arg_ty)) in data_types.iter().zip(arg_types.iter()).enumerate() {
+                if let Type::Named(gp_name) = data_ty {
+                    if let Some(idx) = info.generics.iter().position(|g| g == gp_name) {
+                        type_args[idx] = arg_ty.clone();
+                    } else {
+                        self.check_assignable(data_ty, arg_ty, &format!(
+                            "{}::{} arg {}", class, variant, i + 1
+                        ));
+                    }
+                }
+            }
+            return Some(Type::Generic(class.to_string(), type_args));
+        }
+
+        // Non-generic enum: validate arg types
+        for (i, (data_ty, arg_ty)) in data_types.iter().zip(arg_types.iter()).enumerate() {
+            self.check_assignable(data_ty, arg_ty, &format!(
+                "{}::{} arg {}", class, variant, i + 1
+            ));
+        }
+        Some(Type::Named(class.to_string()))
+    }
+
     // ── Operator overload resolution ──────────────────────────────────────────
 
     fn try_operator_overload(&mut self, left: &Type, op: &str, _right: &Type) -> Option<Type> {
@@ -1470,15 +1626,16 @@ impl TypeChecker {
         }
 
         let class_name = match ty {
-            Type::Named(n)      => n.clone(),
-            Type::List(_)       => "List".to_string(),
-            Type::Map(_, _)     => "Map".to_string(),
-            Type::HashMap(_, _) => "HashMap".to_string(),
-            Type::TreeMap(_, _) => "TreeMap".to_string(),
-            Type::Pair(_, _)    => "Pair".to_string(),
-            Type::RawPtr(_)     => "RawPtr".to_string(),
-            Type::Array(_, _)   => "Array".to_string(),
-            Type::Slice(_)      => "Slice".to_string(),
+            Type::Named(n)       => n.clone(),
+            Type::Generic(n, _)  => n.clone(),  // Result<T,E> → "Result"
+            Type::List(_)        => "List".to_string(),
+            Type::Map(_, _)      => "Map".to_string(),
+            Type::HashMap(_, _)  => "HashMap".to_string(),
+            Type::TreeMap(_, _)  => "TreeMap".to_string(),
+            Type::Pair(_, _)     => "Pair".to_string(),
+            Type::RawPtr(_)      => "RawPtr".to_string(),
+            Type::Array(_, _)    => "Array".to_string(),
+            Type::Slice(_)       => "Slice".to_string(),
             Type::U8  => "u8".to_string(),
             Type::U16 => "u16".to_string(),
             Type::U32 => "u32".to_string(),
@@ -1497,6 +1654,28 @@ impl TypeChecker {
 
         if class_name == "Unknown" {
             return Type::Named("Unknown".to_string());
+        }
+
+        // Generic bound kontrolü: eğer class_name bir generic parametre ise
+        // (örn: T, E) ve mevcut sınıfın generic_bounds'unda kayıtlı ise,
+        // method'un o bound'ların birinde tanımlı olup olmadığını kontrol et
+        if let Some(current_class) = self.current_class.clone() {
+            if let Some(current_info) = self.classes.get(&current_class).cloned() {
+                if current_info.generics.contains(&class_name) {
+                    // T bir generic param — bound'lardan çözümle
+                    if let Some(bounds) = current_info.generic_bounds.get(&class_name).cloned() {
+                        for bound in &bounds {
+                            let bound_ty = Type::Named(bound.clone());
+                            let ret = self.resolve_method_call(&bound_ty, method, args, is_static);
+                            if !matches!(ret, Type::Named(ref n) if n == "Error") {
+                                return ret;
+                            }
+                        }
+                    }
+                    // Bound yok ya da çözümlenmedi — Unknown döndür
+                    return Type::Named("Unknown".to_string());
+                }
+            }
         }
 
         if let Some(ret) = self.resolve_builtin_method(&class_name, method, ty, args) {
@@ -1853,11 +2032,19 @@ impl TypeChecker {
             if matches!(source, Type::Named(n) if n == "Lambda") { return true; }
         }
 
-        // FnPtr ↔ FnPtr: tam eşleşme gerekir (types_equal ile handle edildi)
+        // FnPtr ↔ FnPtr: tam eşleşme gerekir
         if let (Type::FnPtr(tp, tr), Type::FnPtr(sp, sr)) = (target, source) {
             if tp.len() != sp.len() { return false; }
             return self.is_assignable(tr, sr)
                 && tp.iter().zip(sp.iter()).all(|(t, s)| self.is_assignable(t, s));
+        }
+
+        // Generic<T, E> ← Generic<T, Unknown> — Unknown wildcard
+        if let (Type::Generic(tn, ta), Type::Generic(sn, sa)) = (target, source) {
+            if tn != sn || ta.len() != sa.len() { return false; }
+            return ta.iter().zip(sa.iter()).all(|(t, s)| {
+                matches!(s, Type::Named(n) if n == "Unknown") || self.is_assignable(t, s)
+            });
         }
 
         if let Type::Nullable(t_inner) = target {
@@ -1927,6 +2114,10 @@ impl TypeChecker {
                 p1.len() == p2.len()
                 && self.types_equal(r1, r2)
                 && p1.iter().zip(p2.iter()).all(|(a, b)| self.types_equal(a, b)),
+            (Type::Generic(n1, a1), Type::Generic(n2, a2)) =>
+                n1 == n2
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2.iter()).all(|(x, y)| self.types_equal(x, y)),
             _ => false,
         }
     }
@@ -2142,6 +2333,12 @@ impl TypeChecker {
     fn check_type_exists(&mut self, ty: &Type, context: &str) {
         match ty {
             Type::Named(name) => {
+                // Generic parametreler kendi class içinde geçerli tip
+                if let Some(cc) = &self.current_class.clone() {
+                    if let Some(info) = self.classes.get(cc.as_str()) {
+                        if info.generics.contains(name) { return; }
+                    }
+                }
                 if !self.is_known_type(name) {
                     self.error(format!(
                         "unknown type '{}' in {}", name, context
@@ -2184,7 +2381,7 @@ impl TypeChecker {
             name,
             "Integer" | "Float" | "Boolean" | "String" | "Void"
             | "IO" | "Math" | "Time" | "Memory"
-            | "Exception" | "Object"
+            | "Exception" | "Object" | "Result"
             | "List" | "Map" | "HashMap" | "TreeMap" | "Pair"
             | "RawPtr" | "Void"
             | "Lambda" | "Unknown" | "Error"
@@ -2239,16 +2436,18 @@ impl TypeChecker {
             vis       : Visibility::Public,
         }]);
         self.classes.insert("Exception".to_string(), ClassInfo {
-            kind        : ClassKind::Exception,
-            generics    : Vec::new(),
-            extends     : None,
-            implements  : Vec::new(),
-            fields      : HashMap::new(),
-            methods     : exception_methods,
-            constructor : Some(ConstructorInfo {
+            kind          : ClassKind::Exception,
+            generics      : Vec::new(),
+            generic_bounds: HashMap::new(),
+            extends       : None,
+            implements    : Vec::new(),
+            fields        : HashMap::new(),
+            methods       : exception_methods,
+            constructor   : Some(ConstructorInfo {
                 params : vec![("message".to_string(), Type::Str)],
                 vis    : Visibility::Public,
             }),
+            variant_data  : HashMap::new(),
         });
 
         let mut object_methods = HashMap::new();
@@ -2260,13 +2459,39 @@ impl TypeChecker {
             vis       : Visibility::Public,
         }]);
         self.classes.insert("Object".to_string(), ClassInfo {
-            kind        : ClassKind::Concrete,
-            generics    : Vec::new(),
-            extends     : None,
-            implements  : Vec::new(),
-            fields      : HashMap::new(),
-            methods     : object_methods,
-            constructor : None,
+            kind          : ClassKind::Concrete,
+            generics      : Vec::new(),
+            generic_bounds: HashMap::new(),
+            extends       : None,
+            implements    : Vec::new(),
+            fields        : HashMap::new(),
+            methods       : object_methods,
+            constructor   : None,
+            variant_data  : HashMap::new(),
+        });
+
+        // ── Built-in Result<T, E> ─────────────────────────────────────────────
+        // Result.Ok(value)  → Result<T, Unknown>
+        // Result.Err(error) → Result<Unknown, E>
+        let mut result_variant_data = HashMap::new();
+        result_variant_data.insert("Ok".to_string(),  vec![Type::Named("T".to_string())]);
+        result_variant_data.insert("Err".to_string(), vec![Type::Named("E".to_string())]);
+        let mut result_fields = HashMap::new();
+        result_fields.insert("Ok".to_string(),  FieldInfo { ty: Type::Named("Result".to_string()), readonly: true, static_: true, vis: Visibility::Public });
+        result_fields.insert("Err".to_string(), FieldInfo { ty: Type::Named("Result".to_string()), readonly: true, static_: true, vis: Visibility::Public });
+        let mut result_methods = HashMap::new();
+        result_methods.insert("isOk".to_string(),  vec![MethodInfo { params: Vec::new(), return_ty: Some(Type::Boolean), static_: false, abstract_: false, vis: Visibility::Public }]);
+        result_methods.insert("isErr".to_string(), vec![MethodInfo { params: Vec::new(), return_ty: Some(Type::Boolean), static_: false, abstract_: false, vis: Visibility::Public }]);
+        self.classes.insert("Result".to_string(), ClassInfo {
+            kind          : ClassKind::Enum,
+            generics      : vec!["T".to_string(), "E".to_string()],
+            generic_bounds: HashMap::new(),
+            extends       : None,
+            implements    : Vec::new(),
+            fields        : result_fields,
+            methods       : result_methods,
+            constructor   : None,
+            variant_data  : result_variant_data,
         });
     }
 }
