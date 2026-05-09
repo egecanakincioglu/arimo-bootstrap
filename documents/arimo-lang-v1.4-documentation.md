@@ -98,9 +98,11 @@ if (title != null) {
     IO.print(title);         // burada String, String? değil
 }
 
-// Null-safe erişim
-String?  name = user?.getName();
-Integer? len  = name?.length();
+// Null-safe erişim — field ve method call
+String?  name    = user?.getName();         // method çağrısı
+Integer? len     = name?.length();          // zincir
+String?  found   = user?.findTask("id");    // argümanlı method çağrısı
+String?  address = user?.address;           // field erişimi
 ```
 
 ---
@@ -179,9 +181,10 @@ public class Circle extends Shape implements Drawable, Movable {
 ```
 
 - `new` yok — `Circle(...)` veya `Circle.create(...)`
-- `@Override` yok — derleyici anlar
+- `override` keyword — opsiyonel, metodu üst sınıf metodunu override ediyor olarak işaretler (kaydedilir, şu an enforce edilmiyor)
 - `constructor` açık anahtar kelime
 - `super(...)` — üst sınıf constructor'ını çağırır
+- Field'lara varsayılan değer verilebilir: `private color : String = "red";`
 
 ---
 
@@ -260,6 +263,7 @@ Vec3 sum = pos + vel;    // operator overloading
 
 - Stack-allocated, copy semantics, `extends` yok
 - Auto-constructor field sırasından üretilir
+- `implements InterfaceName` ile interface implement edebilir
 - BorrowChecker: struct copy type, move takibi yok
 
 ---
@@ -465,14 +469,24 @@ switch (priority) {
 }
 ```
 
-### match (pattern matching)
+### match (pattern matching — expression)
+
+`match` bir **expression**'dır, statement değil. Değer döndürür veya statement olarak kullanılır.
 
 ```arimo
+// Statement olarak
 match shape {
     Shape.Circle(r)       => IO.print("r=${r}"),
     Shape.Rectangle(w, h) => IO.print("${w}x${h}"),
     _                     => IO.print("other"),
 }
+
+// Expression olarak — atama veya return
+String desc = match shape {
+    Shape.Circle(r)       => "circle",
+    Shape.Rectangle(w, h) => "rect",
+    _                     => "other",
+};
 ```
 
 ### while
@@ -499,13 +513,28 @@ for (Integer i = 0; i < 10; i++) {
 }
 ```
 
+### break / continue
+
+```arimo
+for (Integer i = 0; i < 10; i++) {
+    if (i == 5) { break; }     // döngüden çık
+    if (i == 3) { continue; }  // sonraki iterasyona geç
+    IO.print("${i}");
+}
+```
+
 ### try / catch / finally
+
+Birden fazla catch bloğu desteklenir:
 
 ```arimo
 try {
     Task task = repo.findById(id);
+    task.complete();
 } catch (TaskNotFoundException ex) {
-    IO.print("Caught: ${ex.message()}");
+    IO.print("Not found: ${ex.message()}");
+} catch (InvalidTaskException ex) {
+    IO.print("Invalid: ${ex.message()}");
 } finally {
     IO.print("done.");
 }
@@ -717,8 +746,10 @@ IO.print("mesaj");
 IO.read();
 
 Math.sqrt(16.0);
+Math.abs(-5.0);
+Math.pow(2.0, 8.0);
 Math.PI;
-Math.abs(-5);
+Math.E;
 
 Time.now();
 Time.generateId();
@@ -726,6 +757,7 @@ Time.generateId();
 Memory.alloc(256 * u8.sizeOf());
 Memory.free(ptr);
 Memory.copy(dst, src, n);
+Memory.set(ptr, 0, n);       // belleği sıfırla
 
 RawPtr<u8> ptr = Memory.alloc(1024);
 ptr.read(0);
@@ -782,8 +814,8 @@ u32.sizeOf();
 
 | Annotation | Seviye | Açıklama |
 |---|---|---|
-| `@Deprecated("mesaj")` | class/method | Kullanıldığında uyarı |
-| `@Experimental` | class/method | Kararsız API, değişebilir |
+| `@Deprecated("mesaj")` | class/struct/enum/method | Kullanıldığında uyarı |
+| `@Experimental` | class/struct/enum/method | Kararsız API, değişebilir |
 | `@FunctionalInterface` | interface | Tam 1 abstract method zorunlu |
 | `@Throws(ExType, ...)` | method | Fırlatılabilecek exception'ları belgele |
 | `@SuppressWarnings("tip")` | class/method | Belirli uyarıyı sustur |
@@ -928,7 +960,7 @@ public class Renderer {
 | String interpolation | `${name}` | — | `${name}` |
 | Interface erişim | yazılmaz | opsiyonel | yazılmaz |
 | new keyword | yok | zorunlu | zorunlu |
-| Override belirteci | yok | `@Override` | `override` |
+| Override belirteci | `override` (opsiyonel) | `@Override` | `override` |
 | Entry point | `static main()` | `static void main(String[])` | — |
 | GC | yok (3 katman) | var | var |
 | Koleksiyon | `List()` `HashMap()` | `new ArrayList<>()` | `[]` `{}` |
