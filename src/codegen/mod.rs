@@ -818,41 +818,104 @@ impl<'ctx> CodeGen<'ctx> {
             return Ok(());
         }
 
-        // İlk argümanı format string olarak kullan
-        let fmt_val = self.compile_expr(&args[0])?
-            .ok_or_else(|| CodeGenError::new("IO.print: no format string"))?;
-
-        // Newline eklenmiş format string
-        let fmt_with_nl = self.build_global_string_with_nl(&args[0])?;
-
-        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![fmt_with_nl.into()];
-        for a in &args[1..] {
-            if let Some(v) = self.compile_expr(a)? {
-                call_args.push(v.into());
+        match &args[0] {
+            // Düz string literal — newline ekle
+            Expr::StrLit(s) => {
+                let fmt = self.build_global_string(&format!("{}\n", s))?;
+                self.builder.build_call(printf, &[fmt.into()], "print")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
             }
-        }
-        let _ = fmt_val; // suppress warning
-        self.builder.build_call(printf, &call_args, "print")
-            .map_err(|e| CodeGenError::new(e.to_string()))?;
-        Ok(())
-    }
 
-    fn build_global_string_with_nl(&mut self, expr: &Expr) -> CgResult<PointerValue<'ctx>> {
-        let s = match expr {
-            Expr::StrLit(s) => format!("{}\n", s),
+            // String interpolation — ${expr} → printf format specifier
             Expr::StrInterp(parts) => {
-                let mut r = String::new();
-                for p in parts {
-                    match p {
-                        StringPart::Text(t) => r.push_str(t),
-                        StringPart::Interp(_) => r.push_str("%s"),
+                // 1. Format string ve değerleri topla
+                let mut fmt_str   = String::new();
+                let mut interp_vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+
+                for part in parts {
+                    match part {
+                        StringPart::Text(t) => {
+                            // % işaretlerini escape et
+                            fmt_str.push_str(&t.replace('%', "%%"));
+                        }
+                        StringPart::Interp(inner_expr) => {
+                            if let Some(val) = self.compile_expr(inner_expr)? {
+                                // Tipi bakarak format specifier seç
+                                let spec = match val {
+                                    BasicValueEnum::IntValue(iv) => {
+                                        match iv.get_type().get_bit_width() {
+                                            64 => "%lld",
+                                            _  => "%d",
+                                        }
+                                    }
+                                    BasicValueEnum::FloatValue(_) => "%g",
+                                    BasicValueEnum::PointerValue(_) => "%s",
+                                    _ => "%d",
+                                };
+                                fmt_str.push_str(spec);
+                                // Float için double promote
+                                let promoted = match val {
+                                    BasicValueEnum::FloatValue(f) => {
+                                        let f64ty = self.ctx.f64_type();
+                                        if f.get_type().get_bit_width() < 64 {
+                                            self.builder.build_float_ext(f, f64ty, "fpext")
+                                                .map_err(|e| CodeGenError::new(e.to_string()))?.into()
+                                        } else {
+                                            val
+                                        }
+                                    }
+                                    // i8/i16/i32 → i32 promote for printf
+                                    BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() < 32 => {
+                                        let i32ty = self.ctx.i32_type();
+                                        self.builder.build_int_s_extend(iv, i32ty, "sext")
+                                            .map_err(|e| CodeGenError::new(e.to_string()))?.into()
+                                    }
+                                    _ => val,
+                                };
+                                interp_vals.push(promoted);
+                            } else {
+                                fmt_str.push_str("(null)");
+                            }
+                        }
                     }
                 }
-                format!("{}\n", r)
+                fmt_str.push('\n');
+
+                let fmt_ptr = self.build_global_string(&fmt_str)?;
+                let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![fmt_ptr.into()];
+                for v in interp_vals {
+                    call_args.push(v.into());
+                }
+                self.builder.build_call(printf, &call_args, "print")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
             }
-            _ => "\n".to_string(),
-        };
-        self.build_global_string(&s)
+
+            // Diğer expr — değeri doğrudan yazdır
+            other => {
+                if let Some(val) = self.compile_expr(other)? {
+                    let (fmt_s, promoted) = match val {
+                        BasicValueEnum::IntValue(iv) => {
+                            let spec = if iv.get_type().get_bit_width() == 64 { "%lld\n" } else { "%d\n" };
+                            (spec, val)
+                        }
+                        BasicValueEnum::FloatValue(f) => {
+                            let f64ty = self.ctx.f64_type();
+                            let prom: BasicValueEnum = if f.get_type().get_bit_width() < 64 {
+                                self.builder.build_float_ext(f, f64ty, "fpext")
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?.into()
+                            } else { val };
+                            ("%g\n", prom)
+                        }
+                        BasicValueEnum::PointerValue(_) => ("%s\n", val),
+                        _ => ("%d\n", val),
+                    };
+                    let fmt_ptr = self.build_global_string(fmt_s)?;
+                    self.builder.build_call(printf, &[fmt_ptr.into(), promoted.into()], "print")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                }
+            }
+        }
+        Ok(())
     }
 
     // ── Static çağrı ─────────────────────────────────────────────────────────
@@ -1013,14 +1076,17 @@ impl<'ctx> CodeGen<'ctx> {
             },
             BinOp::Shl => match (lv, rv) {
                 (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
-                    self.builder.build_left_shift(l, r, "shl")
+                    // Shift miktarı sol operandla aynı tipte olmalı
+                    let r_cast = self.match_int_width(r, l.get_type())?;
+                    self.builder.build_left_shift(l, r_cast, "shl")
                         .map_err(|e| CodeGenError::new(e.to_string()))?.into()
                 }
                 _ => return Ok(None),
             },
             BinOp::Shr => match (lv, rv) {
                 (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
-                    self.builder.build_right_shift(l, r, false, "shr")
+                    let r_cast = self.match_int_width(r, l.get_type())?;
+                    self.builder.build_right_shift(l, r_cast, false, "shr")
                         .map_err(|e| CodeGenError::new(e.to_string()))?.into()
                 }
                 _ => return Ok(None),
@@ -1136,6 +1202,24 @@ impl<'ctx> CodeGen<'ctx> {
         let gs = self.builder.build_global_string_ptr(s, "str")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         Ok(gs.as_pointer_value())
+    }
+
+    /// Shift için: sağ operandı sol operandın genişliğine getir
+    fn match_int_width(
+        &mut self,
+        val  : inkwell::values::IntValue<'ctx>,
+        dest : inkwell::types::IntType<'ctx>,
+    ) -> CgResult<inkwell::values::IntValue<'ctx>> {
+        let src_bits = val.get_type().get_bit_width();
+        let dst_bits = dest.get_bit_width();
+        if src_bits == dst_bits { return Ok(val); }
+        if src_bits < dst_bits {
+            self.builder.build_int_z_extend(val, dest, "shamt_zext")
+                .map_err(|e| CodeGenError::new(e.to_string()))
+        } else {
+            self.builder.build_int_truncate(val, dest, "shamt_trunc")
+                .map_err(|e| CodeGenError::new(e.to_string()))
+        }
     }
 
     fn to_bool(&mut self, val: BasicValueEnum<'ctx>)

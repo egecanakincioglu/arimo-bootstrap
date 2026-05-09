@@ -1,0 +1,45 @@
+module arimo.codegentest2;
+
+public class Application {
+    public static main() : Void {
+        // Float aritmetik
+        Float pi    = 3.14;
+        Float r     = 5.0;
+        Float area  = pi * r * r;
+
+        // Boolean
+        Boolean flag = true;
+        Boolean other = false;
+
+        // if Boolean ile
+        if (flag) {
+            IO.print("flag true");
+        }
+
+        // Bitwise
+        u32 a = 0xFF;
+        u32 b = 0x0F;
+        u32 andResult  = a & b;
+        u32 orResult   = a | b;
+        u32 xorResult  = a ^ b;
+        u32 shiftLeft  = b << 2;
+        u32 shiftRight = a >> 4;
+
+        // Cast
+        Integer bigNum = 1000;
+        u8  small = bigNum as u8;
+
+        // String interpolation
+        Integer x = 42;
+        IO.print("x degeri: ${x}");
+        IO.print("pi = ${pi}");
+
+        // Compound assignment
+        Integer counter = 0;
+        counter += 5;
+        counter -= 2;
+        counter *= 3;
+
+        IO.print("codegen_test2: OK");
+    }
+}
