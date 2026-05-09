@@ -108,16 +108,50 @@ public class Task {
 
 ---
 
-## 3. Tip Ayracı — Her Yerde Aynı Kural
+## 3. Tip Bildirimi Kuralları
+
+Arimo'da iki farklı bağlama göre iki sözdizimi kullanılır:
+
+### 3.1 Bildirim bağlamı — `: Type` (kolon, tip sağda)
+
+Field, parametre ve dönüş tipi bildirimlerinde tip her zaman sağda gelir:
 
 ```arimo
-name   : String = "Arimo";   // değişken
-radius : Float;               // field
-area() : Float { }            // metod dönüş tipi
+// Field
+private readonly radius : Float;
+private          color  : String;
+
+// Parametre
+public constructor(id: String, radius: Float) { ... }
+
+// Dönüş tipi
+public getRadius() : Float { ... }
+public area()      : Float { ... }
 ```
 
-- `:` her yerde tip ayracıdır
-- Tip her zaman sağda
+### 3.2 Local değişken — `Type name` (tip solda)
+
+Method gövdesi içindeki yerel değişkenlerde tip solda gelir:
+
+```arimo
+public static main() : Void {
+    String  name  = "Arimo";
+    Integer count = 0;
+    Boolean done  = false;
+
+    List<Task>           tasks  = List();
+    Map<String, Integer> scores = HashMap();
+}
+```
+
+### Özet
+
+| Bağlam | Sözdizimi | Örnek |
+|---|---|---|
+| Field | `name : Type` | `private id : String;` |
+| Parametre | `name: Type` | `(radius: Float)` |
+| Dönüş tipi | `() : Type` | `getArea() : Float` |
+| Local değişken | `Type name` | `String name = "Arimo";` |
 
 ---
 
