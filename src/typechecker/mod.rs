@@ -309,7 +309,7 @@ impl TypeChecker {
                 params    : m.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
                 return_ty : m.return_ty.clone(),
                 static_   : false,
-                abstract_ : true,
+                abstract_ : !m.default_,   // default metodlar abstract değil
                 vis       : Visibility::Public,
             };
             info.methods.entry(m.name.clone()).or_default().push(mi);
@@ -566,7 +566,7 @@ impl TypeChecker {
 
     fn check_interface(&mut self, i: &InterfaceDecl) {
         for m in &i.methods {
-            if m.body.is_some() {
+            if m.body.is_some() && !m.default_ {
                 self.error(format!(
                     "interface method '{}::{}' cannot have a body",
                     i.name, m.name
@@ -634,7 +634,7 @@ impl TypeChecker {
             return;
         }
 
-        if !m.abstract_ && m.body.is_none() {
+        if !m.abstract_ && !m.default_ && m.body.is_none() {
             self.error(format!(
                 "method '{}::{}' has no body and is not abstract",
                 class_name, m.name
@@ -739,7 +739,7 @@ impl TypeChecker {
                 }
             }
 
-            Stmt::If { cond, then, else_if, else_ } => {
+            Stmt::If { cond, then, else_if, else_, .. } => {
                 let cond_ty = self.infer_expr(cond);
                 if !self.is_boolean(&cond_ty) {
                     self.error(format!(
@@ -1299,6 +1299,11 @@ impl TypeChecker {
                         Type::Named("Error".to_string())
                     }
                 }
+            }
+
+            Expr::Await(inner) => {
+                // await expr — inner type'ı döndür (CodeGen'de coroutine suspension point)
+                self.infer_expr(inner)
             }
         }
     }
@@ -2345,8 +2350,12 @@ impl TypeChecker {
         let ifaces: Vec<String> = c.implements.clone();
         for iface_name in ifaces {
             if let Some(iface_info) = self.classes.get(&iface_name).cloned() {
-                let method_names: Vec<String> = iface_info.methods.keys().cloned().collect();
-                for method_name in method_names {
+                // Sadece abstract (non-default) metodların implementasyonunu kontrol et
+                let abstract_methods: Vec<String> = iface_info.methods.iter()
+                    .filter(|(_, mis)| mis.iter().any(|mi| mi.abstract_))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                for method_name in abstract_methods {
                     let implemented = c.methods.iter().any(|m| m.name == method_name)
                         || self.method_in_parent(&c.extends, &method_name);
                     if !implemented {
@@ -2447,6 +2456,7 @@ impl TypeChecker {
             | "List" | "Map" | "HashMap" | "TreeMap" | "Pair"
             | "RawPtr" | "Void"
             | "Lambda" | "Unknown" | "Error"
+            | "Vec4f" | "Vec8f" | "Vec4i" | "Vec8i"
         ) || self.classes.contains_key(name)
           || self.type_aliases.contains_key(name)
     }
@@ -2555,5 +2565,63 @@ impl TypeChecker {
             constructor   : None,
             variant_data  : result_variant_data,
         });
+
+        // ── SIMD tipleri ──────────────────────────────────────────────────────
+        for (type_name, elem_ty, arity) in &[
+            ("Vec4f", Type::Float,   4usize),
+            ("Vec8f", Type::Float,   8),
+            ("Vec4i", Type::Integer, 4),
+            ("Vec8i", Type::Integer, 8),
+        ] {
+            let tname = type_name.to_string();
+            let mut methods = HashMap::new();
+            for op in &["operator+", "operator-", "operator*", "operator/"] {
+                methods.insert(op.to_string(), vec![MethodInfo {
+                    params    : vec![("other".to_string(), Type::Named(tname.clone()))],
+                    return_ty : Some(Type::Named(tname.clone())),
+                    static_   : false,
+                    abstract_ : false,
+                    vis       : Visibility::Public,
+                }]);
+            }
+            methods.insert("length".to_string(), vec![MethodInfo {
+                params    : Vec::new(),
+                return_ty : Some(Type::Float),
+                static_   : false,
+                abstract_ : false,
+                vis       : Visibility::Public,
+            }]);
+            methods.insert("normalize".to_string(), vec![MethodInfo {
+                params    : Vec::new(),
+                return_ty : Some(Type::Named(tname.clone())),
+                static_   : false,
+                abstract_ : false,
+                vis       : Visibility::Public,
+            }]);
+            methods.insert("dot".to_string(), vec![MethodInfo {
+                params    : vec![("other".to_string(), Type::Named(tname.clone()))],
+                return_ty : Some(Type::Float),
+                static_   : false,
+                abstract_ : false,
+                vis       : Visibility::Public,
+            }]);
+            let ctor_params: Vec<(String, Type)> = (0..*arity)
+                .map(|i| (format!("v{}", i), elem_ty.clone()))
+                .collect();
+            self.classes.insert(tname.clone(), ClassInfo {
+                kind          : ClassKind::Struct,
+                generics      : Vec::new(),
+                generic_bounds: HashMap::new(),
+                extends       : None,
+                implements    : Vec::new(),
+                fields        : HashMap::new(),
+                methods,
+                constructor   : Some(ConstructorInfo {
+                    params : ctor_params,
+                    vis    : Visibility::Public,
+                }),
+                variant_data  : HashMap::new(),
+            });
+        }
     }
 }

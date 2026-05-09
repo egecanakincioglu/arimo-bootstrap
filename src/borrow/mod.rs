@@ -273,7 +273,7 @@ impl BorrowChecker {
                 self.check_expr_operand(e, true);
             }
 
-            Stmt::If { cond, then, else_if, else_ } => {
+            Stmt::If { cond, then, else_if, else_, .. } => {
                 self.check_expr_operand(cond, false);
                 self.push_scope();
                 for s in then { self.check_stmt(s); }
@@ -502,6 +502,10 @@ impl BorrowChecker {
                     self.check_expr_operand(&arm.body, false);
                     self.pop_scope_with_drops();
                 }
+            }
+
+            Expr::Await(inner) => {
+                self.check_expr_operand(inner, false);
             }
 
             Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_)

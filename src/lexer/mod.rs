@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, PartialEq)]
+﻿#[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // ── Literals ─────────────────────────────────────────────────────────
     Int(i64),
@@ -98,6 +98,11 @@ pub enum Token {
     Extern,         // extern
     Asm,            // asm
     Defer,          // defer
+
+    // ── Async / Default keywords ─────────────────────────────────────────────
+    Async,          // async — asenkron metod modifier
+    Await,          // await — asenkron bekleme operatörü
+    Default,        // default — interface default method
 
     // ── Additional type keywords ─────────────────────────────────────────────
     TypeNoReturn,   // noreturn
@@ -392,6 +397,9 @@ impl<'a> Lexer<'a> {
             "asm"       => Token::Asm,
             "defer"     => Token::Defer,
             "noreturn"  => Token::TypeNoReturn,
+            "async"     => Token::Async,
+            "await"     => Token::Await,
+            "default"   => Token::Default,
 
             _             => Token::Ident(word),
         }

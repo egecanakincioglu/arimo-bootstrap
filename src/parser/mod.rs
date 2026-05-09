@@ -1,4 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────────
+﻿// ─────────────────────────────────────────────────────────────────────────────
 // Arimo Lang — Parser (Pratt Parser)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -316,6 +316,7 @@ impl Parser {
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
             let mut inline_ = false;
+            let mut async_  = false;
             let mut calling_conv: Option<CallingConv> = None;
             let mut section: Option<String> = None;
             while self.check(&Token::At) {
@@ -323,6 +324,7 @@ impl Parser {
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
                     "inline"    => { inline_ = true; }
+                    "async"     => { async_ = true; }
                     "cdecl"     => { calling_conv = Some(CallingConv::Cdecl); }
                     "stdcall"   => { calling_conv = Some(CallingConv::Stdcall); }
                     "interrupt" => { calling_conv = Some(CallingConv::Interrupt); }
@@ -349,6 +351,7 @@ impl Parser {
 
             let vis       = self.parse_visibility()?;
             let static_   = self.eat(&Token::Static);
+            let async_    = async_ || self.eat(&Token::Async);
             let readonly  = self.eat(&Token::Readonly);
             let abstract_ = self.eat(&Token::Abstract);
             let override_ = self.eat(&Token::Override);
@@ -358,7 +361,7 @@ impl Parser {
                 self.advance();
                 let op_sym = self.parse_operator_symbol()?;
                 let method_name = format!("operator{}", op_sym);
-                let method = self.parse_method_body(vis, static_, abstract_, override_, inline_, calling_conv, section, method_name, None)?;
+                let method = self.parse_method_body(vis, static_, abstract_, false, override_, inline_, async_, calling_conv, section, method_name, None)?;
                 methods.push(method);
                 continue;
             }
@@ -375,7 +378,7 @@ impl Parser {
                             if *next == Token::LParen {
                                 self.advance();
                                 let method = self.parse_method_body(
-                                    vis, static_, abstract_, override_, inline_, calling_conv, section, iname, None
+                                    vis, static_, abstract_, false, override_, inline_, async_, calling_conv, section, iname, None
                                 )?;
                                 methods.push(method);
                                 continue;
@@ -403,7 +406,7 @@ impl Parser {
 
                         if self.check(&Token::LParen) {
                             let method = self.parse_method_body(
-                                vis, static_, abstract_, override_, inline_, calling_conv, section, name, Some(ty)
+                                vis, static_, abstract_, false, override_, inline_, async_, calling_conv, section, name, Some(ty)
                             )?;
                             methods.push(method);
                         } else {
@@ -441,8 +444,10 @@ impl Parser {
         visibility   : Visibility,
         static_      : bool,
         abstract_    : bool,
+        default_     : bool,
         override_    : bool,
         inline_      : bool,
+        async_       : bool,
         calling_conv : Option<CallingConv>,
         section      : Option<String>,
         name         : String,
@@ -466,7 +471,7 @@ impl Parser {
             Some(stmts)
         };
 
-        Ok(Method { visibility, static_, abstract_, override_, inline_, calling_conv, section, name, params, return_ty, body })
+        Ok(Method { visibility, static_, abstract_, default_, override_, inline_, async_, calling_conv, section, name, params, return_ty, body })
     }
 
     fn parse_operator_symbol(&mut self) -> ParseResult<String> {
@@ -519,6 +524,7 @@ impl Parser {
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
             let mut inline_ = false;
+            let mut async_  = false;
             let mut calling_conv: Option<CallingConv> = None;
             let mut section: Option<String> = None;
             while self.check(&Token::At) {
@@ -526,6 +532,7 @@ impl Parser {
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
                     "inline"    => { inline_ = true; }
+                    "async"     => { async_ = true; }
                     "cdecl"     => { calling_conv = Some(CallingConv::Cdecl); }
                     "stdcall"   => { calling_conv = Some(CallingConv::Stdcall); }
                     "interrupt" => { calling_conv = Some(CallingConv::Interrupt); }
@@ -552,6 +559,7 @@ impl Parser {
 
             let vis       = self.parse_visibility()?;
             let static_   = self.eat(&Token::Static);
+            let async_    = async_ || self.eat(&Token::Async);
             let _readonly = self.eat(&Token::Readonly); // struct fields are value-copied, readonly is on field
             let override_ = self.eat(&Token::Override);
 
@@ -560,7 +568,7 @@ impl Parser {
                 self.advance();
                 let op_sym = self.parse_operator_symbol()?;
                 let method_name = format!("operator{}", op_sym);
-                let method = self.parse_method_body(vis, static_, false, override_, inline_, calling_conv, section, method_name, None)?;
+                let method = self.parse_method_body(vis, static_, false, false, override_, inline_, async_, calling_conv, section, method_name, None)?;
                 methods.push(method);
                 continue;
             }
@@ -577,7 +585,7 @@ impl Parser {
                             if *next == Token::LParen {
                                 self.advance();
                                 let method = self.parse_method_body(
-                                    vis, static_, false, override_, inline_, calling_conv, section, iname, None
+                                    vis, static_, false, false, override_, inline_, async_, calling_conv, section, iname, None
                                 )?;
                                 methods.push(method);
                                 continue;
@@ -605,7 +613,7 @@ impl Parser {
                         let name = self.expect_ident()?;
                         if self.check(&Token::LParen) {
                             let method = self.parse_method_body(
-                                vis, static_, false, override_, inline_, calling_conv, section, name, Some(ty)
+                                vis, static_, false, false, override_, inline_, async_, calling_conv, section, name, Some(ty)
                             )?;
                             methods.push(method);
                         } else {
@@ -726,24 +734,34 @@ impl Parser {
         let mut methods = Vec::new();
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
-            let name      = self.expect_ident()?;
-            let params    = self.parse_params()?;
+            let default_ = self.eat(&Token::Default);
+            let name     = self.expect_ident()?;
+            let params   = self.parse_params()?;
             self.expect(&Token::Colon)?;
             let return_ty = self.parse_type()?;
-            self.expect(&Token::Semicolon)?;
-
+            let body = if default_ {
+                self.expect(&Token::LBrace)?;
+                let stmts = self.parse_stmts()?;
+                self.expect(&Token::RBrace)?;
+                Some(stmts)
+            } else {
+                self.expect(&Token::Semicolon)?;
+                None
+            };
             methods.push(Method {
                 visibility   : Visibility::Public,
                 static_      : false,
-                abstract_    : true,
+                abstract_    : !default_,
+                default_     : default_,
                 override_    : false,
                 inline_      : false,
+                async_       : false,
                 calling_conv : None,
                 section      : None,
                 name,
                 params,
                 return_ty    : Some(return_ty),
-                body         : None,
+                body,
             });
         }
 
@@ -787,7 +805,7 @@ impl Parser {
             let vis     = self.parse_visibility()?;
             let static_ = self.eat(&Token::Static);
             let name    = self.expect_ident()?;
-            let method  = self.parse_method_body(vis, static_, false, false, false, None, None, name, None)?;
+            let method  = self.parse_method_body(vis, static_, false, false, false, false, false, None, None, name, None)?;
             methods.push(method);
         }
 
@@ -1162,6 +1180,24 @@ impl Parser {
 
     fn parse_if(&mut self) -> ParseResult<Stmt> {
         self.expect(&Token::If)?;
+        // @likely / @unlikely hint â€” optional annotation
+        let hint = if self.check(&Token::At) {
+            self.advance();
+            let ann = self.expect_ident()?;
+            match ann.as_str() {
+                "likely"   => Some(BranchHint::Likely),
+                "unlikely" => Some(BranchHint::Unlikely),
+                other => {
+                    let (line, col) = self.current_span();
+                    return Err(ParseError::new(
+                        &format!("unknown if annotation '@{}' â€” only @likely and @unlikely are supported", other),
+                        line, col,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         self.expect(&Token::LParen)?;
         let cond = self.parse_expr(0)?;
         self.expect(&Token::RParen)?;
@@ -1191,7 +1227,7 @@ impl Parser {
             }
         }
 
-        Ok(Stmt::If { cond, then, else_if, else_ })
+        Ok(Stmt::If { hint, cond, then, else_if, else_ })
     }
 
     fn parse_for(&mut self) -> ParseResult<Stmt> {
@@ -1653,6 +1689,12 @@ impl Parser {
                 self.advance();
                 let expr = self.parse_expr(25)?;
                 Ok(Expr::UnaryOp { op: UnaryOp::BitNot, expr: Box::new(expr) })
+            }
+
+            Token::Await => {
+                self.advance();
+                let inner = self.parse_expr(24)?;
+                Ok(Expr::Await(Box::new(inner)))
             }
 
             Token::Match => {

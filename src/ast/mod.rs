@@ -1,4 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────────
+﻿// ─────────────────────────────────────────────────────────────────────────────
 // Arimo Lang — AST (Abstract Syntax Tree)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -152,6 +152,9 @@ pub enum Expr {
         index  : Box<Expr>,
     },
 
+    // await expr — async bekleme
+    Await(Box<Expr>),
+
     // Pattern matching — match expr { Enum.Variant(a, b) => expr, _ => expr }
     Match {
         expr : Box<Expr>,
@@ -223,6 +226,7 @@ pub enum Stmt {
     Throw(Expr),
 
     If {
+        hint     : Option<BranchHint>,
         cond     : Expr,
         then     : Vec<Stmt>,
         else_if  : Vec<(Expr, Vec<Stmt>)>,
@@ -282,6 +286,12 @@ pub struct CatchClause {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum BranchHint {
+    Likely,
+    Unlikely,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum CallingConv {
     Cdecl,
     Stdcall,
@@ -321,8 +331,10 @@ pub struct Method {
     pub visibility   : Visibility,
     pub static_      : bool,
     pub abstract_    : bool,
+    pub default_     : bool,
     pub override_    : bool,
     pub inline_      : bool,
+    pub async_       : bool,
     pub calling_conv : Option<CallingConv>,
     pub section      : Option<String>,
     pub name         : String,
