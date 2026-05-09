@@ -105,12 +105,16 @@ fn main() {
     // Type Checker
     println!("");
     let mut tc      = TypeChecker::new();
-    let type_errors = tc.check(&module);
+    tc.check(&module);
 
-    if type_errors.is_empty() {
+    for warn in &tc.warnings {
+        println!("arc: {}", warn);
+    }
+
+    if tc.errors.is_empty() {
         println!("arc: type check OK");
     } else {
-        for err in type_errors {
+        for err in &tc.errors {
             eprintln!("arc: {}", err);
         }
         process::exit(1);

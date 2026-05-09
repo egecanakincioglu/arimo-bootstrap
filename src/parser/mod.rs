@@ -200,9 +200,14 @@ impl Parser {
     // ── Üst düzey tanımlar ────────────────────────────────────────────────────
 
     fn parse_item(&mut self) -> ParseResult<Item> {
-        let mut manual = false;
-        let mut packed = false;
+        let mut manual       = false;
+        let mut packed       = false;
         let mut align: Option<usize> = None;
+        let mut sealed       = false;
+        let mut immutable    = false;
+        let mut functional   = false;
+        let mut deprecated   : Option<String> = None;
+        let mut experimental = false;
 
         while self.check(&Token::At) {
             self.advance();
@@ -210,7 +215,11 @@ impl Parser {
             match annotation.as_str() {
                 "ManualMemory" => { manual = true; }
                 "Packed"       => { packed = true; }
-                "Align"        => {
+                "Sealed"       => { sealed = true; }
+                "Immutable"    => { immutable = true; }
+                "FunctionalInterface" => { functional = true; }
+                "Experimental" => { experimental = true; }
+                "Align" => {
                     self.expect(&Token::LParen)?;
                     match self.current().clone() {
                         Token::Int(n) if n > 0 => { align = Some(n as usize); self.advance(); }
@@ -221,10 +230,21 @@ impl Parser {
                     }
                     self.expect(&Token::RParen)?;
                 }
+                "Deprecated" => {
+                    self.expect(&Token::LParen)?;
+                    match self.current().clone() {
+                        Token::Str(s) => { deprecated = Some(s); self.advance(); }
+                        _ => {
+                            let (line, col) = self.current_span();
+                            return Err(ParseError::new("@Deprecated expects a string message", line, col));
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                }
                 other => {
                     let (line, col) = self.current_span();
                     return Err(ParseError::new(
-                        &format!("unknown item annotation '@{}' — available: @ManualMemory, @Packed, @Align(N)", other),
+                        &format!("unknown item annotation '@{}' — available: @ManualMemory, @Packed, @Align(N), @Sealed, @Immutable, @FunctionalInterface, @Deprecated(\"...\"), @Experimental", other),
                         line, col,
                     ));
                 }
@@ -244,7 +264,7 @@ impl Parser {
 
         match self.current().clone() {
             Token::Class => {
-                let class = self.parse_class(visibility, abstract_, manual)?;
+                let class = self.parse_class(visibility, abstract_, manual, sealed, immutable, deprecated.clone(), experimental)?;
                 if let Some(ref parent) = class.extends.clone() {
                     if parent == "Exception" || parent.ends_with("Exception") {
                         return Ok(Item::Exception(ExceptionDecl {
@@ -260,9 +280,9 @@ impl Parser {
                 }
                 Ok(Item::Class(class))
             }
-            Token::Struct => Ok(Item::Struct(self.parse_struct(visibility, packed, align)?)),
-            Token::Interface => Ok(Item::Interface(self.parse_interface()?)),
-            Token::Enum      => Ok(Item::Enum(self.parse_enum(visibility)?)),
+            Token::Struct    => Ok(Item::Struct(self.parse_struct(visibility, packed, align, deprecated.clone(), experimental)?)),
+            Token::Interface => Ok(Item::Interface(self.parse_interface(functional, sealed, deprecated.clone(), experimental)?)),
+            Token::Enum      => Ok(Item::Enum(self.parse_enum(visibility, deprecated.clone(), experimental)?)),
             Token::Union     => Ok(Item::Union(self.parse_union(visibility)?)),
             _ => {
                 let (line, col) = self.current_span();
@@ -295,7 +315,7 @@ impl Parser {
 
     // ── Class parser ──────────────────────────────────────────────────────────
 
-    fn parse_class(&mut self, visibility: Visibility, abstract_: bool, manual: bool) -> ParseResult<ClassDecl> {
+    fn parse_class(&mut self, visibility: Visibility, abstract_: bool, manual: bool, sealed: bool, immutable: bool, deprecated: Option<String>, experimental: bool) -> ParseResult<ClassDecl> {
         self.expect(&Token::Class)?;
         let name     = self.expect_ident()?;
         let generics = self.parse_generics_decl()?;
@@ -315,16 +335,53 @@ impl Parser {
         let mut methods     = Vec::new();
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
-            let mut inline_ = false;
-            let mut async_  = false;
-            let mut calling_conv: Option<CallingConv> = None;
-            let mut section: Option<String> = None;
+            let mut inline_      = false;
+            let mut async_       = false;
+            let mut pure_        = false;
+            let mut meth_deprecated   : Option<String> = None;
+            let mut meth_experimental = false;
+            let mut throws       : Vec<String> = Vec::new();
+            let mut suppress     : Vec<String> = Vec::new();
+            let mut calling_conv : Option<CallingConv> = None;
+            let mut section      : Option<String> = None;
             while self.check(&Token::At) {
                 self.advance();
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
-                    "ForceInline" => { inline_ = true; }
-                    "async"       => { async_  = true; }
+                    "ForceInline"  => { inline_ = true; }
+                    "async"        => { async_  = true; }
+                    "Pure"         => { pure_   = true; }
+                    "Experimental" => { meth_experimental = true; }
+                    "Deprecated"   => {
+                        self.expect(&Token::LParen)?;
+                        match self.current().clone() {
+                            Token::Str(s) => { meth_deprecated = Some(s); self.advance(); }
+                            _ => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new("@Deprecated expects a string message", line, col));
+                            }
+                        }
+                        self.expect(&Token::RParen)?;
+                    }
+                    "Throws" => {
+                        self.expect(&Token::LParen)?;
+                        while !self.check(&Token::RParen) && !self.check(&Token::Eof) {
+                            throws.push(self.expect_ident()?);
+                            if !self.check(&Token::RParen) { self.eat(&Token::Comma); }
+                        }
+                        self.expect(&Token::RParen)?;
+                    }
+                    "SuppressWarnings" => {
+                        self.expect(&Token::LParen)?;
+                        match self.current().clone() {
+                            Token::Str(s) => { suppress.push(s); self.advance(); }
+                            _ => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new("@SuppressWarnings expects a string", line, col));
+                            }
+                        }
+                        self.expect(&Token::RParen)?;
+                    }
                     "CallingConvention" => {
                         self.expect(&Token::LParen)?;
                         let conv = match self.current().clone() {
@@ -365,7 +422,7 @@ impl Parser {
                     other => {
                         let (line, col) = self.current_span();
                         return Err(ParseError::new(
-                            &format!("unknown method annotation '@{}' — available: @ForceInline, @CallingConvention(\"...\"), @Section(\"...\")", other),
+                            &format!("unknown method annotation '@{}' — available: @ForceInline, @Pure, @Deprecated(\"...\"), @Experimental, @Throws(...), @SuppressWarnings(\"...\"), @CallingConvention(\"...\"), @Section(\"...\")", other),
                             line, col,
                         ));
                     }
@@ -384,7 +441,7 @@ impl Parser {
                 self.advance();
                 let op_sym = self.parse_operator_symbol()?;
                 let method_name = format!("operator{}", op_sym);
-                let method = self.parse_method_body(vis, static_, abstract_, false, override_, inline_, async_, calling_conv, section, method_name, None)?;
+                let method = self.parse_method_body(vis, static_, abstract_, false, override_, inline_, async_, pure_, meth_deprecated.clone(), meth_experimental, throws.clone(), suppress.clone(), calling_conv, section, method_name, None)?;
                 methods.push(method);
                 continue;
             }
@@ -401,7 +458,7 @@ impl Parser {
                             if *next == Token::LParen {
                                 self.advance();
                                 let method = self.parse_method_body(
-                                    vis, static_, abstract_, false, override_, inline_, async_, calling_conv, section, iname, None
+                                    vis, static_, abstract_, false, override_, inline_, async_, pure_, meth_deprecated.clone(), meth_experimental, throws.clone(), suppress.clone(), calling_conv, section, iname, None
                                 )?;
                                 methods.push(method);
                                 continue;
@@ -429,7 +486,7 @@ impl Parser {
 
                         if self.check(&Token::LParen) {
                             let method = self.parse_method_body(
-                                vis, static_, abstract_, false, override_, inline_, async_, calling_conv, section, name, Some(ty)
+                                vis, static_, abstract_, false, override_, inline_, async_, pure_, meth_deprecated.clone(), meth_experimental, throws.clone(), suppress.clone(), calling_conv, section, name, Some(ty)
                             )?;
                             methods.push(method);
                         } else {
@@ -451,7 +508,7 @@ impl Parser {
         }
 
         self.expect(&Token::RBrace)?;
-        Ok(ClassDecl { visibility, abstract_, manual, name, generics, extends, implements, fields, constructor, methods })
+        Ok(ClassDecl { visibility, abstract_, manual, sealed, immutable, deprecated, experimental, name, generics, extends, implements, fields, constructor, methods })
     }
 
     fn parse_constructor(&mut self, visibility: Visibility) -> ParseResult<Constructor> {
@@ -471,6 +528,11 @@ impl Parser {
         override_    : bool,
         inline_      : bool,
         async_       : bool,
+        pure_        : bool,
+        deprecated   : Option<String>,
+        experimental : bool,
+        throws       : Vec<String>,
+        suppress     : Vec<String>,
         calling_conv : Option<CallingConv>,
         section      : Option<String>,
         name         : String,
@@ -494,7 +556,7 @@ impl Parser {
             Some(stmts)
         };
 
-        Ok(Method { visibility, static_, abstract_, default_, override_, inline_, async_, calling_conv, section, name, params, return_ty, body })
+        Ok(Method { visibility, static_, abstract_, default_, override_, inline_, async_, pure_, deprecated, experimental, throws, suppress, calling_conv, section, name, params, return_ty, body })
     }
 
     fn parse_operator_symbol(&mut self) -> ParseResult<String> {
@@ -529,7 +591,7 @@ impl Parser {
 
     // ── Struct parser ─────────────────────────────────────────────────────────
 
-    fn parse_struct(&mut self, visibility: Visibility, packed: bool, align: Option<usize>) -> ParseResult<StructDecl> {
+    fn parse_struct(&mut self, visibility: Visibility, packed: bool, align: Option<usize>, deprecated: Option<String>, experimental: bool) -> ParseResult<StructDecl> {
         self.expect(&Token::Struct)?;
         let name     = self.expect_ident()?;
         let generics = self.parse_generics_decl()?;
@@ -546,16 +608,53 @@ impl Parser {
         let mut methods     = Vec::new();
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
-            let mut inline_ = false;
-            let mut async_  = false;
-            let mut calling_conv: Option<CallingConv> = None;
-            let mut section: Option<String> = None;
+            let mut inline_      = false;
+            let mut async_       = false;
+            let mut pure_        = false;
+            let mut meth_deprecated   : Option<String> = None;
+            let mut meth_experimental = false;
+            let mut throws       : Vec<String> = Vec::new();
+            let mut suppress     : Vec<String> = Vec::new();
+            let mut calling_conv : Option<CallingConv> = None;
+            let mut section      : Option<String> = None;
             while self.check(&Token::At) {
                 self.advance();
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
-                    "ForceInline" => { inline_ = true; }
-                    "async"       => { async_  = true; }
+                    "ForceInline"  => { inline_ = true; }
+                    "async"        => { async_  = true; }
+                    "Pure"         => { pure_   = true; }
+                    "Experimental" => { meth_experimental = true; }
+                    "Deprecated"   => {
+                        self.expect(&Token::LParen)?;
+                        match self.current().clone() {
+                            Token::Str(s) => { meth_deprecated = Some(s); self.advance(); }
+                            _ => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new("@Deprecated expects a string message", line, col));
+                            }
+                        }
+                        self.expect(&Token::RParen)?;
+                    }
+                    "Throws" => {
+                        self.expect(&Token::LParen)?;
+                        while !self.check(&Token::RParen) && !self.check(&Token::Eof) {
+                            throws.push(self.expect_ident()?);
+                            if !self.check(&Token::RParen) { self.eat(&Token::Comma); }
+                        }
+                        self.expect(&Token::RParen)?;
+                    }
+                    "SuppressWarnings" => {
+                        self.expect(&Token::LParen)?;
+                        match self.current().clone() {
+                            Token::Str(s) => { suppress.push(s); self.advance(); }
+                            _ => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new("@SuppressWarnings expects a string", line, col));
+                            }
+                        }
+                        self.expect(&Token::RParen)?;
+                    }
                     "CallingConvention" => {
                         self.expect(&Token::LParen)?;
                         let conv = match self.current().clone() {
@@ -596,7 +695,7 @@ impl Parser {
                     other => {
                         let (line, col) = self.current_span();
                         return Err(ParseError::new(
-                            &format!("unknown method annotation '@{}' — available: @ForceInline, @CallingConvention(\"...\"), @Section(\"...\")", other),
+                            &format!("unknown method annotation '@{}' — available: @ForceInline, @Pure, @Deprecated(\"...\"), @Experimental, @Throws(...), @SuppressWarnings(\"...\"), @CallingConvention(\"...\"), @Section(\"...\")", other),
                             line, col,
                         ));
                     }
@@ -614,7 +713,7 @@ impl Parser {
                 self.advance();
                 let op_sym = self.parse_operator_symbol()?;
                 let method_name = format!("operator{}", op_sym);
-                let method = self.parse_method_body(vis, static_, false, false, override_, inline_, async_, calling_conv, section, method_name, None)?;
+                let method = self.parse_method_body(vis, static_, false, false, override_, inline_, async_, pure_, meth_deprecated.clone(), meth_experimental, throws.clone(), suppress.clone(), calling_conv, section, method_name, None)?;
                 methods.push(method);
                 continue;
             }
@@ -631,7 +730,7 @@ impl Parser {
                             if *next == Token::LParen {
                                 self.advance();
                                 let method = self.parse_method_body(
-                                    vis, static_, false, false, override_, inline_, async_, calling_conv, section, iname, None
+                                    vis, static_, false, false, override_, inline_, async_, pure_, meth_deprecated.clone(), meth_experimental, throws.clone(), suppress.clone(), calling_conv, section, iname, None
                                 )?;
                                 methods.push(method);
                                 continue;
@@ -659,7 +758,7 @@ impl Parser {
                         let name = self.expect_ident()?;
                         if self.check(&Token::LParen) {
                             let method = self.parse_method_body(
-                                vis, static_, false, false, override_, inline_, async_, calling_conv, section, name, Some(ty)
+                                vis, static_, false, false, override_, inline_, async_, pure_, meth_deprecated.clone(), meth_experimental, throws.clone(), suppress.clone(), calling_conv, section, name, Some(ty)
                             )?;
                             methods.push(method);
                         } else {
@@ -681,7 +780,7 @@ impl Parser {
         }
 
         self.expect(&Token::RBrace)?;
-        Ok(StructDecl { visibility, packed, align, name, generics, implements, fields, constructor, methods })
+        Ok(StructDecl { visibility, packed, align, deprecated, experimental, name, generics, implements, fields, constructor, methods })
     }
 
     // ── Union parser ─────────────────────────────────────────────────────────
@@ -771,7 +870,7 @@ impl Parser {
 
     // ── Interface parser ──────────────────────────────────────────────────────
 
-    fn parse_interface(&mut self) -> ParseResult<InterfaceDecl> {
+    fn parse_interface(&mut self, functional: bool, sealed: bool, deprecated: Option<String>, experimental: bool) -> ParseResult<InterfaceDecl> {
         self.expect(&Token::Interface)?;
         let name     = self.expect_ident()?;
         let generics = self.parse_generics_decl()?;
@@ -802,6 +901,11 @@ impl Parser {
                 override_    : false,
                 inline_      : false,
                 async_       : false,
+                pure_        : false,
+                deprecated   : None,
+                experimental : false,
+                throws       : Vec::new(),
+                suppress     : Vec::new(),
                 calling_conv : None,
                 section      : None,
                 name,
@@ -812,12 +916,12 @@ impl Parser {
         }
 
         self.expect(&Token::RBrace)?;
-        Ok(InterfaceDecl { name, generics, methods })
+        Ok(InterfaceDecl { name, generics, functional, sealed, deprecated, experimental, methods })
     }
 
     // ── Enum parser ───────────────────────────────────────────────────────────
 
-    fn parse_enum(&mut self, visibility: Visibility) -> ParseResult<EnumDecl> {
+    fn parse_enum(&mut self, visibility: Visibility, deprecated: Option<String>, experimental: bool) -> ParseResult<EnumDecl> {
         self.expect(&Token::Enum)?;
         let name = self.expect_ident()?;
         self.expect(&Token::LBrace)?;
@@ -851,12 +955,12 @@ impl Parser {
             let vis     = self.parse_visibility()?;
             let static_ = self.eat(&Token::Static);
             let name    = self.expect_ident()?;
-            let method  = self.parse_method_body(vis, static_, false, false, false, false, false, None, None, name, None)?;
+            let method  = self.parse_method_body(vis, static_, false, false, false, false, false, false, None, false, Vec::new(), Vec::new(), None, None, name, None)?;
             methods.push(method);
         }
 
         self.expect(&Token::RBrace)?;
-        Ok(EnumDecl { visibility, name, variants, methods })
+        Ok(EnumDecl { visibility, deprecated, experimental, name, variants, methods })
     }
 
     // ── Tip parser ────────────────────────────────────────────────────────────

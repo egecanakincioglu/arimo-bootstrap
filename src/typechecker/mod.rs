@@ -67,6 +67,9 @@ pub struct ClassInfo {
     pub methods      : HashMap<String, Vec<MethodInfo>>,
     pub constructor  : Option<ConstructorInfo>,
     pub variant_data : HashMap<String, Vec<Type>>,  // enum varyant → veri tipleri
+    pub sealed       : bool,
+    pub deprecated   : Option<String>,
+    pub experimental : bool,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +137,7 @@ pub struct TypeChecker {
     classes            : HashMap<String, ClassInfo>,
     type_aliases       : HashMap<String, Type>,
     pub errors         : Vec<TypeError>,
+    pub warnings       : Vec<String>,   // @Deprecated / @Experimental uyarıları
     current_class      : Option<String>,
     current_return_ty  : Option<Option<Type>>,
     scopes             : Vec<Scope>,
@@ -146,6 +150,7 @@ impl TypeChecker {
             classes           : HashMap::new(),
             type_aliases      : HashMap::new(),
             errors            : Vec::new(),
+            warnings          : Vec::new(),
             current_class     : None,
             current_return_ty : None,
             scopes            : Vec::new(),
@@ -205,6 +210,9 @@ impl TypeChecker {
             methods       : HashMap::new(),
             constructor   : None,
             variant_data  : HashMap::new(),
+            sealed        : false,
+            deprecated    : None,
+            experimental  : false,
         };
         for f in &s.fields {
             info.fields.insert(f.name.clone(), FieldInfo {
@@ -263,6 +271,9 @@ impl TypeChecker {
             methods       : HashMap::new(),
             constructor   : None,
             variant_data  : HashMap::new(),
+            sealed        : c.sealed,
+            deprecated    : c.deprecated.clone(),
+            experimental  : c.experimental,
         };
         for f in &c.fields {
             info.fields.insert(f.name.clone(), FieldInfo {
@@ -303,6 +314,9 @@ impl TypeChecker {
             methods       : HashMap::new(),
             constructor   : None,
             variant_data  : HashMap::new(),
+            sealed        : i.sealed,
+            deprecated    : i.deprecated.clone(),
+            experimental  : i.experimental,
         };
         for m in &i.methods {
             let mi = MethodInfo {
@@ -328,6 +342,9 @@ impl TypeChecker {
             methods       : HashMap::new(),
             constructor   : None,
             variant_data  : HashMap::new(),
+            sealed        : false,
+            deprecated    : None,
+            experimental  : false,
         };
         for v in &e.variants {
             // Her variant hem fields'ta (Priority.High erişimi için) hem variant_data'da
@@ -363,6 +380,9 @@ impl TypeChecker {
             methods       : HashMap::new(),
             constructor   : None,
             variant_data  : HashMap::new(),
+            sealed        : false,
+            deprecated    : None,
+            experimental  : false,
         };
         for f in &e.fields {
             info.fields.insert(f.name.clone(), FieldInfo {
@@ -402,6 +422,9 @@ impl TypeChecker {
             methods       : HashMap::new(),
             constructor   : None,
             variant_data  : HashMap::new(),
+            sealed        : false,
+            deprecated    : None,
+            experimental  : false,
         };
         for f in &u.fields {
             info.fields.insert(f.name.clone(), FieldInfo {
@@ -437,6 +460,9 @@ impl TypeChecker {
                     methods       : HashMap::new(),
                     constructor   : None,
                     variant_data  : HashMap::new(),
+            sealed        : false,
+            deprecated    : None,
+            experimental  : false,
                 });
             class_entry.methods.entry(decl.name.clone()).or_default().push(mi);
         }
@@ -446,6 +472,21 @@ impl TypeChecker {
 
     fn check_class(&mut self, c: &ClassDecl) {
         self.current_class = Some(c.name.clone());
+
+        // @Immutable — tüm instance field'lar readonly olmalı
+        if c.immutable {
+            for field in &c.fields {
+                if !field.static_ && !field.readonly {
+                    self.error(format!(
+                        "@Immutable class '{}': field '{}' must be readonly",
+                        c.name, field.name
+                    ));
+                }
+            }
+        }
+
+        // @Deprecated uyarısı (class tanımlandığında değil, kullanıldığında)
+        // Burada sadece class'ın kendisini kayıt ediyoruz, uyarı infer_expr'de
 
         if let Some(parent) = &c.extends {
             if !self.classes.contains_key(parent.as_str()) {
@@ -459,6 +500,9 @@ impl TypeChecker {
                         c.name, parent
                     ));
                 }
+                // @Sealed kontrolü — sealed class sadece aynı modülden extend edilebilir
+                // (aynı compilation unit = izin verilir, farklı unit = hata)
+                // Şimdilik: sealed flag'i ClassInfo'ya taşındığında enforce edilecek
             }
         }
 
@@ -565,6 +609,17 @@ impl TypeChecker {
     }
 
     fn check_interface(&mut self, i: &InterfaceDecl) {
+        // @FunctionalInterface — tam 1 abstract method olmalı
+        if i.functional {
+            let abstract_count = i.methods.iter().filter(|m| m.abstract_).count();
+            if abstract_count != 1 {
+                self.error(format!(
+                    "@FunctionalInterface '{}' must have exactly 1 abstract method, found {}",
+                    i.name, abstract_count
+                ));
+            }
+        }
+
         for m in &i.methods {
             if m.body.is_some() && !m.default_ {
                 self.error(format!(
@@ -1094,6 +1149,20 @@ impl TypeChecker {
                             }
                         }
                         return *ret_ty;
+                    }
+                }
+
+                // @Deprecated / @Experimental uyarısı
+                if let Some(info) = self.classes.get(class.as_str()).cloned() {
+                    if let Some(msg) = &info.deprecated {
+                        self.warnings.push(format!(
+                            "warning: '{}' is deprecated — {}", class, msg
+                        ));
+                    }
+                    if info.experimental {
+                        self.warnings.push(format!(
+                            "warning: '{}' is experimental and may change in future versions", class
+                        ));
                     }
                 }
 
@@ -2520,6 +2589,9 @@ impl TypeChecker {
                 vis    : Visibility::Public,
             }),
             variant_data  : HashMap::new(),
+            sealed        : false,
+            deprecated    : None,
+            experimental  : false,
         });
 
         let mut object_methods = HashMap::new();
@@ -2540,6 +2612,9 @@ impl TypeChecker {
             methods       : object_methods,
             constructor   : None,
             variant_data  : HashMap::new(),
+            sealed        : false,
+            deprecated    : None,
+            experimental  : false,
         });
 
         // ── Built-in Result<T, E> ─────────────────────────────────────────────
@@ -2564,6 +2639,9 @@ impl TypeChecker {
             methods       : result_methods,
             constructor   : None,
             variant_data  : result_variant_data,
+            sealed        : false,
+            deprecated    : None,
+            experimental  : false,
         });
 
         // ── SIMD tipleri ──────────────────────────────────────────────────────
@@ -2621,6 +2699,9 @@ impl TypeChecker {
                     vis    : Visibility::Public,
                 }),
                 variant_data  : HashMap::new(),
+            sealed        : false,
+            deprecated    : None,
+            experimental  : false,
             });
         }
     }

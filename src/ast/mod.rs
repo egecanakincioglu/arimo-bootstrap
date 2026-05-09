@@ -335,6 +335,11 @@ pub struct Method {
     pub override_    : bool,
     pub inline_      : bool,
     pub async_       : bool,
+    pub pure_        : bool,            // @Pure — yan etki yok
+    pub deprecated   : Option<String>, // @Deprecated("mesaj")
+    pub experimental : bool,           // @Experimental
+    pub throws       : Vec<String>,    // @Throws(ExType1, ...)
+    pub suppress     : Vec<String>,    // @SuppressWarnings("tip")
     pub calling_conv : Option<CallingConv>,
     pub section      : Option<String>,
     pub name         : String,
@@ -354,23 +359,31 @@ pub struct Constructor {
 
 #[derive(Debug, Clone)]
 pub struct ClassDecl {
-    pub visibility  : Visibility,
-    pub abstract_   : bool,
-    pub manual      : bool,
-    pub name        : String,
-    pub generics    : Vec<GenericParam>,
-    pub extends     : Option<String>,
-    pub implements  : Vec<String>,
-    pub fields      : Vec<Field>,
-    pub constructor : Option<Constructor>,
-    pub methods     : Vec<Method>,
+    pub visibility   : Visibility,
+    pub abstract_    : bool,
+    pub manual       : bool,
+    pub sealed       : bool,           // @Sealed — sadece aynı modülden extend
+    pub immutable    : bool,           // @Immutable — tüm field'lar readonly zorunlu
+    pub deprecated   : Option<String>, // @Deprecated("mesaj")
+    pub experimental : bool,           // @Experimental
+    pub name         : String,
+    pub generics     : Vec<GenericParam>,
+    pub extends      : Option<String>,
+    pub implements   : Vec<String>,
+    pub fields       : Vec<Field>,
+    pub constructor  : Option<Constructor>,
+    pub methods      : Vec<Method>,
 }
 
 #[derive(Debug, Clone)]
 pub struct InterfaceDecl {
-    pub name     : String,
-    pub generics : Vec<GenericParam>,
-    pub methods  : Vec<Method>,
+    pub name         : String,
+    pub generics     : Vec<GenericParam>,
+    pub functional   : bool,           // @FunctionalInterface — tam 1 abstract method
+    pub sealed       : bool,           // @Sealed
+    pub deprecated   : Option<String>, // @Deprecated("mesaj")
+    pub experimental : bool,           // @Experimental
+    pub methods      : Vec<Method>,
 }
 
 // Enum variant — veri taşıyabilir veya saf olabilir
@@ -384,10 +397,12 @@ pub struct EnumVariant {
 
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
-    pub visibility : Visibility,
-    pub name       : String,
-    pub variants   : Vec<EnumVariant>,
-    pub methods    : Vec<Method>,
+    pub visibility   : Visibility,
+    pub deprecated   : Option<String>,
+    pub experimental : bool,
+    pub name         : String,
+    pub variants     : Vec<EnumVariant>,
+    pub methods      : Vec<Method>,
 }
 
 #[derive(Debug, Clone)]
@@ -438,15 +453,17 @@ pub struct ExternBlock {
 
 #[derive(Debug, Clone)]
 pub struct StructDecl {
-    pub visibility  : Visibility,
-    pub packed      : bool,
-    pub align       : Option<usize>,
-    pub name        : String,
-    pub generics    : Vec<GenericParam>,
-    pub implements  : Vec<String>,
-    pub fields      : Vec<Field>,
-    pub constructor : Option<Constructor>,
-    pub methods     : Vec<Method>,
+    pub visibility   : Visibility,
+    pub packed       : bool,
+    pub align        : Option<usize>,
+    pub deprecated   : Option<String>,
+    pub experimental : bool,
+    pub name         : String,
+    pub generics     : Vec<GenericParam>,
+    pub implements   : Vec<String>,
+    pub fields       : Vec<Field>,
+    pub constructor  : Option<Constructor>,
+    pub methods      : Vec<Method>,
 }
 
 // ── Program (kök node) ────────────────────────────────────────────────────────
