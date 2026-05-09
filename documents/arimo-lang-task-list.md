@@ -9,7 +9,7 @@ Compiler adı: `arc` | Kaynak uzantısı: `.arm` | Compiler dili: Rust
 **Temel felsefe:**
 - Kullanıcı `&`, `mut`, lifetime yazmaz — compiler arka planda halleder
 - Otomatik bellek yönetimi varsayılan (3 katmanlı: BorrowChecker → ARC → GC)
-- `@manual` annotation ile performans kritik kodda tam kontrol
+- `@ManualMemory` annotation ile performans kritik kodda tam kontrol
 - C FFI opsiyonel — OS için `asm{}` yeterli, userland için C kütüphaneleri
 - `const` yok — `static readonly` aynı rolü doldurur, tekrarlama olmaz
 
@@ -28,7 +28,7 @@ Compiler adı: `arc` | Kaynak uzantısı: `.arm` | Compiler dili: Rust
 - Pratt parser — tüm v1.3 syntax
 - `super(...)` constructor çağrısı
 - `List()` / `HashMap()` / `TreeMap()` v1.3 constructor syntax
-- `@manual` annotation parse
+- `@ManualMemory` annotation parse
 - `RawPtr<T>` tip parse
 - Exception sınıfları `Item::Exception` olarak ayrıştırılıyor
 - `Float.sizeOf()` gibi primitif tip static çağrıları
@@ -44,7 +44,7 @@ Compiler adı: `arc` | Kaynak uzantısı: `.arm` | Compiler dili: Rust
 - Enum exhaustiveness (switch)
 - Builtin koleksiyon metodları (List, Map, HashMap, TreeMap, Pair)
 - IO / Math / Time / Memory stdlib
-- `@manual` sınıflarda `RawPtr<T>` field'larına izin
+- `@ManualMemory` sınıflarda `RawPtr<T>` field'larına izin
 - `Memory.alloc/free/copy`, `RawPtr.read/write/offset`
 - `T.sizeOf()` her tip için
 
@@ -56,7 +56,7 @@ Compiler adı: `arc` | Kaynak uzantısı: `.arm` | Compiler dili: Rust
 - Copy tipler: Integer, Float, Boolean (move takibi yok)
 - Move tipler: String, user-defined class, koleksiyonlar
 - Scope bazlı drop schedule (LIFO sırası) — CodeGen için
-- `@manual` sınıflar tamamen atlanıyor
+- `@ManualMemory` sınıflar tamamen atlanıyor
 
 ### ✅ Milestone 5 — Phase 1a: Integers + Bitwise + Cast
 - `u8 u16 u32 u64 i8 i16 i32 i64` — fixed-size integer tipler
@@ -70,12 +70,12 @@ Compiler adı: `arc` | Kaynak uzantısı: `.arm` | Compiler dili: Rust
 - `type NodeId = u32;` — modül seviyesinde tip takma adı
 - TypeChecker alias expansion ile şeffaf çözümleme
 
-### ✅ Milestone 7 — Phase 1c: struct + Operator Overloading + @inline
+### ✅ Milestone 7 — Phase 1c: struct + Operator Overloading + @ForceInline
 - `struct` keyword — stack-allocated, copy semantics
 - `Vec3(1.0, 2.0, 3.0)` — auto-constructor (field sırası)
 - `operator +`, `operator ==` vb. — class ve struct'ta overloading
 - TypeChecker: `a + b` için `operator+` metodu aranır
-- `@inline` annotation — method seviyesinde, CodeGen'de `alwaysinline`
+- `@ForceInline` annotation — method seviyesinde, CodeGen'de `alwaysinline`
 - BorrowChecker: struct copy tipi, move takibi yok
 
 ### ✅ Milestone 8 — Phase 1d: Array + Slice + FnPtr + Index
@@ -135,7 +135,7 @@ arimo-compiler/
     ├── hello.arm
     ├── comprehensive.arm   ← v1.3 full coverage (7 items)
     ├── phase1a.arm         ← fixed-size ints, bitwise, cast, type alias
-    ├── phase1c.arm         ← struct, operator overloading, @inline
+    ├── phase1c.arm         ← struct, operator overloading, @ForceInline
     ├── phase1d.arm         ← Array, Slice, function pointers
     └── phase1ef.arm        ← enum with data, match, Result, generic bounds
 ```
@@ -159,16 +159,16 @@ Katman 3 — GC:
   Runtime overhead: var ama küçük heap
 ```
 
-### @manual Boundary
+### @ManualMemory Boundary
 - Sınıf seviyesinde opt-in — class seviyesinde en temiz sınır
 - Field/metod seviyesinde olsaydı drop schedule belirsizleşirdi
-- `@manual` class nesnesi normal class'a parametre olabilir (borrow, free etmez)
+- `@ManualMemory` class nesnesi normal class'a parametre olabilir (borrow, free etmez)
 
 ### struct vs class
 ```
 class  → heap, reference semantics, ARC/GC
 struct → stack, value semantics, copy
-@manual class → heap, manual memory, zero GC overhead
+@ManualMemory class → heap, manual memory, zero GC overhead
 ```
 
 ### const yok
@@ -222,14 +222,14 @@ Detaylar: `arimo-lang-roadmap.md`
    - `main()` → executable, `IO.print()` çalışıyor
 2. **2.2 Katman 1** — BorrowChecker Zone drop schedule → free()
    - Scope çıkışında otomatik bellek serbest bırakma
-3. **2.6** — @manual sınıfları (Memory.alloc/free)
+3. **2.6** — @ManualMemory sınıfları (Memory.alloc/free)
 4. **2.7 + 2.8** — String ve koleksiyonlar
 5. **2.2 Katman 2** — ARC (reference counting)
 6. **2.9** — Exception handling
 7. **2.10 + 2.11** — Struct/Array/Slice + output
 
 ### Sonraki Öncelik
-- Faza 3: Systems (volatile, @packed, C FFI, inline asm, @nostd)
+- Faza 3: Systems (volatile, @packed, C FFI, inline asm, @Freestanding)
 - Faza 4: Performance (@likely/@unlikely, defer, async/await)
 
 ---
@@ -251,7 +251,7 @@ Array<T, N>   (fixed-size, stack)
 Slice<T>      (non-owning view)
 
 // Systems
-RawPtr<T>     (sadece @manual)
+RawPtr<T>     (sadece @ManualMemory)
 
 // Generic
 Result<T, E>  (yerleşik enum: Ok(T), Err(E))
@@ -281,8 +281,8 @@ operator +/-/*/ vb. (user-defined)
 
 ### Annotations
 ```
-@manual   — sınıf düzeyinde manuel bellek yönetimi
-@inline   — metod düzeyinde inlining hint
+@ManualMemory   — sınıf düzeyinde manuel bellek yönetimi
+@ForceInline   — metod düzeyinde inlining hint
 ```
 
 ### Dil Yapıları

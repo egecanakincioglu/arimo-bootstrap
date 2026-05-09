@@ -8,17 +8,17 @@ public struct Vec3 {
     y : Float;
     z : Float;
 
-    @inline
+    @ForceInline
     public operator +(other: Vec3) : Vec3 {
         return Vec3(this.x + other.x, this.y + other.y, this.z + other.z);
     }
 
-    @inline
+    @ForceInline
     public operator -(other: Vec3) : Vec3 {
         return Vec3(this.x - other.x, this.y - other.y, this.z - other.z);
     }
 
-    @inline
+    @ForceInline
     public operator *(scalar: Float) : Vec3 {
         return Vec3(this.x * scalar, this.y * scalar, this.z * scalar);
     }
@@ -27,7 +27,7 @@ public struct Vec3 {
         return this.x == other.x && this.y == other.y && this.z == other.z;
     }
 
-    @inline
+    @ForceInline
     public dot(other: Vec3) : Float {
         return this.x * other.x + this.y * other.y + this.z * other.z;
     }

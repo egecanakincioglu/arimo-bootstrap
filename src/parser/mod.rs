@@ -144,11 +144,11 @@ impl Parser {
             self.advance();
             let ann = self.expect_ident()?;
             match ann.as_str() {
-                "nostd" => { nostd = true; }
+                "Freestanding" => { nostd = true; }
                 other => {
                     let (line, col) = self.current_span();
                     return Err(ParseError::new(
-                        &format!("unknown module annotation '@{}'", other),
+                        &format!("unknown module annotation '@{}' — use @Freestanding", other),
                         line, col,
                     ));
                 }
@@ -208,15 +208,15 @@ impl Parser {
             self.advance();
             let annotation = self.expect_ident()?;
             match annotation.as_str() {
-                "manual" => { manual = true; }
-                "packed" => { packed = true; }
-                "align"  => {
+                "ManualMemory" => { manual = true; }
+                "Packed"       => { packed = true; }
+                "Align"        => {
                     self.expect(&Token::LParen)?;
                     match self.current().clone() {
                         Token::Int(n) if n > 0 => { align = Some(n as usize); self.advance(); }
                         _ => {
                             let (line, col) = self.current_span();
-                            return Err(ParseError::new("@align expects a positive integer", line, col));
+                            return Err(ParseError::new("@Align expects a positive integer", line, col));
                         }
                     }
                     self.expect(&Token::RParen)?;
@@ -224,7 +224,7 @@ impl Parser {
                 other => {
                     let (line, col) = self.current_span();
                     return Err(ParseError::new(
-                        &format!("unknown item annotation '@{}'", other),
+                        &format!("unknown item annotation '@{}' — available: @ManualMemory, @Packed, @Align(N)", other),
                         line, col,
                     ));
                 }
@@ -323,18 +323,18 @@ impl Parser {
                 self.advance();
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
-                    "inline"    => { inline_ = true; }
-                    "async"     => { async_ = true; }
-                    "cdecl"     => { calling_conv = Some(CallingConv::Cdecl); }
-                    "stdcall"   => { calling_conv = Some(CallingConv::Stdcall); }
-                    "interrupt" => { calling_conv = Some(CallingConv::Interrupt); }
-                    "section"   => {
+                    "ForceInline"      => { inline_ = true; }
+                    "async"            => { async_ = true; }
+                    "CDecl"            => { calling_conv = Some(CallingConv::Cdecl); }
+                    "StdCall"          => { calling_conv = Some(CallingConv::Stdcall); }
+                    "InterruptHandler" => { calling_conv = Some(CallingConv::Interrupt); }
+                    "Section"          => {
                         self.expect(&Token::LParen)?;
                         match self.current().clone() {
                             Token::Str(s) => { section = Some(s); self.advance(); }
                             _ => {
                                 let (line, col) = self.current_span();
-                                return Err(ParseError::new("@section expects a string literal", line, col));
+                                return Err(ParseError::new("@Section expects a string literal", line, col));
                             }
                         }
                         self.expect(&Token::RParen)?;
@@ -342,7 +342,7 @@ impl Parser {
                     other => {
                         let (line, col) = self.current_span();
                         return Err(ParseError::new(
-                            &format!("unknown method annotation '@{}'", other),
+                            &format!("unknown method annotation '@{}' — available: @ForceInline, @CDecl, @StdCall, @InterruptHandler, @Section(\"...\")", other),
                             line, col,
                         ));
                     }
@@ -531,18 +531,18 @@ impl Parser {
                 self.advance();
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
-                    "inline"    => { inline_ = true; }
-                    "async"     => { async_ = true; }
-                    "cdecl"     => { calling_conv = Some(CallingConv::Cdecl); }
-                    "stdcall"   => { calling_conv = Some(CallingConv::Stdcall); }
-                    "interrupt" => { calling_conv = Some(CallingConv::Interrupt); }
-                    "section"   => {
+                    "ForceInline"      => { inline_ = true; }
+                    "async"            => { async_ = true; }
+                    "CDecl"            => { calling_conv = Some(CallingConv::Cdecl); }
+                    "StdCall"          => { calling_conv = Some(CallingConv::Stdcall); }
+                    "InterruptHandler" => { calling_conv = Some(CallingConv::Interrupt); }
+                    "Section"          => {
                         self.expect(&Token::LParen)?;
                         match self.current().clone() {
                             Token::Str(s) => { section = Some(s); self.advance(); }
                             _ => {
                                 let (line, col) = self.current_span();
-                                return Err(ParseError::new("@section expects a string literal", line, col));
+                                return Err(ParseError::new("@Section expects a string literal", line, col));
                             }
                         }
                         self.expect(&Token::RParen)?;
@@ -550,7 +550,7 @@ impl Parser {
                     other => {
                         let (line, col) = self.current_span();
                         return Err(ParseError::new(
-                            &format!("unknown method annotation '@{}'", other),
+                            &format!("unknown method annotation '@{}' — available: @ForceInline, @CDecl, @StdCall, @InterruptHandler, @Section(\"...\")", other),
                             line, col,
                         ));
                     }
@@ -1185,8 +1185,8 @@ impl Parser {
             self.advance();
             let ann = self.expect_ident()?;
             match ann.as_str() {
-                "likely"   => Some(BranchHint::Likely),
-                "unlikely" => Some(BranchHint::Unlikely),
+                "Likely"   => Some(BranchHint::Likely),
+                "Unlikely" => Some(BranchHint::Unlikely),
                 other => {
                     let (line, col) = self.current_span();
                     return Err(ParseError::new(

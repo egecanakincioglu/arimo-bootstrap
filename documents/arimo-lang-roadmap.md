@@ -28,11 +28,11 @@ Modern bir programlama dili:
 - TypeChecker alias expansion ile şeffaf çalışır
 - **Not:** `const` eklenmedi — `static readonly` zaten o rolü dolduruyor
 
-### 1c. struct (Value Type) + Operator Overloading + @inline ✅
+### 1c. struct (Value Type) + Operator Overloading + @ForceInline ✅
 - `struct` keyword: stack-allocated, copy semantics, extends yok
 - Auto-constructor: field sırasından otomatik üretilir
 - `operator +` / `operator ==` vb. — class ve struct'ta
-- `@inline` annotation — metod seviyesinde, CodeGen'de `alwaysinline`
+- `@ForceInline` annotation — metod seviyesinde, CodeGen'de `alwaysinline`
 - BorrowChecker: struct tipler copy, move takibi yok
 
 ### 1d. Array<T,N> + Slice<T> + Function Pointers ✅
@@ -63,19 +63,19 @@ Modern bir programlama dili:
 
 ### 2.1 Bellek Layout Kontrol
 ```arimo
-@packed
+@Packed
 public struct PacketHeader {
     magic   : u16;
     version : u8;
     flags   : u8;
 }
 
-@align(16)
+@Align(16)
 public struct SimdVec {
     data : Array<Float, 4>;
 }
 ```
-- Lexer: `@packed`, `@align(N)` annotation'ları
+- Lexer: `@Packed`, `@align(N)` annotation'ları
 - AST: StructDecl'da `packed: bool`, `align: Option<usize>`
 - CodeGen: LLVM struct packed layout, alignment attribute
 
@@ -87,7 +87,7 @@ volatile u32 status = hardware_register.read();
 - Lexer: `Token::Volatile`
 - AST: VarDecl'da `volatile: bool`
 - CodeGen: LLVM `volatile load/store`
-- Sadece `@manual` sınıflar ve `@nostd` modüllerde kullanım tavsiyesi
+- Sadece `@ManualMemory` sınıflar ve `@Freestanding` modüllerde kullanım tavsiyesi
 
 ### 2.3 union Type
 ```arimo
@@ -99,7 +99,7 @@ public union Register {
 - OS/embedded için register overlapping
 - Lexer: `Token::Union`
 - AST: `UnionDecl`, `Item::Union`
-- TypeChecker: union erişimi `@manual` gerektiriyor
+- TypeChecker: union erişimi `@ManualMemory` gerektiriyor
 - CodeGen: LLVM union layout
 
 ### 2.4 C FFI
@@ -117,7 +117,7 @@ extern "C" {
 
 ### 2.5 Inline Assembly
 ```arimo
-@manual
+@ManualMemory
 public class Syscall {
     public static exit(code: i32) : Void {
         asm {
@@ -128,23 +128,23 @@ public class Syscall {
     }
 }
 ```
-- Sadece `@manual` sınıflarda
+- Sadece `@ManualMemory` sınıflarda
 - Lexer: `Token::Asm`
 - AST: `Stmt::Asm(String)`
 - CodeGen: LLVM inline asm
 
-### 2.6 @nostd + @section + Calling Conventions
+### 2.6 @Freestanding + @Section + Calling Conventions
 ```arimo
-@nostd
+@Freestanding
 module kernel.boot;
 
-@section(".boot")
-@cdecl
+@Section(".boot")
+@CDecl
 public static _start() : Void { ... }
 ```
-- `@nostd` → stdlib import yok, `_start()` entry point, `-nostdlib` linker
-- `@section(".text.init")` → linker section
-- `@cdecl`, `@stdcall`, `@interrupt` → calling convention
+- `@Freestanding` → stdlib import yok, `_start()` entry point, `-nostdlib` linker
+- `@Section(".text.init")` → linker section
+- `@CDecl`, `@StdCall`, `@InterruptHandler` → calling convention
 
 ### 2.7 noreturn
 ```arimo
@@ -281,11 +281,11 @@ arc_str_concat(...)
 - [ ] `union` → LLVM union layout (max field size)
 - [ ] `extern "C"` → LLVM `declare` + C calling convention
 - [ ] `asm {}` → LLVM inline asm
-- [ ] `@nostd` → `-nostdlib` linker flag
-- [ ] `@section` → LLVM section attribute
-- [ ] `@cdecl` / `@stdcall` / `@interrupt` → calling convention
+- [ ] `@Freestanding` → `-nostdlib` linker flag
+- [ ] `@Section` → LLVM section attribute
+- [ ] `@CDecl` / `@StdCall` / `@InterruptHandler` → calling convention
 - [ ] `noreturn` → LLVM `unreachable` terminator
-- [ ] `@packed` → LLVM packed struct
+- [ ] `@Packed` → LLVM packed struct
 - [ ] `@align(N)` → LLVM alignment attribute
 
 ### 4.7 Performance CodeGen
@@ -364,5 +364,5 @@ arc: borrow check OK
 - Generic instantiation yüzeysel: `Result<T,E>` çalışıyor ama tam tip doğrulama yok
 - BorrowChecker method call argümanlarını borrow sayıyor (move değil) — false negative olabilir
 - Katman 2 (ARC) ve Katman 3 (GC) CodeGen'de henüz implement edilmedi
-- `@inline` AST'de saklanıyor ama CodeGen olmadığı için çalışmıyor
+- `@ForceInline` AST'de saklanıyor ama CodeGen olmadığı için çalışmıyor
 - `match` exhaustiveness kontrolü henüz yok (tüm variant'ların kapsanması)

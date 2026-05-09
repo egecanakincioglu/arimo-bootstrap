@@ -22,7 +22,7 @@ public struct Vec3 {
     }
 }
 
-@manual
+@ManualMemory
 public class Renderer {
 
     private vertexBuffer : RawPtr<Float>;

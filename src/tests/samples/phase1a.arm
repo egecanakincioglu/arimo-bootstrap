@@ -7,7 +7,7 @@ module arimo.test.phase1a;
 type NodeId   = u32;
 type ByteFlag = u8;
 
-@manual
+@ManualMemory
 public class BitwiseDemo {
 
     private flags : u32;

@@ -30,7 +30,7 @@ public class VectorMath {
 
 public class BranchTest {
     public static check(x: Integer) : String {
-        if @likely (x > 0) {
+        if @Likely (x > 0) {
             return "positive";
         } else {
             return "other";
@@ -38,7 +38,7 @@ public class BranchTest {
     }
 
     public static checkUnlikely(x: Integer) : Void {
-        if @unlikely (x == -1) {
+        if @Unlikely (x == -1) {
             IO.print("error path");
         }
     }
