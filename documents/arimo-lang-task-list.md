@@ -10,93 +10,8 @@ Compiler adı: `arc` | Kaynak uzantısı: `.arm` | Compiler dili: Rust
 - Kullanıcı `&`, `mut`, lifetime yazmaz — compiler arka planda halleder
 - Otomatik bellek yönetimi varsayılan (3 katmanlı: BorrowChecker → ARC → GC)
 - `@ManualMemory` annotation ile performans kritik kodda tam kontrol
-- C FFI opsiyonel — OS için `asm{}` yeterli, userland için C kütüphaneleri
-- `const` yok — `static readonly` aynı rolü doldurur, tekrarlama olmaz
-
----
-
-## Tamamlanan Milestone'lar
-
-### ✅ Milestone 1 — Lexer (v1.0)
-`src/lexer/mod.rs`
-- Tüm Arimo token'ları
-- String interpolation `${}` desteği
-- `@` (annotation), `RawPtr`, `Memory` token'ları
-
-### ✅ Milestone 2 — Parser & AST (v1.0–v1.3)
-`src/parser/mod.rs` + `src/ast/mod.rs`
-- Pratt parser — tüm v1.3 syntax
-- `super(...)` constructor çağrısı
-- `List()` / `HashMap()` / `TreeMap()` v1.3 constructor syntax
-- `@ManualMemory` annotation parse
-- `RawPtr<T>` tip parse
-- Exception sınıfları `Item::Exception` olarak ayrıştırılıyor
-- `Float.sizeOf()` gibi primitif tip static çağrıları
-
-### ✅ Milestone 3 — Type Checker (v1.3)
-`src/typechecker/mod.rs`
-- Sembol tablosu (class, interface, enum, exception, struct)
-- Tip çıkarımı (infer_expr)
-- Null safety — smart cast, nullable tip
-- Visibility kontrolü (public/private/protected/internal)
-- Abstract metod implementasyon kontrolü
-- Return path analizi (all_paths_return)
-- Enum exhaustiveness (switch)
-- Builtin koleksiyon metodları (List, Map, HashMap, TreeMap, Pair)
-- IO / Math / Time / Memory stdlib
-- `@ManualMemory` sınıflarda `RawPtr<T>` field'larına izin
-- `Memory.alloc/free/copy`, `RawPtr.read/write/offset`
-- `T.sizeOf()` her tip için
-
-### ✅ Milestone 4 — Borrow Checker (v1.3)
-`src/borrow/mod.rs`
-- UseAfterMove — taşınmış değişkeni kullanma
-- MoveWhileBorrowed — itere edilirken taşıma
-- MutationWhileBorrowed — for-each sırasında mutasyon
-- Copy tipler: Integer, Float, Boolean (move takibi yok)
-- Move tipler: String, user-defined class, koleksiyonlar
-- Scope bazlı drop schedule (LIFO sırası) — CodeGen için
-- `@ManualMemory` sınıflar tamamen atlanıyor
-
-### ✅ Milestone 5 — Phase 1a: Integers + Bitwise + Cast
-- `u8 u16 u32 u64 i8 i16 i32 i64` — fixed-size integer tipler
-- `& | ^ ~ << >>` — bitwise operatörler, doğru öncelik tablosu
-- `0xFF00` / `0b1010` — hex ve binary literal
-- `value as u32` — explicit type cast
-- Implicit widening YOK — güvenli by design
-- Integer literal → herhangi bir sized integer atanabilir
-
-### ✅ Milestone 6 — Phase 1b: Type Alias
-- `type NodeId = u32;` — modül seviyesinde tip takma adı
-- TypeChecker alias expansion ile şeffaf çözümleme
-
-### ✅ Milestone 7 — Phase 1c: struct + Operator Overloading + @ForceInline
-- `struct` keyword — stack-allocated, copy semantics
-- `Vec3(1.0, 2.0, 3.0)` — auto-constructor (field sırası)
-- `operator +`, `operator ==` vb. — class ve struct'ta overloading
-- TypeChecker: `a + b` için `operator+` metodu aranır
-- `@ForceInline` annotation — method seviyesinde, CodeGen'de `alwaysinline`
-- BorrowChecker: struct copy tipi, move takibi yok
-
-### ✅ Milestone 8 — Phase 1d: Array + Slice + FnPtr + Index
-- `Array<Float, 16>` — compile-time boyutlu stack array
-- `Array.zeroed()`, `arr[i]`, `arr.length()`, `arr.asSlice()`
-- `Slice<T>` — non-owning fat pointer (ptr + len)
-- `(Integer, Integer) -> Boolean` — function pointer type
-- Lambda → FnPtr uyumlu atama
-- `arr[i]` index operatörü (Array, Slice, List, Map)
-- `is_fn_ptr_type_ahead` — statement'ta `(T)->R name = ...` tespiti
-
-### ✅ Milestone 9 — Phase 1e+1f: Generic Bounds + Enum Data + match + Result
-- `<T: Interface>` ve `<T: A + B>` generic bounds syntax
-- Bound-aware method resolution on generic params
-- Enum variant'lar veri taşıyabilir: `Circle(Float)`, `Rectangle(Float, Float)`
-- Pure variant'lar (data yok) eskisi gibi çalışır
-- `match expr { Pattern(a, b) => expr, _ => expr }` — pattern matching
-- Generic substitution: match arm'larında binding tipleri çıkarılır
-- `Result<T, E>` yerleşik generic enum — `Ok(T)`, `Err(E)`, `isOk()`, `isErr()`
-- Generic enum instantiation + Unknown wildcard assignability
-- `FatArrow` (=>) token eklendi
+- C FFI opsiyonel — OS için `asm{}` yeterli, userland için extern "C"
+- `const` yok — `static readonly` aynı rolü doldurur
 
 ---
 
@@ -114,183 +29,194 @@ Compiler adı: `arc` | Kaynak uzantısı: `.arm` | Compiler dili: Rust
 ```
 arimo-compiler/
 ├── Cargo.toml
-├── Cargo.lock
-├── .gitignore
 ├── src/
 │   ├── main.rs              ✅ Pipeline: parse → type check → borrow check
-│   ├── lexer/mod.rs         ✅ Tüm tokenlar, Phase 1a-1f token'ları
-│   ├── ast/mod.rs           ✅ Tüm node tipleri, GenericParam, StructDecl, EnumVariant
-│   ├── parser/mod.rs        ✅ Pratt parser, match, struct, operator, fn ptr
-│   ├── typechecker/mod.rs   ✅ Tam tip sistemi, generic bounds, Result, match
-│   ├── borrow/mod.rs        ✅ Ownership tracking, struct copy, match
+│   ├── lexer/mod.rs         ✅ Tüm tokenlar, tüm keyword'ler
+│   ├── ast/mod.rs           ✅ Tüm node tipleri
+│   ├── parser/mod.rs        ✅ Pratt parser — tam v1.4 syntax
+│   ├── typechecker/mod.rs   ✅ Tam tip sistemi + annotation enforcement
+│   ├── borrow/mod.rs        ✅ Ownership tracking
 │   └── codegen/mod.rs       ❌ Sadece stub (pub struct CodeGen;)
-├── documents/
-│   ├── arimo-lang-v1-documentation.md
-│   ├── arimo-lang-v1.1-documentation.md
-│   ├── arimo-lang-v1.2-documentation.md
-│   ├── arimo-lang-v1.3-documentation.md
-│   ├── arimo-lang-task-list.md        ← bu dosya
-│   └── arimo-lang-roadmap.md          ← yol haritası
-└── src/tests/samples/
-    ├── hello.arm
-    ├── comprehensive.arm   ← v1.3 full coverage (7 items)
-    ├── phase1a.arm         ← fixed-size ints, bitwise, cast, type alias
-    ├── phase1c.arm         ← struct, operator overloading, @ForceInline
-    ├── phase1d.arm         ← Array, Slice, function pointers
-    └── phase1ef.arm        ← enum with data, match, Result, generic bounds
+└── documents/
+    ├── arimo-lang-v1.4-documentation.md  ← güncel dil spesifikasyonu
+    ├── arimo-lang-task-list.md            ← bu dosya
+    └── arimo-lang-roadmap.md              ← yol haritası
+```
+
+### Test Dosyaları
+
+```
+src/tests/samples/
+├── hello.arm          → temel class/method
+├── comprehensive.arm  → v1.3 full coverage
+├── phase1a.arm        → fixed-size ints, bitwise, cast, type alias
+├── phase1c.arm        → struct, operator overloading, @ForceInline
+├── phase1d.arm        → Array, Slice, function pointers
+├── phase1ef.arm       → enum with data, match, Result, generic bounds
+├── phase2.arm         → volatile, union, extern, asm, noreturn, defer, annotations
+├── phase3.arm         → SIMD, @Likely/@Unlikely, default methods, async/await
+└── annotations.arm    → @Deprecated, @FunctionalInterface, @Immutable, @Sealed, @Pure...
 ```
 
 ---
 
-## Önemli Tasarım Kararları
+## Tamamlanan Milestone'lar
 
-### Bellek Yönetimi — 3 Katmanlı Hibrit
-```
-Katman 1 — BorrowChecker Zone (compile-time):
-  BorrowChecker tek sahipliği kanıtlayabilirse → scope çıkışında free
-  Runtime overhead: sıfır
+### ✅ Milestone 1 — Lexer
+`src/lexer/mod.rs`
+- Tüm Arimo token'ları (keyword, literal, operator, delimiter)
+- String interpolation `${}` desteği
+- hex (`0x`) ve binary (`0b`) literal
+- `@` annotation işareti
+- Systems: `volatile`, `union`, `extern`, `asm`, `defer`, `noreturn`
+- Performance: `async`, `await`, `default`
+- Variadics: `...` (Ellipsis)
 
-Katman 2 — ARC (Reference Counting):
-  Değer paylaşılıyorsa → refcount++ / refcount--
-  Runtime overhead: küçük
+### ✅ Milestone 2 — Parser & AST
+`src/parser/mod.rs` + `src/ast/mod.rs`
+- Pratt parser — tam v1.4 syntax
+- Class, struct, interface, enum, exception, union, extern block
+- Generic bounds: `<T: Interface>`, `<T: A + B>`
+- Operator overloading: `operator +`, `operator []` vb.
+- Pattern matching: `match expr { Variant(a) => expr, _ => expr }`
+- `@ManualMemory`, `@ForceInline`, `@Freestanding`, `@Packed`, `@Align(N)`
+- `@Section`, `@CallingConvention("C"/"Windows"/"Interrupt")`
+- `@Likely`, `@Unlikely` (if statement)
+- `@Deprecated`, `@Experimental`, `@FunctionalInterface`, `@Throws`, `@SuppressWarnings`
+- `@Sealed`, `@Pure`, `@Immutable`
+- `super(...)` constructor çağrısı
+- `async` method modifier, `await` expression
+- `defer` statement
+- `asm { }` inline assembly block
 
-Katman 3 — GC:
-  Döngüsel referans → GC heap
-  Runtime overhead: var ama küçük heap
-```
+### ✅ Milestone 3 — TypeChecker
+`src/typechecker/mod.rs`
+- Sembol tablosu (class, interface, enum, exception, struct, union, extern)
+- Tip çıkarımı (infer_expr) — tüm expression'lar
+- Null safety — smart cast, nullable tip (`?`)
+- Visibility kontrolü (public/private/protected/internal)
+- Abstract metod implementasyon kontrolü
+- Return path analizi (all_paths_return)
+- Enum switch exhaustiveness
+- Builtin koleksiyon metodları (List, Map, HashMap, TreeMap, Pair)
+- Stdlib: IO, Math, Time, Memory
+- `@ManualMemory` class'larda `RawPtr<T>` ve `asm {}` desteği
+- `Memory.alloc/free/copy`, `RawPtr.read/write/offset`, `T.sizeOf()`
+- `noreturn` dönüş tipi — `all_paths_return` kontrolünden muaf
+- SIMD builtin tipler: `Vec4f`, `Vec8f`, `Vec4i`, `Vec8i`
+- `@FunctionalInterface`: tam 1 abstract method zorunlu
+- `@Immutable`: tüm instance field'lar readonly zorunlu
+- `@Sealed`: aynı modülden extend zorunlu
+- `@Deprecated` / `@Experimental`: kullanımda uyarı (non-fatal)
+- Interface `default` method'lar desteği
+- `Expr::Await` — inner type döndürür
+- Uyarı sistemi: `tc.warnings: Vec<String>`
 
-### @ManualMemory Boundary
-- Sınıf seviyesinde opt-in — class seviyesinde en temiz sınır
-- Field/metod seviyesinde olsaydı drop schedule belirsizleşirdi
-- `@ManualMemory` class nesnesi normal class'a parametre olabilir (borrow, free etmez)
-
-### struct vs class
-```
-class  → heap, reference semantics, ARC/GC
-struct → stack, value semantics, copy
-@ManualMemory class → heap, manual memory, zero GC overhead
-```
-
-### const yok
-- `static readonly` + compile-time constant değeri aynı rolü doldurur
-- Tekrar ortadan kalktı, dil tutarlı
-
-### Move vs Borrow Kuralları
-- Method call argümanları → borrow (taşımaz)
-- Constructor call argümanları → move
-- `this.field = x` constructor içi → move
-- `return localVar` → move
+### ✅ Milestone 4 — BorrowChecker
+`src/borrow/mod.rs`
+- UseAfterMove, MoveWhileBorrowed, MutationWhileBorrowed
 - Copy tipler: Integer, Float, Boolean, u8..i64, struct, Array, Slice, FnPtr
+- Scope bazlı drop schedule (LIFO) — CodeGen için hazır
+- `@ManualMemory` class'lar tamamen atlanır
 
-### Operator Overloading
-- `operator+` normal method ismi olarak saklanır — yeni AST node yok
-- TypeChecker: `a + b` numeric değilse `operator+` metodu arar
-- Sadece binary operatörler (`[]` dahil)
+### ✅ Milestone 5-9 — Faza 1 (1a–1f)
+- `u8..i64` fixed-size integers, bitwise, cast
+- Type alias
+- struct + operator overloading + @ForceInline
+- Array<T,N> + Slice<T> + FnPtr
+- Generic bounds
+- Enum with data + match + Result<T,E>
 
-### Generic Bounds
-- `<T: Interface>` → `GenericParam { name: "T", bounds: ["Interface"] }`
-- TypeChecker: generic param üzerinde method çağrısında bound kontrolü
-- Bound tanımlıysa bound'daki interface'in metodlarını çözümle
+### ✅ Milestone 10 — Faza 2: Systems
+- `volatile`, `union`, `extern "C"`, `asm {}`, `defer`, `noreturn`
+- `@ManualMemory`, `@Freestanding`, `@Packed`, `@Align(N)`
+- `@Section`, `@CallingConvention`
 
-### Result<T, E>
-- Yerleşik generic enum — kullanıcı tanımına gerek yok
-- `Result.Ok("x")` → `Generic("Result", [Str, Unknown])`
-- Assignment uyumu: Unknown wildcard ile esnek
+### ✅ Milestone 11 — Faza 3: Performance
+- SIMD: `Vec4f`, `Vec8f`, `Vec4i`, `Vec8i`
+- `@Likely` / `@Unlikely`
+- Interface default methods
+- `async` / `await`
+
+### ✅ Milestone 12 — Annotation Sistemi
+- `@Deprecated`, `@Experimental`, `@FunctionalInterface`
+- `@Throws`, `@SuppressWarnings`
+- `@Sealed`, `@Pure`, `@Immutable`
 
 ---
 
 ## Test Durumu (2026-05-09)
 
 ```
-src/tests/samples/hello.arm         → parse OK + type OK + borrow OK
-src/tests/samples/comprehensive.arm → parse OK + type OK + borrow OK
-src/tests/samples/phase1a.arm       → parse OK + type OK + borrow OK
-src/tests/samples/phase1c.arm       → parse OK + type OK + borrow OK
-src/tests/samples/phase1d.arm       → parse OK + type OK + borrow OK
-src/tests/samples/phase1ef.arm      → parse OK + type OK + borrow OK
+hello.arm         → parse OK + type OK + borrow OK
+comprehensive.arm → parse OK + type OK + borrow OK
+phase1a.arm       → parse OK + type OK + borrow OK
+phase1c.arm       → parse OK + type OK + borrow OK
+phase1d.arm       → parse OK + type OK + borrow OK
+phase1ef.arm      → parse OK + type OK + borrow OK
+phase2.arm        → parse OK + type OK + borrow OK
+phase3.arm        → parse OK + type OK + borrow OK
+annotations.arm   → parse OK + type OK + borrow OK
 ```
 
 ---
 
-## Sıradaki Adım — FAZA 2: CodeGen
+## Tasarım Kararları
+
+### Bellek Yönetimi — 3 Katmanlı Hibrit
+```
+Katman 1 — BorrowChecker Zone: compile-time, runtime overhead sıfır
+Katman 2 — ARC: refcount++ / refcount--
+Katman 3 — GC: döngüsel referans
+```
+
+### struct vs class
+```
+class              → heap, reference semantics, ARC/GC
+struct             → stack, value semantics, copy
+@ManualMemory class → heap, manual memory, zero GC overhead
+```
+
+### Annotation Sistemi
+- PascalCase — Java/Kotlin stilinde
+- Açıklayıcı tam isimler: `@ManualMemory`, `@ForceInline`, `@FunctionalInterface`
+- Parametreli: `@Align(16)`, `@CallingConvention("C")`, `@Deprecated("msg")`
+
+### const Yok
+- `static readonly` aynı rolü doldurur — tekrar ortadan kalkar
+
+### Move vs Borrow
+- Method call argümanları → borrow
+- Constructor / return → move
+- Copy tipler: Integer, Float, Boolean, u8..i64, struct, Array, Slice, FnPtr
+
+---
+
+## Sıradaki Adım — FAZA 4: CodeGen
 
 Detaylar: `arimo-lang-roadmap.md`
 
 ### Öneri: Adım Adım Yaklaşım
-1. **2.1 + 2.3 + 2.4** — Temel altyapı + fonksiyon üretimi + kontrol akışı
-   - İlk çalışan `.arm → binary` pipeline
-   - `main()` → executable, `IO.print()` çalışıyor
-2. **2.2 Katman 1** — BorrowChecker Zone drop schedule → free()
-   - Scope çıkışında otomatik bellek serbest bırakma
-3. **2.6** — @ManualMemory sınıfları (Memory.alloc/free)
-4. **2.7 + 2.8** — String ve koleksiyonlar
-5. **2.2 Katman 2** — ARC (reference counting)
-6. **2.9** — Exception handling
-7. **2.10 + 2.11** — Struct/Array/Slice + output
-
-### Sonraki Öncelik
-- Faza 3: Systems (volatile, @packed, C FFI, inline asm, @Freestanding)
-- Faza 4: Performance (@likely/@unlikely, defer, async/await)
+1. **4.1 + 4.3 + 4.4** — Temel altyapı + fonksiyon + kontrol akışı → ilk binary
+2. **4.2 Katman 1** — BorrowChecker drop schedule → free()
+3. **4.6** — Systems CodeGen (volatile, extern, asm, noreturn)
+4. **4.7** — Performance (SIMD, @ForceInline, @Likely/@Unlikely)
+5. **4.8** — String + koleksiyonlar (arc_runtime)
+6. **4.2 Katman 2** — ARC
+7. **4.9** — Exception handling
+8. **4.10** — Native binary output
 
 ---
 
-## Dil Spesifikasyonu Özeti (Mevcut — 2026-05-09)
+## Bilinen Sınırlar (2026-05-09)
 
-### Tipler
-```
-// Primitifler
-Integer   Float   Boolean   String   Void
-
-// Fixed-size integers
-u8  u16  u32  u64   (unsigned)
-i8  i16  i32  i64   (signed)
-
-// Koleksiyonlar
-List<T>   Map<K,V>   HashMap<K,V>   TreeMap<K,V>   Pair<A,B>
-Array<T, N>   (fixed-size, stack)
-Slice<T>      (non-owning view)
-
-// Systems
-RawPtr<T>     (sadece @ManualMemory)
-
-// Generic
-Result<T, E>  (yerleşik enum: Ok(T), Err(E))
-
-// Fonksiyon pointer
-(T1, T2) -> R
-
-// Kullanıcı tanımlı
-class   struct   enum (plain + with data)   interface   exception
-
-// Type alias
-type NodeId = u32;
-```
-
-### Operatörler
-```
-+ - * / %       (aritmetik)
-== != < <= > >= (karşılaştırma)
-&& ||           (mantıksal)
-& | ^ ~ << >>   (bitwise)
-= += -= *= /=   (atama)
-++ --           (artırma/azaltma)
-?: (ternary)    ?. (null-safe)   as (cast)
-[]  (index)
-operator +/-/*/ vb. (user-defined)
-```
-
-### Annotations
-```
-@ManualMemory   — sınıf düzeyinde manuel bellek yönetimi
-@ForceInline   — metod düzeyinde inlining hint
-```
-
-### Dil Yapıları
-```
-if / else if / else
-while
-for (each)   for (classic)
-switch (enum exhaustiveness)
-match (pattern matching, enum data destructure)
-try / catch / finally
-```
+| Sınır | Açıklama |
+|---|---|
+| Lambda tip çıkarımı | Parametreler `Unknown` — false positive bastırılıyor |
+| `arr[i] = val` | TypeChecker pass-through |
+| Generic instantiation | Yüzeysel — tam doğrulama yok |
+| Interface generic param | `Foo<T>` → T scope'a girilmiyor |
+| match exhaustiveness | Sealed/enum tam kapsama kontrolü yok |
+| BorrowChecker method args | Borrow (move değil) — false negative olabilir |
+| async/await | Parse+AST tamam; CodeGen state machine henüz yok |
+| ARC / GC | CodeGen'de henüz implement edilmedi |

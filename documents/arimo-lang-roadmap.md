@@ -8,60 +8,49 @@
 
 Modern bir programlama dili:
 - **OS yazılabilir** — bare-metal, inline asm, donanım erişimi
-- **Game engine yazılabilir** — sıfır GC overhead, struct, SIMD hint, operator overloading
+- **Game engine yazılabilir** — sıfır GC overhead, struct, SIMD, operator overloading
 - **Uygulama yazılabilir** — otomatik bellek, async/await, yüksek seviye OOP
 
 ---
 
 ## FAZA 1 — Dil Temeli ✅ TAMAMLANDI
 
-### 1a. Fixed-size Integer Tipler + Bitwise Ops + as Cast ✅
-- `u8 u16 u32 u64 i8 i16 i32 i64` — tüm boyutlarda integer
-- `& | ^ ~ << >>` — bitwise operatörler, C öncelik sırası korundu
+### 1a. Fixed-size Integer Tipler + Bitwise + as Cast ✅
+- `u8 u16 u32 u64 i8 i16 i32 i64`
+- `& | ^ ~ << >>` — bitwise operatörler, C öncelik sırası
 - `0xDEADBEEF` / `0b1010` — hex ve binary literal
-- `value as u32` — explicit cast operatörü
-- Implicit widening YOK — `u32 x = some_u64;` → type error
-- Integer literal → any sized int (atama uyumu)
+- `value as u32` — explicit cast, implicit widening YOK
 
 ### 1b. Type Alias ✅
 - `type NodeId = u32;` — modül seviyesinde tip takma adı
 - TypeChecker alias expansion ile şeffaf çalışır
-- **Not:** `const` eklenmedi — `static readonly` zaten o rolü dolduruyor
 
-### 1c. struct (Value Type) + Operator Overloading + @ForceInline ✅
-- `struct` keyword: stack-allocated, copy semantics, extends yok
-- Auto-constructor: field sırasından otomatik üretilir
+### 1c. struct + Operator Overloading + @ForceInline ✅
+- `struct` — stack-allocated, copy semantics, auto-constructor
 - `operator +` / `operator ==` vb. — class ve struct'ta
-- `@ForceInline` annotation — metod seviyesinde, CodeGen'de `alwaysinline`
+- `@ForceInline` — method seviyesinde inlining hint
 - BorrowChecker: struct tipler copy, move takibi yok
 
 ### 1d. Array<T,N> + Slice<T> + Function Pointers ✅
-- `Array<Float, 16>` — compile-time boyutlu, stack array
-- `Array.zeroed()`, `arr[i]`, `arr.length()`, `arr.asSlice()`
+- `Array<Float, 16>` — compile-time boyutlu stack array
 - `Slice<T>` — non-owning fat pointer (ptr + len)
 - `(Integer, Integer) -> Boolean` — function pointer type
-- Lambda → FnPtr atama uyumu
-- `arr[i]` index operatörü (Array, Slice, List, Map)
+- Lambda → FnPtr uyumu
 
 ### 1e. Generic Bounds ✅
-- `<T: Interface>` syntax — class, struct, interface tanımlarında
-- `<T: A + B>` — birden fazla bound
-- TypeChecker: bound tanımlı ise generic param üzerinde metod çağrısı geçerli
-- GenericParam { name, bounds } — AST'de
+- `<T: Interface>` ve `<T: A + B>` syntax
+- TypeChecker: bound üzerinde method çözümleme
 
 ### 1f. Enum with Data + match + Result<T,E> ✅
-- Enum variant'lar veri taşıyabilir: `Circle(Float)`, `Rectangle(Float, Float)`
-- Saf variant'lar eskisi gibi çalışır: `Low`, `Medium`, `High`
-- `match expr { Enum.Variant(a, b) => expr, _ => expr }` — pattern matching
-- `Result<T, E>` yerleşik generic enum: `Ok(T)`, `Err(E)`, `isOk()`, `isErr()`
-- Generic enum instantiation: `Result.Ok("x")` → `Result<String, Unknown>`
-- Enum variant constructor: `Shape.Circle(1.5)` → `Type::Named("Shape")`
+- Veri taşıyan enum variant: `Circle(Float)`, `Rectangle(Float, Float)`
+- `match expr { Pattern(a, b) => expr, _ => expr }`
+- `Result<T, E>` yerleşik: `Ok(T)`, `Err(E)`, `isOk()`, `isErr()`
 
 ---
 
-## FAZA 2 — Systems Desteği ⬜ SIRADA
+## FAZA 2 — Systems Desteği ✅ TAMAMLANDI
 
-### 2.1 Bellek Layout Kontrol
+### 2.1 Bellek Layout Kontrol ✅
 ```arimo
 @Packed
 public struct PacketHeader {
@@ -75,65 +64,43 @@ public struct SimdVec {
     data : Array<Float, 4>;
 }
 ```
-- Lexer: `@Packed`, `@align(N)` annotation'ları
-- AST: StructDecl'da `packed: bool`, `align: Option<usize>`
-- CodeGen: LLVM struct packed layout, alignment attribute
 
-### 2.2 volatile Keyword
+### 2.2 volatile ✅
 ```arimo
-// Memory-mapped I/O için
 volatile u32 status = hardware_register.read();
 ```
-- Lexer: `Token::Volatile`
-- AST: VarDecl'da `volatile: bool`
-- CodeGen: LLVM `volatile load/store`
-- Sadece `@ManualMemory` sınıflar ve `@Freestanding` modüllerde kullanım tavsiyesi
+- CodeGen: LLVM `volatile load/store` (Faza 4)
 
-### 2.3 union Type
+### 2.3 union ✅
 ```arimo
 public union Register {
     full  : u32;
     bytes : Array<u8, 4>;
 }
 ```
-- OS/embedded için register overlapping
-- Lexer: `Token::Union`
-- AST: `UnionDecl`, `Item::Union`
-- TypeChecker: union erişimi `@ManualMemory` gerektiriyor
-- CodeGen: LLVM union layout
 
-### 2.4 C FFI
+### 2.4 C FFI ✅
 ```arimo
 extern "C" {
     printf(fmt: RawPtr<u8>, ...) : i32;
     malloc(size: u64)            : RawPtr<Void>;
 }
 ```
-- Lexer: `Token::Extern`
-- AST: `ExternBlock { abi: String, decls: Vec<ExternDecl> }`
-- Parser: `extern "C" { ... }`
-- CodeGen: LLVM `declare` + C calling convention
-- Variadics (`...`) desteği
 
-### 2.5 Inline Assembly
+### 2.5 Inline Assembly ✅
 ```arimo
 @ManualMemory
 public class Syscall {
-    public static exit(code: i32) : Void {
+    public static exit(code: i32) : noreturn {
         asm {
             mov rax, 60
-            mov rdi, {code}
             syscall
         }
     }
 }
 ```
-- Sadece `@ManualMemory` sınıflarda
-- Lexer: `Token::Asm`
-- AST: `Stmt::Asm(String)`
-- CodeGen: LLVM inline asm
 
-### 2.6 @Freestanding + @Section + Calling Conventions
+### 2.6 @Freestanding + @Section + @CallingConvention ✅
 ```arimo
 @Freestanding
 module kernel.boot;
@@ -141,85 +108,94 @@ module kernel.boot;
 @Section(".boot")
 @CallingConvention("C")
 public static _start() : Void { ... }
-```
-- `@Freestanding` → stdlib import yok, `_start()` entry point, `-nostdlib` linker
-- `@Section(".text.init")` → linker section
-- `@CallingConvention("C")`, `@CallingConvention("Windows")`, `@CallingConvention("Interrupt")` → calling convention
 
-### 2.7 noreturn
+@CallingConvention("Interrupt")
+public static onTimer() : Void { ... }
+```
+
+### 2.7 noreturn ✅
 ```arimo
 public static panic(msg: String) : noreturn {
     IO.print(msg);
-    // LLVM unreachable — optimizer bilir
 }
 ```
-- Lexer/AST: `Type::NoReturn` veya method attribute
-- CodeGen: LLVM `unreachable` terminator
+
+### 2.8 defer ✅
+```arimo
+public static readFile(path: String) : Void {
+    File f = File.open(path);
+    defer f.close();
+}
+```
 
 ---
 
-## FAZA 3 — Performance Desteği ⬜
+## FAZA 3 — Performance Desteği ✅ TAMAMLANDI
 
-### 3.1 SIMD
+### 3.1 SIMD Tipleri ✅
 ```arimo
 Vec4f a = Vec4f(1.0, 2.0, 3.0, 4.0);
 Vec4f b = Vec4f(5.0, 6.0, 7.0, 8.0);
-Vec4f c = a + b;   // LLVM SIMD instruction
+Vec4f c = a + b;
+Float len = a.length();
 ```
-- Yerleşik SIMD tipler: `Vec4f`, `Vec8f`, `Vec4i`, `Vec8i`
-- Operator overloading ile LLVM vectorized operations
-- CodeGen: LLVM vector types
+- `Vec4f`, `Vec8f`, `Vec4i`, `Vec8i`
+- Operator overloading + `length()`, `normalize()`, `dot()`
+- CodeGen: LLVM vector types (Faza 4)
 
-### 3.2 Branch Prediction Hints
+### 3.2 Branch Prediction Hints ✅
 ```arimo
-if @likely (fast_path) { ... }
-if @unlikely (error_path) { ... }
+if @Likely (fast_path) { ... }
+if @Unlikely (error_path) { ... }
 ```
-- Lexer: `@likely`, `@unlikely` expression annotation
-- CodeGen: LLVM `branch_weights` metadata
+- CodeGen: LLVM `branch_weights` metadata (Faza 4)
 
-### 3.3 Interface Default Methods
+### 3.3 Interface Default Methods ✅
 ```arimo
 interface Updatable {
     update(dt: Float) : Void;
 
-    default updateBatch(items: List<Updatable>, dt: Float) : Void {
-        for (Updatable item : items) {
-            item.update(dt);
-        }
+    default updateFixed() : Void {
+        IO.print("fixed update");
     }
 }
 ```
-- AST: Method'da `default_: bool` (body olan interface metodu)
-- TypeChecker: default metotlar override edilmeyebilir
 
-### 3.4 defer Statement
+### 3.4 async / await ✅
 ```arimo
-public static openFile(path: String) : Void {
-    File f = File.open(path);
-    defer f.close();   // scope çıkışında çalışır, exception olsa bile
-    // ...
+public async fetchUser(id: String) : String {
+    String result = await ApiService.getData(id);
+    return result;
 }
 ```
-- Lexer: `Token::Defer`
-- AST: `Stmt::Defer(Expr)`
-- CodeGen: scope çıkışında, LIFO sırasında çalıştır
+- CodeGen: state machine transform (Faza 4)
 
-### 3.5 async/await
-```arimo
-public async fetchUser(id: String) : User? {
-    Response res = await Http.get("/users/${id}");
-    return res.json<User>();
-}
-```
-- Coroutine / state machine transform
-- Lexer: `Token::Async`, `Token::Await`
-- AST: `async_: bool` on Method, `Expr::Await`
-- CodeGen: state machine veya poll model
+### 3.5 Annotation Sistemi ✅
+
+Tüm annotation'lar — PascalCase, Java/Kotlin stilinde:
+
+| Annotation | Seviye | TypeChecker davranışı |
+|---|---|---|
+| `@ManualMemory` | class | GC kapalı, BorrowChecker atlar |
+| `@ForceInline` | method | Kaydedilir, CodeGen'de alwaysinline |
+| `@Freestanding` | module | -nostdlib flag |
+| `@Packed` | struct | LLVM packed struct (Faza 4) |
+| `@Align(N)` | struct | LLVM alignment (Faza 4) |
+| `@Section("...")` | method | Linker section (Faza 4) |
+| `@CallingConvention("...")` | method | Calling convention (Faza 4) |
+| `@Likely` / `@Unlikely` | if | Branch hint (Faza 4) |
+| `@Deprecated("msg")` | class/method | Kullanıldığında uyarı |
+| `@Experimental` | class/method | Kullanıldığında uyarı |
+| `@FunctionalInterface` | interface | 1 abstract method zorunlu |
+| `@Throws(ExType, ...)` | method | Kaydedilir |
+| `@SuppressWarnings("tip")` | class/method | Kaydedilir |
+| `@Sealed` | class/interface | Aynı modülden extend zorunlu |
+| `@Pure` | method | Kaydedilir, CodeGen opt. |
+| `@Immutable` | class | Tüm field'lar readonly zorunlu |
 
 ---
 
-## FAZA 4 — CodeGen (LLVM / inkwell) ⬜
+## FAZA 4 — CodeGen (LLVM / inkwell) ⬜ SIRADA
 
 **Bağımlılık:**
 ```toml
@@ -233,21 +209,28 @@ inkwell = { version = "0.4", features = ["llvm17-0"] }
   ```
   Integer   → i64      Float     → f64
   Boolean   → i1       String    → { i8*, i64 }
-  Void      → void
+  Void      → void     noreturn  → LLVM unreachable
   u8/i8     → i8       u16/i16   → i16
   u32/i32   → i32      u64/i64   → i64
   RawPtr<T> → T*       Array<T,N> → [N x T]
   Slice<T>  → { T*, i64 }
   FnPtr     → function pointer
   struct    → LLVM struct (stack-allocated)
-  union     → LLVM union layout
+  union     → LLVM union layout (max field size)
+  Vec4f     → <4 x float>   Vec8f → <8 x float>
+  Vec4i     → <4 x i32>     Vec8i → <8 x i32>
   ```
 - [ ] Primitif literal kod üretimi
 - [ ] Aritmetik ve bitwise operatörler
 
 ### 4.2 Bellek Yönetimi
 - [ ] **Katman 1 (BorrowChecker Zone):** scope çıkışında `free()` insert
+  - BorrowChecker'ın `drop_schedule` kullan
+  - LIFO sırasında LLVM `free` call insert
 - [ ] **Katman 2 (ARC):** escape analysis + refcount
+  - Her heap objesi için `{ refcount: i64, data: T }` struct
+  - Constructor → `alloc + refcount=1`
+  - Method arg → `retain(ptr)` + call + `release(ptr)`
 - [ ] **Katman 3 (GC):** döngüsel referans tespiti — sonraya bırak
 
 ### 4.3 Fonksiyon & Metot Üretimi
@@ -255,14 +238,14 @@ inkwell = { version = "0.4", features = ["llvm17-0"] }
 - [ ] Instance metot → LLVM function (ilk param: `this` pointer)
 - [ ] Constructor → alloc + field init + return pointer
 - [ ] `main()` → LLVM `main` entry point
-- [ ] Operator methods → LLVM function
+- [ ] Operator methods → LLVM function call
 
 ### 4.4 Kontrol Akışı
 - [ ] if/else → LLVM branch
 - [ ] while → LLVM loop
 - [ ] for-each → iterator pattern
 - [ ] klasik for → counter loop
-- [ ] switch/match → LLVM switch veya chain of branches
+- [ ] switch/match → LLVM switch + pattern destructure
 - [ ] defer → scope çıkışında LIFO
 
 ### 4.5 Runtime Kütüphane (arc_runtime)
@@ -278,26 +261,28 @@ arc_str_concat(...)
 
 ### 4.6 Systems CodeGen
 - [ ] `volatile load/store` — LLVM volatile flag
-- [ ] `union` → LLVM union layout (max field size)
+- [ ] `union` → LLVM union layout
 - [ ] `extern "C"` → LLVM `declare` + C calling convention
 - [ ] `asm {}` → LLVM inline asm
 - [ ] `@Freestanding` → `-nostdlib` linker flag
 - [ ] `@Section` → LLVM section attribute
-- [ ] `@CallingConvention("C")` / `@CallingConvention("Windows")` / `@CallingConvention("Interrupt")` → calling convention
+- [ ] `@CallingConvention` → calling convention attributes
 - [ ] `noreturn` → LLVM `unreachable` terminator
 - [ ] `@Packed` → LLVM packed struct
-- [ ] `@align(N)` → LLVM alignment attribute
+- [ ] `@Align(N)` → LLVM alignment attribute
 
 ### 4.7 Performance CodeGen
-- [ ] SIMD types → LLVM vector types
-- [ ] `@likely` / `@unlikely` → LLVM branch_weights metadata
+- [ ] SIMD → LLVM vector types + vectorized ops
+- [ ] `@Likely`/`@Unlikely` → LLVM branch_weights
 - [ ] `async/await` → state machine transform
+- [ ] `@ForceInline` → LLVM `alwaysinline`
+- [ ] `@Pure` → LLVM `readnone`/`readonly`
 
 ### 4.8 String & Koleksiyonlar
 - [ ] String literal → global LLVM constant
-- [ ] String interpolation → arc_str_concat
-- [ ] `List<T>` → arc_list_*
-- [ ] `HashMap<K,V>` → arc_map_*
+- [ ] String interpolation → `arc_str_concat`
+- [ ] `List<T>` → `arc_list_*`
+- [ ] `HashMap<K,V>` → `arc_map_*`
 
 ### 4.9 Exception
 - [ ] `throw` → LLVM `landingpad`
@@ -317,20 +302,20 @@ arc_str_concat(...)
 - [ ] `arimo.fs` — path, directory, file
 - [ ] `arimo.collections` — gelişmiş koleksiyonlar
 - [ ] `arimo.time` — tarih/saat
-- [ ] VSCode extension güncelleme (yeni keyword'ler)
-- [ ] Language Server Protocol (LSP) — autocomplete, go-to-def
+- [ ] VSCode extension — syntax highlighting v1.4
+- [ ] Language Server Protocol (LSP)
 - [ ] Package manager (`arc.toml` manifest)
 - [ ] Bootstrapping — arc'ı Arimo ile yeniden yaz
 
 ---
 
-## Önemli Notlar Yeni Oturum İçin
+## Önemli Notlar
 
-### Commit kuralı
+### Commit Kuralı
 - Merge commit bırakma — cherry-pick kullan
 - Worktree branch'ini master'a cherry-pick ile aktar
 
-### Worktree çalışma düzeni
+### Worktree Çalışma Düzeni
 ```powershell
 # Değişiklik yap (worktree'de)
 cd "C:\Users\Arimo\Desktop\arimo-compiler\.claude\worktrees\<worktree-adı>"
@@ -343,26 +328,20 @@ git cherry-pick <commit-hash>
 git push origin master
 ```
 
-### Derleme ve test
+### Derleme ve Test
 ```powershell
 cd "C:\Users\Arimo\Desktop\arimo-compiler\.claude\worktrees\<worktree-adı>"
 cargo build
 .\target\debug\arc.exe src\tests\samples\comprehensive.arm
-.\target\debug\arc.exe src\tests\samples\phase1ef.arm
+.\target\debug\arc.exe src\tests\samples\phase2.arm
+.\target\debug\arc.exe src\tests\samples\phase3.arm
+.\target\debug\arc.exe src\tests\samples\annotations.arm
 ```
 
-### Beklenen çıktı
+### Beklenen Çıktı
 ```
 arc: parse OK
 arc: type check OK
 arc: borrow check OK
+arc: drop schedule — N scope(s) tracked
 ```
-
-### Bilinen Sınırlar (2026-05-09 itibariyle)
-- Lambda tip çıkarımı yok — parametreler `Unknown` tipte, false positive hatalar bastırılıyor
-- `Expr::Index` atama hedefi (`arr[i] = val`) TypeChecker'da pass-through
-- Generic instantiation yüzeysel: `Result<T,E>` çalışıyor ama tam tip doğrulama yok
-- BorrowChecker method call argümanlarını borrow sayıyor (move değil) — false negative olabilir
-- Katman 2 (ARC) ve Katman 3 (GC) CodeGen'de henüz implement edilmedi
-- `@ForceInline` AST'de saklanıyor ama CodeGen olmadığı için çalışmıyor
-- `match` exhaustiveness kontrolü henüz yok (tüm variant'ların kapsanması)
