@@ -76,6 +76,8 @@ pub struct CodeGen<'ctx> {
     field_indices : HashMap<String, HashMap<String, u32>>,
     // Geçerli class (this erişimi için)
     cur_class : Option<String>,
+    // Enum variant değerleri: enum adı → variant adı → i32 değeri
+    enum_variants : HashMap<String, HashMap<String, u32>>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
@@ -92,6 +94,7 @@ impl<'ctx> CodeGen<'ctx> {
             struct_types  : HashMap::new(),
             field_indices : HashMap::new(),
             cur_class     : None,
+            enum_variants : HashMap::new(),
         }
     }
 
@@ -146,7 +149,9 @@ impl<'ctx> CodeGen<'ctx> {
             Type::U64 | Type::I64 => Some(self.ctx.i64_type().into()),
             Type::RawPtr(_)       => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
             Type::Nullable(inner) => self.llvm_type(inner),
-            Type::Named(_)        => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
+            // Enum tipler → i32 integer
+            Type::Named(n) if self.is_enum(n) => Some(self.ctx.i32_type().into()),
+            Type::Named(_) => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
             Type::FnPtr(params, ret) => {
                 let ret_llvm = self.llvm_type(ret.as_ref());
                 let params_llvm: Vec<inkwell::types::BasicMetadataTypeEnum> = params.iter()
@@ -177,6 +182,12 @@ impl<'ctx> CodeGen<'ctx> {
         self.declare_printf();
         self.declare_malloc();
 
+        // Geçiş 0: enum variant'larını kayıt et
+        for item in &module.items {
+            if let Item::Enum(e) = item {
+                self.register_enum(e);
+            }
+        }
         // Geçiş 1: struct tiplerini kayıt et (field layout)
         for item in &module.items {
             if let Item::Class(c) = item {
@@ -191,8 +202,10 @@ impl<'ctx> CodeGen<'ctx> {
         }
         // Geçiş 3: gövdeleri üret
         for item in &module.items {
-            if let Item::Class(c) = item {
-                self.compile_class(c)?;
+            match item {
+                Item::Class(c) => self.compile_class(c)?,
+                Item::Enum(e)  => self.compile_enum(e)?,
+                _              => {}
             }
         }
         Ok(())
@@ -228,6 +241,49 @@ impl<'ctx> CodeGen<'ctx> {
             idx += 1;
         }
         self.field_indices.insert(c.name.clone(), idx_map);
+    }
+
+    // ── Enum kayıt ───────────────────────────────────────────────────────────
+
+    fn register_enum(&mut self, e: &EnumDecl) {
+        let mut variants = HashMap::new();
+        for (i, v) in e.variants.iter().enumerate() {
+            variants.insert(v.name.clone(), i as u32);
+        }
+        self.enum_variants.insert(e.name.clone(), variants);
+
+        // Enum metodları kayıt et (i32 this parametreli)
+        let i32_ty = self.ctx.i32_type();
+        for m in &e.methods {
+            let fn_name = format!("{}_{}", e.name, m.name);
+            if self.module.get_function(&fn_name).is_some() { continue; }
+
+            // this = i32 (enum değeri)
+            let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                vec![i32_ty.into()];
+            for p in &m.params {
+                if let Some(t) = self.llvm_type(&p.ty) {
+                    param_types.push(t.into());
+                }
+            }
+
+            let fn_val = match &m.return_ty {
+                Some(ret_ty) => match self.llvm_type(ret_ty) {
+                    Some(rt) => self.module.add_function(&fn_name, rt.fn_type(&param_types, false), None),
+                    None     => self.module.add_function(&fn_name, self.ctx.void_type().fn_type(&param_types, false), None),
+                },
+                None => self.module.add_function(&fn_name, self.ctx.void_type().fn_type(&param_types, false), None),
+            };
+            self.fns.insert(fn_name, fn_val);
+        }
+    }
+
+    fn is_enum(&self, name: &str) -> bool {
+        self.enum_variants.contains_key(name)
+    }
+
+    fn enum_variant_value(&self, enum_name: &str, variant: &str) -> Option<u32> {
+        self.enum_variants.get(enum_name)?.get(variant).copied()
     }
 
     // ── printf extern tanımı ─────────────────────────────────────────────────
@@ -317,6 +373,73 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     // ── Class gövdelerini derle ───────────────────────────────────────────────
+
+    // ── Enum gövdeleri ───────────────────────────────────────────────────────
+
+    fn compile_enum(&mut self, e: &EnumDecl) -> CgResult<()> {
+        self.cur_class = Some(e.name.clone());
+        for m in &e.methods.clone() {
+            if m.body.is_none() { continue; }
+            self.compile_enum_method(&e.name.clone(), m)?;
+        }
+        self.cur_class = None;
+        Ok(())
+    }
+
+    fn compile_enum_method(&mut self, enum_name: &str, m: &Method) -> CgResult<()> {
+        let fn_name = format!("{}_{}", enum_name, m.name);
+        let fn_val = match self.fns.get(&fn_name).copied()
+            .or_else(|| self.module.get_function(&fn_name))
+        {
+            Some(f) => f,
+            None    => return Ok(()),
+        };
+
+        let body = match m.body.as_ref() { Some(b) => b.clone(), None => return Ok(()) };
+
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+        self.cur_fn = Some(fn_val);
+        self.push_scope();
+
+        // this = i32 (enum değeri), 0. parametre
+        if let Some(this_val) = fn_val.get_nth_param(0) {
+            let i32_ty = self.ctx.i32_type();
+            let this_alloca = self.builder.build_alloca(i32_ty, "this")
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+            self.builder.build_store(this_alloca, this_val)
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+            self.define_var("this", this_alloca, i32_ty.into());
+        }
+
+        // Diğer parametreler
+        for (i, p) in m.params.iter().enumerate() {
+            if let Some(llvm_ty) = self.llvm_type(&p.ty) {
+                if let Some(pv) = fn_val.get_nth_param((i + 1) as u32) {
+                    let alloca = self.builder.build_alloca(llvm_ty, &p.name)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_store(alloca, pv)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.define_var(&p.name, alloca, llvm_ty);
+                }
+            }
+        }
+
+        let mut returned = false;
+        for stmt in &body {
+            if self.compile_stmt(stmt)? { returned = true; break; }
+        }
+        if !returned {
+            self.builder.build_return(None)
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+        }
+
+        self.pop_scope();
+        self.cur_fn = None;
+
+        if fn_val.verify(true) { Ok(()) }
+        else { Err(CodeGenError::new(format!("enum method verify failed: {}_{}", enum_name, m.name))) }
+    }
 
     fn compile_class(&mut self, c: &ClassDecl) -> CgResult<()> {
         self.cur_class = Some(c.name.clone());
@@ -543,9 +666,15 @@ impl<'ctx> CodeGen<'ctx> {
                     _ => None,
                 };
 
-                // Class instance → pointer tipinde sakla
+                // Enum tip → i32, class instance → pointer, diğerleri → direkt tip
                 let llvm_ty = if class_name.is_some() {
                     Some(BasicTypeEnum::from(self.ctx.ptr_type(AddressSpace::default())))
+                } else if let Type::Named(n) = ty {
+                    if self.is_enum(n) {
+                        Some(BasicTypeEnum::from(self.ctx.i32_type()))
+                    } else {
+                        self.llvm_type(ty)
+                    }
                 } else {
                     self.llvm_type(ty)
                 };
@@ -787,10 +916,12 @@ impl<'ctx> CodeGen<'ctx> {
     // ── switch ───────────────────────────────────────────────────────────────
 
     fn compile_switch(&mut self, expr: &Expr, cases: &[SwitchCase]) -> CgResult<bool> {
-        // switch → if/else zinciri olarak compile et
+        // switch → if/else zinciri
         let val = self.compile_expr(expr)?;
         let cur_fn = self.cur_fn.unwrap();
         let exit_bb = self.ctx.append_basic_block(cur_fn, "switch.exit");
+
+        let mut all_cases_return = true;
 
         for case in cases {
             let case_val = self.compile_expr(&case.pattern)?;
@@ -808,15 +939,26 @@ impl<'ctx> CodeGen<'ctx> {
                 }
                 self.pop_scope();
                 if !ret {
+                    all_cases_return = false;
                     self.builder.build_unconditional_branch(exit_bb)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                 }
                 self.builder.position_at_end(next_bb);
             }
         }
+
+        // "no case matched" path → exit_bb
         self.builder.build_unconditional_branch(exit_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.position_at_end(exit_bb);
+
+        // Tüm case'ler return yaptıysa exit_bb ulaşılamaz
+        if all_cases_return && !cases.is_empty() {
+            self.builder.build_unreachable()
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+            return Ok(true);
+        }
+
         Ok(false)
     }
 
@@ -995,7 +1137,7 @@ impl<'ctx> CodeGen<'ctx> {
             // ── this ─────────────────────────────────────────────────────────
             Expr::This => {
                 if let Some(slot) = self.lookup_var("this").cloned() {
-                    let v = self.builder.build_load(slot.ty, slot.ptr, "this")
+                    let v = self.builder.build_load(slot.ty, slot.ptr, "this_val")
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     Ok(Some(v))
                 } else {
@@ -1019,6 +1161,13 @@ impl<'ctx> CodeGen<'ctx> {
 
             // ── FieldAccess ───────────────────────────────────────────────────
             Expr::FieldAccess { object, field } => {
+                // Enum.Variant → integer sabit
+                if let Expr::Ident(enum_name) = object.as_ref() {
+                    if let Some(val) = self.enum_variant_value(enum_name, field) {
+                        let iv = self.ctx.i32_type().const_int(val as u64, false);
+                        return Ok(Some(iv.into()));
+                    }
+                }
                 self.compile_field_load(object, field)
             }
             Expr::NullSafeAccess { .. } => Ok(None),

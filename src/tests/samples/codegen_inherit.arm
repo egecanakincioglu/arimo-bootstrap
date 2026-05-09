@@ -1,0 +1,48 @@
+module arimo.codegeninherit;
+
+public abstract class Animal {
+    private readonly name : String;
+    private sound : String;
+
+    protected constructor(name: String, sound: String) {
+        this.name  = name;
+        this.sound = sound;
+    }
+
+    public getName()  : String { return this.name;  }
+    public getSound() : String { return this.sound; }
+
+    public speak() : Void {
+        IO.print("Hayvan konusuyor");
+    }
+
+    public abstract describe() : Void;
+}
+
+public class Dog extends Animal {
+    private breed : String;
+
+    public constructor(name: String, breed: String) {
+        super(name, "Hav hav");
+        this.breed = breed;
+    }
+
+    public getBreed() : String { return this.breed; }
+
+    public describe() : Void {
+        IO.print("Kopek");
+    }
+
+    public fetch() : Void {
+        IO.print("Kopek top getiriyor");
+    }
+}
+
+public class Application {
+    public static main() : Void {
+        Dog d = Dog("Rex", "Labrador");
+        d.describe();
+        d.fetch();
+        IO.print("codegen_inherit: OK");
+    }
+}

@@ -1,0 +1,50 @@
+module arimo.codegenenum;
+
+public enum Direction {
+    North,
+    South,
+    East,
+    West;
+
+    public label() : String {
+        switch (this) {
+            case Direction.North: return "Kuzey";
+            case Direction.South: return "Guney";
+            case Direction.East:  return "Dogu";
+            case Direction.West:  return "Bati";
+        }
+    }
+}
+
+public enum Priority {
+    Low,
+    Medium,
+    High,
+    Critical;
+
+    public isUrgent() : Boolean {
+        return this == Priority.High || this == Priority.Critical;
+    }
+}
+
+public class Application {
+    public static main() : Void {
+        Direction d = Direction.North;
+        Priority  p = Priority.High;
+
+        // switch üzerinde enum
+        switch (d) {
+            case Direction.North: IO.print("Kuzey'e gidiliyor");
+            case Direction.South: IO.print("Guney'e gidiliyor");
+            case Direction.East:  IO.print("Dogu'ya gidiliyor");
+            case Direction.West:  IO.print("Bati'ya gidiliyor");
+        }
+
+        // enum karşılaştırma
+        if (p == Priority.High) {
+            IO.print("Yuksek oncelik");
+        }
+
+        IO.print("codegen_enum: OK");
+    }
+}
