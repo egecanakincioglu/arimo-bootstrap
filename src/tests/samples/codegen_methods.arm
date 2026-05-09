@@ -1,0 +1,43 @@
+module arimo.codegenmethods;
+
+public class MathUtils {
+    public static add(a: Integer, b: Integer) : Integer {
+        return a + b;
+    }
+
+    public static max(a: Integer, b: Integer) : Integer {
+        if (a > b) {
+            return a;
+        } else {
+            return b;
+        }
+    }
+
+    public static factorial(n: Integer) : Integer {
+        if (n <= 1) {
+            return 1;
+        }
+        Integer result = 1;
+        Integer i = 2;
+        while (i <= n) {
+            result = result * i;
+            i = i + 1;
+        }
+        return result;
+    }
+}
+
+public class Application {
+    public static main() : Void {
+        Integer sum = MathUtils.add(3, 4);
+        IO.print("3 + 4 hesaplandi");
+
+        Integer biggest = MathUtils.max(10, 7);
+        IO.print("max hesaplandi");
+
+        Integer fact5 = MathUtils.factorial(5);
+        IO.print("5! hesaplandi");
+
+        IO.print("codegen_methods: OK");
+    }
+}

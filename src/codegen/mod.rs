@@ -490,10 +490,10 @@ impl<'ctx> CodeGen<'ctx> {
         }
 
         // else / else-if bloğu
+        let mut else_returned = false;
         if else_bb != merge_bb {
             self.builder.position_at_end(else_bb);
             self.push_scope();
-            let mut else_returned = false;
             if let Some(eb) = else_ {
                 for s in eb {
                     if self.compile_stmt(s)? { else_returned = true; break; }
@@ -504,9 +504,19 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_unconditional_branch(merge_bb)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
             }
+        } else {
+            // else bloğu yok → else_returned = false (merge'e düşüyor)
         }
 
         self.builder.position_at_end(merge_bb);
+
+        // Her iki dal da return yaptıysa merge block ulaşılamaz
+        if then_returned && else_returned {
+            self.builder.build_unreachable()
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+            return Ok(true);
+        }
+
         Ok(false)
     }
 
