@@ -51,8 +51,9 @@ type CgResult<T> = Result<T, CodeGenError>;
 
 #[derive(Debug, Clone)]
 struct VarSlot<'ctx> {
-    ptr : PointerValue<'ctx>,
-    ty  : BasicTypeEnum<'ctx>,
+    ptr        : PointerValue<'ctx>,
+    ty         : BasicTypeEnum<'ctx>,
+    class_name : Option<String>,   // class instance değişkenleri için
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,6 +70,12 @@ pub struct CodeGen<'ctx> {
     fns     : HashMap<String, FunctionValue<'ctx>>,
     // Geçerli fonksiyon
     cur_fn  : Option<FunctionValue<'ctx>>,
+    // Class struct tipleri: class adı → LLVM struct type
+    struct_types  : HashMap<String, inkwell::types::StructType<'ctx>>,
+    // Field indeksleri: class adı → field adı → indeks
+    field_indices : HashMap<String, HashMap<String, u32>>,
+    // Geçerli class (this erişimi için)
+    cur_class : Option<String>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
@@ -79,9 +86,12 @@ impl<'ctx> CodeGen<'ctx> {
             ctx,
             module,
             builder,
-            scopes : Vec::new(),
-            fns    : HashMap::new(),
-            cur_fn : None,
+            scopes        : Vec::new(),
+            fns           : HashMap::new(),
+            cur_fn        : None,
+            struct_types  : HashMap::new(),
+            field_indices : HashMap::new(),
+            cur_class     : None,
         }
     }
 
@@ -96,8 +106,18 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn define_var(&mut self, name: &str, ptr: PointerValue<'ctx>, ty: BasicTypeEnum<'ctx>) {
+        self.define_var_with_class(name, ptr, ty, None);
+    }
+
+    fn define_var_with_class(
+        &mut self,
+        name       : &str,
+        ptr        : PointerValue<'ctx>,
+        ty         : BasicTypeEnum<'ctx>,
+        class_name : Option<String>,
+    ) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), VarSlot { ptr, ty });
+            scope.insert(name.to_string(), VarSlot { ptr, ty, class_name });
         }
     }
 
@@ -146,30 +166,68 @@ impl<'ctx> CodeGen<'ctx> {
     // ── Modülü işle ──────────────────────────────────────────────────────────
 
     pub fn compile_module(&mut self, module: &crate::ast::Module) -> CgResult<()> {
-        // Önce extern fonksiyonları kayıt et
+        // Extern fonksiyonları kayıt et
         for item in &module.items {
             if let Item::Extern(ext) = item {
                 self.declare_extern_block(ext)?;
             }
         }
 
-        // printf / IO altyapısı — her zaman lazım
+        // printf + malloc her zaman lazım
         self.declare_printf();
+        self.declare_malloc();
 
-        // İki geçiş: önce fonksiyon imzaları, sonra gövdeler
-        // Geçiş 1: class'lardaki static metodları kayıt et
+        // Geçiş 1: struct tiplerini kayıt et (field layout)
+        for item in &module.items {
+            if let Item::Class(c) = item {
+                self.register_class_struct(c);
+            }
+        }
+        // Geçiş 2: tüm fonksiyon imzaları (static + instance)
         for item in &module.items {
             if let Item::Class(c) = item {
                 self.register_class_methods(c)?;
             }
         }
-        // Geçiş 2: gövdeleri üret
+        // Geçiş 3: gövdeleri üret
         for item in &module.items {
             if let Item::Class(c) = item {
                 self.compile_class(c)?;
             }
         }
         Ok(())
+    }
+
+    // ── malloc extern tanımı ─────────────────────────────────────────────────
+
+    fn declare_malloc(&mut self) {
+        if self.module.get_function("malloc").is_some() { return; }
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let i64_ty = self.ctx.i64_type();
+        let malloc_ty = ptr_ty.fn_type(&[i64_ty.into()], false);
+        self.module.add_function("malloc", malloc_ty, None);
+    }
+
+    // ── Class struct tipi kayıt ──────────────────────────────────────────────
+
+    fn register_class_struct(&mut self, c: &ClassDecl) {
+        // Sadece instance field'ları (static değil)
+        let field_types: Vec<BasicTypeEnum<'ctx>> = c.fields.iter()
+            .filter(|f| !f.static_)
+            .filter_map(|f| self.llvm_type(&f.ty))
+            .collect();
+
+        let struct_ty = self.ctx.struct_type(&field_types, false);
+        self.struct_types.insert(c.name.clone(), struct_ty);
+
+        // Field adı → indeks eşlemesi
+        let mut idx_map = HashMap::new();
+        let mut idx = 0u32;
+        for f in c.fields.iter().filter(|f| !f.static_) {
+            idx_map.insert(f.name.clone(), idx);
+            idx += 1;
+        }
+        self.field_indices.insert(c.name.clone(), idx_map);
     }
 
     // ── printf extern tanımı ─────────────────────────────────────────────────
@@ -205,14 +263,31 @@ impl<'ctx> CodeGen<'ctx> {
     // ── Class metodlarını kayıt et (imza) ────────────────────────────────────
 
     fn register_class_methods(&mut self, c: &ClassDecl) -> CgResult<()> {
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+
+        // Constructor: ClassName_new(fields...) → ptr
+        if c.constructor.is_some() {
+            let ctor_name = format!("{}_new", c.name);
+            if self.module.get_function(&ctor_name).is_none() {
+                let ctor = c.constructor.as_ref().unwrap();
+                let params: Vec<inkwell::types::BasicMetadataTypeEnum> = ctor.params.iter()
+                    .filter_map(|p| self.llvm_type(&p.ty).map(|t| t.into()))
+                    .collect();
+                let fn_ty = ptr_ty.fn_type(&params, false);
+                let fn_val = self.module.add_function(&ctor_name, fn_ty, None);
+                self.fns.insert(ctor_name, fn_val);
+            }
+        }
+
+        // Metodlar
         for m in &c.methods {
             let fn_name = format!("{}_{}", c.name, m.name);
             if self.module.get_function(&fn_name).is_some() { continue; }
 
             let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
-            // Instance metodlar için ilk parametre 'this' pointer
             if !m.static_ {
-                param_types.push(self.ctx.ptr_type(AddressSpace::default()).into());
+                // this pointer
+                param_types.push(ptr_ty.into());
             }
             for p in &m.params {
                 if let Some(t) = self.llvm_type(&p.ty) {
@@ -244,11 +319,93 @@ impl<'ctx> CodeGen<'ctx> {
     // ── Class gövdelerini derle ───────────────────────────────────────────────
 
     fn compile_class(&mut self, c: &ClassDecl) -> CgResult<()> {
-        for m in &c.methods {
+        self.cur_class = Some(c.name.clone());
+
+        // Constructor gövdesi
+        if let Some(ctor) = &c.constructor.clone() {
+            self.compile_constructor(c, ctor)?;
+        }
+
+        // Metod gövdeleri
+        for m in &c.methods.clone() {
             if m.body.is_none() { continue; }
             self.compile_method(c, m)?;
         }
+
+        self.cur_class = None;
         Ok(())
+    }
+
+    // ── Constructor gövdesi ──────────────────────────────────────────────────
+
+    fn compile_constructor(&mut self, c: &ClassDecl, ctor: &Constructor) -> CgResult<()> {
+        let ctor_name = format!("{}_new", c.name);
+        let fn_val = match self.fns.get(&ctor_name).copied()
+            .or_else(|| self.module.get_function(&ctor_name))
+        {
+            Some(f) => f,
+            None    => return Ok(()),
+        };
+
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+        self.cur_fn = Some(fn_val);
+        self.push_scope();
+
+        // malloc ile bellek ayır
+        let malloc = self.module.get_function("malloc")
+            .ok_or_else(|| CodeGenError::new("malloc not declared"))?;
+        let struct_ty = self.struct_types.get(&c.name).copied()
+            .ok_or_else(|| CodeGenError::new(format!("struct type not found: {}", c.name)))?;
+        let size = struct_ty.size_of()
+            .ok_or_else(|| CodeGenError::new("struct has no size"))?;
+        let obj_ptr = self.builder
+            .build_call(malloc, &[size.into()], "obj")
+            .map_err(|e| CodeGenError::new(e.to_string()))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodeGenError::new("malloc returned void"))?;
+
+        // 'this' alloca'sına kaydet
+        let this_alloca = self.builder
+            .build_alloca(self.ctx.ptr_type(AddressSpace::default()), "this")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(this_alloca, obj_ptr)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.define_var("this", this_alloca,
+            self.ctx.ptr_type(AddressSpace::default()).into());
+
+        // Parametre alloca'ları
+        for (i, p) in ctor.params.iter().enumerate() {
+            if let Some(llvm_ty) = self.llvm_type(&p.ty) {
+                if let Some(pv) = fn_val.get_nth_param(i as u32) {
+                    let alloca = self.builder.build_alloca(llvm_ty, &p.name)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_store(alloca, pv)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.define_var(&p.name, alloca, llvm_ty);
+                }
+            }
+        }
+
+        // Constructor body
+        for stmt in &ctor.body.clone() {
+            if self.compile_stmt(stmt)? { break; }
+        }
+
+        // this pointer'ı döndür
+        let ptr_ty: BasicTypeEnum<'ctx> = self.ctx.ptr_type(AddressSpace::default()).into();
+        let this_ptr = self.builder
+            .build_load(ptr_ty, this_alloca, "ret_this")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_return(Some(&this_ptr))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.pop_scope();
+        self.cur_fn = None;
+
+        if fn_val.verify(true) { Ok(()) }
+        else { Err(CodeGenError::new(format!("constructor verification failed: {}", c.name))) }
     }
 
     // ── Metod gövdesi ─────────────────────────────────────────────────────────
@@ -281,6 +438,18 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.cur_fn = Some(fn_val);
         self.push_scope();
+
+        // Instance metod: this pointer'ı kapsama ekle
+        if !m.static_ {
+            if let Some(this_val) = fn_val.get_nth_param(0) {
+                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                let this_alloca = self.builder.build_alloca(ptr_ty, "this")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(this_alloca, this_val)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.define_var("this", this_alloca, ptr_ty.into());
+            }
+        }
 
         // Parametreleri kapsama ekle
         let param_offset = if m.static_ { 0 } else { 1 };
@@ -366,7 +535,22 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             Stmt::VarDecl { ty, name, value, .. } => {
-                if let Some(llvm_ty) = self.llvm_type(ty) {
+                // Class instance için class adını kaydet
+                let class_name = match ty {
+                    Type::Named(n) if self.struct_types.contains_key(n.as_str()) => {
+                        Some(n.clone())
+                    }
+                    _ => None,
+                };
+
+                // Class instance → pointer tipinde sakla
+                let llvm_ty = if class_name.is_some() {
+                    Some(BasicTypeEnum::from(self.ctx.ptr_type(AddressSpace::default())))
+                } else {
+                    self.llvm_type(ty)
+                };
+
+                if let Some(llvm_ty) = llvm_ty {
                     let alloca = self.builder.build_alloca(llvm_ty, name)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     if let Some(init_expr) = value {
@@ -376,7 +560,7 @@ impl<'ctx> CodeGen<'ctx> {
                                 .map_err(|e| CodeGenError::new(e.to_string()))?;
                         }
                     }
-                    self.define_var(name, alloca, llvm_ty);
+                    self.define_var_with_class(name, alloca, llvm_ty, class_name);
                 }
                 Ok(false)
             }
@@ -700,14 +884,38 @@ impl<'ctx> CodeGen<'ctx> {
 
             // ── Instance metod çağrısı ─────────────────────────────────────────
             Expr::MethodCall { object, method, args } => {
-                self.compile_method_call(object, method, args)
+                // IO.print gibi statik benzer çağrılar da buraya düşebilir
+                if let Expr::Ident(class_name) = object.as_ref() {
+                    // Statik metod gibi çağrı (nesne ismi ile)
+                    let fn_name = format!("{}_{}", class_name, method);
+                    if self.fns.contains_key(&fn_name)
+                        || self.module.get_function(&fn_name).is_some()
+                    {
+                        return self.compile_static_call(class_name, method, args);
+                    }
+                }
+                self.compile_instance_method_call(object, method, args)
             }
 
-            // ── Constructor ───────────────────────────────────────────────────
-            Expr::ConstructorCall { class: _, args } => {
-                // Şimdilik argümanları derle ve None döndür
-                for a in args { self.compile_expr(a)?; }
-                Ok(None)
+            // ── Constructor çağrısı ───────────────────────────────────────────
+            Expr::ConstructorCall { class, args } => {
+                let ctor_name = format!("{}_new", class);
+                let compiled: Vec<BasicValueEnum<'ctx>> = args.iter()
+                    .filter_map(|a| self.compile_expr(a).ok().flatten())
+                    .collect();
+
+                if let Some(ctor_fn) = self.fns.get(&ctor_name).copied()
+                    .or_else(|| self.module.get_function(&ctor_name))
+                {
+                    let meta: Vec<inkwell::values::BasicMetadataValueEnum> =
+                        compiled.iter().map(|v| (*v).into()).collect();
+                    let call = self.builder.build_call(ctor_fn, &meta, "obj")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    Ok(call.try_as_basic_value().basic())
+                } else {
+                    // Struct tipi bilinen ama constructor'ı olmayan case
+                    Ok(None)
+                }
             }
 
             // ── Binary operatörler ────────────────────────────────────────────
@@ -784,8 +992,17 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(None)
             }
 
-            // ── this / super ─────────────────────────────────────────────────
-            Expr::This | Expr::Super => Ok(None),
+            // ── this ─────────────────────────────────────────────────────────
+            Expr::This => {
+                if let Some(slot) = self.lookup_var("this").cloned() {
+                    let v = self.builder.build_load(slot.ty, slot.ptr, "this")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    Ok(Some(v))
+                } else {
+                    Ok(None)
+                }
+            }
+            Expr::Super => Ok(None),
 
             // ── await ─────────────────────────────────────────────────────────
             Expr::Await(inner) => self.compile_expr(inner),
@@ -801,7 +1018,10 @@ impl<'ctx> CodeGen<'ctx> {
             Expr::Lambda { .. } => Ok(None),
 
             // ── FieldAccess ───────────────────────────────────────────────────
-            Expr::FieldAccess { .. } | Expr::NullSafeAccess { .. } => Ok(None),
+            Expr::FieldAccess { object, field } => {
+                self.compile_field_load(object, field)
+            }
+            Expr::NullSafeAccess { .. } => Ok(None),
         }
     }
 
@@ -927,21 +1147,53 @@ impl<'ctx> CodeGen<'ctx> {
         args   : &[Expr],
     ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
         let fn_name = format!("{}_{}", class, method);
-        let compiled_args: Vec<BasicValueEnum<'ctx>> = args.iter()
-            .filter_map(|a| self.compile_expr(a).ok().flatten())
-            .collect();
 
+        // Önce gerçek static metod olarak dene
         if let Some(fn_val) = self.fns.get(&fn_name).copied()
             .or_else(|| self.module.get_function(&fn_name))
         {
+            let compiled_args: Vec<BasicValueEnum<'ctx>> = args.iter()
+                .filter_map(|a| self.compile_expr(a).ok().flatten())
+                .collect();
             let meta_args: Vec<inkwell::values::BasicMetadataValueEnum> =
                 compiled_args.iter().map(|v| (*v).into()).collect();
             let call = self.builder.build_call(fn_val, &meta_args, "call")
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
-            Ok(call.try_as_basic_value().basic())
-        } else {
-            Ok(None)
+            return Ok(call.try_as_basic_value().basic());
         }
+
+        // Bulunamadı — belki 'class' bir değişken ismi (instance method call)
+        // Parser StaticCall üretir: c.increment() → StaticCall("c","increment")
+        let obj_expr = Expr::Ident(class.to_string());
+        if let Some(class_name) = self.infer_object_class(&obj_expr) {
+            let instance_fn = format!("{}_{}", class_name, method);
+            if let Some(fn_val) = self.fns.get(&instance_fn).copied()
+                .or_else(|| self.module.get_function(&instance_fn))
+            {
+                // this pointer'ı yükle
+                let this_ptr = if let Some(slot) = self.lookup_var(class).cloned() {
+                    self.builder.build_load(slot.ty, slot.ptr, "this_load")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                } else {
+                    return Ok(None);
+                };
+
+                // Argümanları derle
+                let compiled_args: Vec<BasicValueEnum<'ctx>> = args.iter()
+                    .filter_map(|a| self.compile_expr(a).ok().flatten())
+                    .collect();
+
+                let mut meta_args: Vec<inkwell::values::BasicMetadataValueEnum> =
+                    vec![this_ptr.into()];
+                for v in &compiled_args { meta_args.push((*v).into()); }
+
+                let call = self.builder.build_call(fn_val, &meta_args, "mcall")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                return Ok(call.try_as_basic_value().basic());
+            }
+        }
+
+        Ok(None)
     }
 
     // ── Instance metod çağrısı ────────────────────────────────────────────────
@@ -954,6 +1206,138 @@ impl<'ctx> CodeGen<'ctx> {
     ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
         for a in args { self.compile_expr(a)?; }
         Ok(None)
+    }
+
+    // ── Instance metod çağrısı ────────────────────────────────────────────────
+
+    fn compile_instance_method_call(
+        &mut self,
+        object : &Expr,
+        method : &str,
+        args   : &[Expr],
+    ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
+        // Nesnenin tipi — class adını bul
+        let class_name = self.infer_object_class(object);
+
+        // this pointer'ı derle
+        let this_ptr = match self.compile_expr(object)? {
+            Some(v) => v,
+            None    => return Ok(None),
+        };
+
+        // Metod fonksiyonunu bul
+        let fn_name = match &class_name {
+            Some(c) => format!("{}_{}", c, method),
+            None    => return Ok(None),
+        };
+
+        let fn_val = match self.fns.get(&fn_name).copied()
+            .or_else(|| self.module.get_function(&fn_name))
+        {
+            Some(f) => f,
+            None    => return Ok(None),
+        };
+
+        // Argümanları derle: this + args
+        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![this_ptr.into()];
+        for a in args {
+            if let Some(v) = self.compile_expr(a)? {
+                call_args.push(v.into());
+            }
+        }
+
+        let call = self.builder.build_call(fn_val, &call_args, "mcall")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        Ok(call.try_as_basic_value().basic())
+    }
+
+    // ── Field okuma ──────────────────────────────────────────────────────────
+
+    fn compile_field_load(
+        &mut self,
+        object : &Expr,
+        field  : &str,
+    ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
+        let class_name = self.infer_object_class(object);
+        let this_ptr = match self.compile_expr(object)? {
+            Some(v) => v,
+            None    => return Ok(None),
+        };
+
+        if let (Some(cn), BasicValueEnum::PointerValue(ptr)) = (class_name, this_ptr) {
+            return self.gep_field_load(&cn, ptr, field);
+        }
+        Ok(None)
+    }
+
+    fn gep_field_load(
+        &mut self,
+        class : &str,
+        ptr   : inkwell::values::PointerValue<'ctx>,
+        field : &str,
+    ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
+        let idx = match self.field_indices.get(class).and_then(|m| m.get(field)).copied() {
+            Some(i) => i,
+            None    => return Ok(None),
+        };
+        let struct_ty = match self.struct_types.get(class).copied() {
+            Some(t) => t,
+            None    => return Ok(None),
+        };
+        let i32_ty = self.ctx.i32_type();
+        let gep = self.builder.build_struct_gep(struct_ty, ptr, idx, field)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        // Field tipini struct'tan al
+        let field_ty = struct_ty.get_field_type_at_index(idx)
+            .ok_or_else(|| CodeGenError::new(format!("field {} not found", field)))?;
+        let val = self.builder.build_load(field_ty, gep, field)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let _ = i32_ty;
+        Ok(Some(val))
+    }
+
+    fn gep_field_store(
+        &mut self,
+        class : &str,
+        ptr   : inkwell::values::PointerValue<'ctx>,
+        field : &str,
+        val   : BasicValueEnum<'ctx>,
+    ) -> CgResult<()> {
+        let idx = match self.field_indices.get(class).and_then(|m| m.get(field)).copied() {
+            Some(i) => i,
+            None    => return Ok(()),
+        };
+        let struct_ty = match self.struct_types.get(class).copied() {
+            Some(t) => t,
+            None    => return Ok(()),
+        };
+        let gep = self.builder.build_struct_gep(struct_ty, ptr, idx, &format!("{}.ptr", field))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let field_ty = struct_ty.get_field_type_at_index(idx)
+            .ok_or_else(|| CodeGenError::new(format!("field {} not found", field)))?;
+        let coerced = self.coerce_value(val, field_ty)?;
+        self.builder.build_store(gep, coerced)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        Ok(())
+    }
+
+    // Nesnenin class adını VarSlot'tan veya cur_class'tan çıkar
+    fn infer_object_class(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::This => self.cur_class.clone(),
+            Expr::Ident(name) => {
+                for scope in self.scopes.iter().rev() {
+                    if let Some(slot) = scope.get(name.as_str()) {
+                        // VarSlot'ta class adı saklıysa onu kullan
+                        if slot.class_name.is_some() {
+                            return slot.class_name.clone();
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     // ── Binary operatörler ────────────────────────────────────────────────────
@@ -1105,6 +1489,14 @@ impl<'ctx> CodeGen<'ctx> {
                         let coerced = self.coerce_value(v, slot.ty)?;
                         self.builder.build_store(slot.ptr, coerced)
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    }
+                }
+                // this.field = value
+                Expr::FieldAccess { object, field } => {
+                    let class_name = self.infer_object_class(object);
+                    let obj_ptr = self.compile_expr(object)?;
+                    if let (Some(cn), Some(BasicValueEnum::PointerValue(ptr))) = (class_name, obj_ptr) {
+                        self.gep_field_store(&cn.clone(), ptr, field, v)?;
                     }
                 }
                 _ => {}

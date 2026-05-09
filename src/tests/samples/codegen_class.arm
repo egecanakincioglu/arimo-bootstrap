@@ -1,0 +1,43 @@
+module arimo.codegenclass;
+
+public class Counter {
+    private count : Integer;
+
+    public constructor(start: Integer) {
+        this.count = start;
+    }
+
+    public increment() : Void {
+        this.count = this.count + 1;
+    }
+
+    public add(n: Integer) : Void {
+        this.count = this.count + n;
+    }
+
+    public getCount() : Integer {
+        return this.count;
+    }
+
+    public reset() : Void {
+        this.count = 0;
+    }
+}
+
+public class Application {
+    public static main() : Void {
+        Counter c = Counter(0);
+        c.increment();
+        c.increment();
+        c.add(5);
+
+        Integer val = c.getCount();
+        IO.print("count = ${val}");
+
+        c.reset();
+        Integer after = c.getCount();
+        IO.print("after reset = ${after}");
+
+        IO.print("codegen_class: OK");
+    }
+}
