@@ -1,4 +1,4 @@
-# Arimo Lang — Language Specification v1.1
+# Arimo Lang — Language Specification v1.2
 
 ---
 

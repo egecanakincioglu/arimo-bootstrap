@@ -1,0 +1,95 @@
+module arimo.test.phase2;
+
+// ── 3.1 @packed / @align ─────────────────────────────────────────────────────
+
+@packed
+public struct PacketHeader {
+    magic   : u16;
+    version : u8;
+    flags   : u8;
+}
+
+@align(16)
+public struct SimdVec {
+    data : Array<Float, 4>;
+}
+
+// ── 3.2 volatile ─────────────────────────────────────────────────────────────
+
+@manual
+public class HardwareDriver {
+    public static readStatus() : u32 {
+        volatile u32 status = 0;
+        return status;
+    }
+}
+
+// ── 3.3 union ────────────────────────────────────────────────────────────────
+
+public union Register {
+    full  : u32;
+    bytes : Array<u8, 4>;
+}
+
+// ── 3.4 extern "C" ───────────────────────────────────────────────────────────
+
+extern "C" {
+    printf(fmt: RawPtr<u8>, ...) : i32;
+    malloc(size: u64)            : RawPtr<Void>;
+    free(ptr: RawPtr<Void>)      : Void;
+}
+
+// ── 3.5 asm {} ───────────────────────────────────────────────────────────────
+
+@manual
+public class Syscall {
+    public static exit(code: i32) : noreturn {
+        asm {
+            mov rax, 60
+            syscall
+        }
+    }
+}
+
+// ── 3.6 @nostd / @section / calling conventions ──────────────────────────────
+
+public class KernelEntry {
+    @section(".boot")
+    @cdecl
+    public static start() : Void {
+        HardwareDriver.readStatus();
+    }
+
+    @interrupt
+    public static onTimer() : Void {
+        Syscall.exit(0);
+    }
+}
+
+// ── 3.7 noreturn ─────────────────────────────────────────────────────────────
+
+public class Panic {
+    public static halt(msg: String) : noreturn {
+        Syscall.exit(1);
+    }
+}
+
+// ── defer ─────────────────────────────────────────────────────────────────────
+
+public class FileHandler {
+    public static process(path: String) : Void {
+        Integer handle = 0;
+        defer Syscall.exit(0);
+        Panic.halt("test");
+    }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+public class Application {
+    public static main() : Void {
+        PacketHeader header = PacketHeader(0xFF00, 1, 0);
+        SimdVec      vec    = SimdVec(Array.zeroed());
+        IO.print("phase2: OK");
+    }
+}

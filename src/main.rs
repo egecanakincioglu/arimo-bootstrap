@@ -86,6 +86,12 @@ fn main() {
                     ast::Item::TypeAlias(a) => {
                         println!("  type {} = {:?}", a.name, a.ty);
                     }
+                    ast::Item::Union(u) => {
+                        println!("  union {} ({} fields)", u.name, u.fields.len());
+                    }
+                    ast::Item::Extern(e) => {
+                        println!("  extern \"{}\" ({} decls)", e.abi, e.decls.len());
+                    }
                 }
             }
             m

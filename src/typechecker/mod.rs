@@ -53,6 +53,7 @@ pub enum ClassKind {
     Enum,
     Exception,
     Struct,     // value type — copy semantics, stack-allocated
+    Union,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +167,8 @@ impl TypeChecker {
                 Item::Enum(e)      => self.check_enum(e),
                 Item::Exception(e) => self.check_exception(e),
                 Item::TypeAlias(_) => {}
+                Item::Union(_)     => {}
+                Item::Extern(_)    => {}
             }
         }
         &self.errors
@@ -184,6 +187,8 @@ impl TypeChecker {
                 Item::TypeAlias(a) => {
                     self.type_aliases.insert(a.name.clone(), a.ty.clone());
                 }
+                Item::Union(u)  => self.register_union(u),
+                Item::Extern(e) => self.register_extern(e),
             }
         }
     }
@@ -384,6 +389,57 @@ impl TypeChecker {
             });
         }
         self.classes.insert(e.name.clone(), info);
+    }
+
+    fn register_union(&mut self, u: &UnionDecl) {
+        let mut info = ClassInfo {
+            kind          : ClassKind::Union,
+            generics      : Vec::new(),
+            generic_bounds: HashMap::new(),
+            extends       : None,
+            implements    : Vec::new(),
+            fields        : HashMap::new(),
+            methods       : HashMap::new(),
+            constructor   : None,
+            variant_data  : HashMap::new(),
+        };
+        for f in &u.fields {
+            info.fields.insert(f.name.clone(), FieldInfo {
+                ty       : f.ty.clone(),
+                readonly : false,
+                static_  : false,
+                vis      : f.visibility.clone(),
+            });
+        }
+        self.classes.insert(u.name.clone(), info);
+    }
+
+    fn register_extern(&mut self, block: &ExternBlock) {
+        for decl in &block.decls {
+            let params: Vec<(String, Type)> = decl.params.iter()
+                .map(|p| (p.name.clone(), p.ty.clone()))
+                .collect();
+            let mi = MethodInfo {
+                params,
+                return_ty : decl.return_ty.clone(),
+                static_   : true,
+                abstract_ : false,
+                vis       : Visibility::Public,
+            };
+            let class_entry = self.classes.entry(format!("__extern_{}", block.abi))
+                .or_insert_with(|| ClassInfo {
+                    kind          : ClassKind::Concrete,
+                    generics      : Vec::new(),
+                    generic_bounds: HashMap::new(),
+                    extends       : None,
+                    implements    : Vec::new(),
+                    fields        : HashMap::new(),
+                    methods       : HashMap::new(),
+                    constructor   : None,
+                    variant_data  : HashMap::new(),
+                });
+            class_entry.methods.entry(decl.name.clone()).or_default().push(mi);
+        }
     }
 
     // ── Geçiş 2: detaylı kontrol ──────────────────────────────────────────────
@@ -614,7 +670,7 @@ impl TypeChecker {
         }
 
         match &m.return_ty {
-            Some(Type::Void) | None => {}
+            Some(Type::Void) | None | Some(Type::NoReturn) => {}
             Some(_) => {
                 if !self.all_paths_return(&body) {
                     self.error(format!(
@@ -632,7 +688,7 @@ impl TypeChecker {
 
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::VarDecl { ty, name, value } => {
+            Stmt::VarDecl { ty, name, value, .. } => {
                 self.check_type_exists(ty, &format!("variable '{}'", name));
                 if let Some(val) = value {
                     let val_ty = self.infer_expr(val);
@@ -863,6 +919,12 @@ impl TypeChecker {
                     }
                     self.pop_scope();
                 }
+            }
+
+            Stmt::Asm(_) => {}
+
+            Stmt::Defer(expr) => {
+                self.infer_expr(expr);
             }
 
             Stmt::Break | Stmt::Continue => {}

@@ -25,6 +25,7 @@ pub enum Type {
     Boolean,
     Str,
     Void,
+    NoReturn,
 
     // Fixed-size integer types
     U8, U16, U32, U64,
@@ -209,9 +210,10 @@ pub enum UnaryOp {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     VarDecl {
-        ty    : Type,
-        name  : String,
-        value : Option<Expr>,
+        volatile : bool,
+        ty       : Type,
+        name     : String,
+        value    : Option<Expr>,
     },
 
     ExprStmt(Expr),
@@ -261,6 +263,9 @@ pub enum Stmt {
     Continue,
 
     Block(Vec<Stmt>),
+
+    Asm(String),
+    Defer(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +279,13 @@ pub struct CatchClause {
     pub exception_type : Type,
     pub name           : String,
     pub body           : Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallingConv {
+    Cdecl,
+    Stdcall,
+    Interrupt,
 }
 
 // ── Generic parametre — bound opsiyonel ──────────────────────────────────────
@@ -306,15 +318,17 @@ pub struct Param {
 
 #[derive(Debug, Clone)]
 pub struct Method {
-    pub visibility : Visibility,
-    pub static_    : bool,
-    pub abstract_  : bool,
-    pub override_  : bool,
-    pub inline_    : bool,   // @inline annotation
-    pub name       : String,
-    pub params     : Vec<Param>,
-    pub return_ty  : Option<Type>,
-    pub body       : Option<Vec<Stmt>>,
+    pub visibility   : Visibility,
+    pub static_      : bool,
+    pub abstract_    : bool,
+    pub override_    : bool,
+    pub inline_      : bool,
+    pub calling_conv : Option<CallingConv>,
+    pub section      : Option<String>,
+    pub name         : String,
+    pub params       : Vec<Param>,
+    pub return_ty    : Option<Type>,
+    pub body         : Option<Vec<Stmt>>,
 }
 
 #[derive(Debug, Clone)]
@@ -381,16 +395,45 @@ pub struct TypeAliasDecl {
     pub ty   : Type,
 }
 
+#[derive(Debug, Clone)]
+pub struct UnionDecl {
+    pub visibility : Visibility,
+    pub name       : String,
+    pub fields     : Vec<Field>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternParam {
+    pub name : String,
+    pub ty   : Type,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternDecl {
+    pub name      : String,
+    pub params    : Vec<ExternParam>,
+    pub return_ty : Option<Type>,
+    pub variadic  : bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternBlock {
+    pub abi   : String,
+    pub decls : Vec<ExternDecl>,
+}
+
 // ── Struct (value type, stack-allocated) ──────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct StructDecl {
     pub visibility  : Visibility,
+    pub packed      : bool,
+    pub align       : Option<usize>,
     pub name        : String,
     pub generics    : Vec<GenericParam>,
     pub implements  : Vec<String>,
     pub fields      : Vec<Field>,
-    pub constructor : Option<Constructor>,  // None → auto-generate from fields
+    pub constructor : Option<Constructor>,
     pub methods     : Vec<Method>,
 }
 
@@ -399,6 +442,7 @@ pub struct StructDecl {
 #[derive(Debug, Clone)]
 pub struct Module {
     pub path    : String,
+    pub nostd   : bool,
     pub imports : Vec<String>,
     pub items   : Vec<Item>,
 }
@@ -411,4 +455,6 @@ pub enum Item {
     Enum(EnumDecl),
     Exception(ExceptionDecl),
     TypeAlias(TypeAliasDecl),
+    Union(UnionDecl),
+    Extern(ExternBlock),
 }

@@ -129,6 +129,8 @@ impl BorrowChecker {
                 Item::Exception(e) => self.check_exception(e),
                 Item::Interface(_) => {}
                 Item::TypeAlias(_) => {}
+                Item::Union(_)     => {}
+                Item::Extern(_)    => {}
             }
         }
         &self.errors
@@ -248,7 +250,7 @@ impl BorrowChecker {
 
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::VarDecl { ty, name, value } => {
+            Stmt::VarDecl { ty, name, value, .. } => {
                 if let Some(val) = value {
                     let rhs_moves = matches!(val, Expr::Ident(_)) && !self.is_copy_expr(val);
                     self.check_expr_operand(val, rhs_moves);
@@ -362,6 +364,12 @@ impl BorrowChecker {
                 self.push_scope();
                 for s in stmts { self.check_stmt(s); }
                 self.pop_scope_with_drops();
+            }
+
+            Stmt::Asm(_) => {}
+
+            Stmt::Defer(expr) => {
+                self.check_expr_operand(expr, false);
             }
 
             Stmt::Break | Stmt::Continue => {}

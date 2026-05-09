@@ -139,10 +139,25 @@ impl Parser {
     // ── Program girişi ────────────────────────────────────────────────────────
 
     pub fn parse(&mut self) -> ParseResult<Module> {
+        let mut nostd = false;
+        while self.check(&Token::At) {
+            self.advance();
+            let ann = self.expect_ident()?;
+            match ann.as_str() {
+                "nostd" => { nostd = true; }
+                other => {
+                    let (line, col) = self.current_span();
+                    return Err(ParseError::new(
+                        &format!("unknown module annotation '@{}'", other),
+                        line, col,
+                    ));
+                }
+            }
+        }
         let path    = self.parse_module_decl()?;
         let imports = self.parse_imports()?;
         let items   = self.parse_items()?;
-        Ok(Module { path, imports, items })
+        Ok(Module { path, nostd, imports, items })
     }
 
     fn parse_module_decl(&mut self) -> ParseResult<String> {
@@ -185,23 +200,41 @@ impl Parser {
     // ── Üst düzey tanımlar ────────────────────────────────────────────────────
 
     fn parse_item(&mut self) -> ParseResult<Item> {
-        // @annotation
         let mut manual = false;
-        if self.eat(&Token::At) {
+        let mut packed = false;
+        let mut align: Option<usize> = None;
+
+        while self.check(&Token::At) {
+            self.advance();
             let annotation = self.expect_ident()?;
             match annotation.as_str() {
                 "manual" => { manual = true; }
+                "packed" => { packed = true; }
+                "align"  => {
+                    self.expect(&Token::LParen)?;
+                    match self.current().clone() {
+                        Token::Int(n) if n > 0 => { align = Some(n as usize); self.advance(); }
+                        _ => {
+                            let (line, col) = self.current_span();
+                            return Err(ParseError::new("@align expects a positive integer", line, col));
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                }
                 other => {
                     let (line, col) = self.current_span();
                     return Err(ParseError::new(
-                        &format!("unknown annotation '@{}' — @manual, @inline, @nostd destekleniyor", other),
+                        &format!("unknown item annotation '@{}'", other),
                         line, col,
                     ));
                 }
             }
         }
 
-        // type alias — visibility yok
+        if self.check(&Token::Extern) {
+            return self.parse_extern_block();
+        }
+
         if self.check(&Token::KwType) {
             return self.parse_type_alias_item();
         }
@@ -227,13 +260,14 @@ impl Parser {
                 }
                 Ok(Item::Class(class))
             }
-            Token::Struct    => Ok(Item::Struct(self.parse_struct(visibility)?)),
+            Token::Struct => Ok(Item::Struct(self.parse_struct(visibility, packed, align)?)),
             Token::Interface => Ok(Item::Interface(self.parse_interface()?)),
             Token::Enum      => Ok(Item::Enum(self.parse_enum(visibility)?)),
+            Token::Union     => Ok(Item::Union(self.parse_union(visibility)?)),
             _ => {
                 let (line, col) = self.current_span();
                 Err(ParseError::new(
-                    &format!("Expected class, struct, interface or enum, found {:?}", self.current()),
+                    &format!("Expected class, struct, interface, enum or union, found {:?}", self.current()),
                     line, col,
                 ))
             }
@@ -281,17 +315,32 @@ impl Parser {
         let mut methods     = Vec::new();
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
-            // @inline annotation
             let mut inline_ = false;
-            if self.check(&Token::At) {
+            let mut calling_conv: Option<CallingConv> = None;
+            let mut section: Option<String> = None;
+            while self.check(&Token::At) {
                 self.advance();
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
-                    "inline" => { inline_ = true; }
+                    "inline"    => { inline_ = true; }
+                    "cdecl"     => { calling_conv = Some(CallingConv::Cdecl); }
+                    "stdcall"   => { calling_conv = Some(CallingConv::Stdcall); }
+                    "interrupt" => { calling_conv = Some(CallingConv::Interrupt); }
+                    "section"   => {
+                        self.expect(&Token::LParen)?;
+                        match self.current().clone() {
+                            Token::Str(s) => { section = Some(s); self.advance(); }
+                            _ => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new("@section expects a string literal", line, col));
+                            }
+                        }
+                        self.expect(&Token::RParen)?;
+                    }
                     other => {
                         let (line, col) = self.current_span();
                         return Err(ParseError::new(
-                            &format!("unknown method annotation '@{}' — only @inline is supported here", other),
+                            &format!("unknown method annotation '@{}'", other),
                             line, col,
                         ));
                     }
@@ -309,7 +358,7 @@ impl Parser {
                 self.advance();
                 let op_sym = self.parse_operator_symbol()?;
                 let method_name = format!("operator{}", op_sym);
-                let method = self.parse_method_body(vis, static_, abstract_, override_, inline_, method_name, None)?;
+                let method = self.parse_method_body(vis, static_, abstract_, override_, inline_, calling_conv, section, method_name, None)?;
                 methods.push(method);
                 continue;
             }
@@ -326,7 +375,7 @@ impl Parser {
                             if *next == Token::LParen {
                                 self.advance();
                                 let method = self.parse_method_body(
-                                    vis, static_, abstract_, override_, inline_, iname, None
+                                    vis, static_, abstract_, override_, inline_, calling_conv, section, iname, None
                                 )?;
                                 methods.push(method);
                                 continue;
@@ -354,7 +403,7 @@ impl Parser {
 
                         if self.check(&Token::LParen) {
                             let method = self.parse_method_body(
-                                vis, static_, abstract_, override_, inline_, name, Some(ty)
+                                vis, static_, abstract_, override_, inline_, calling_conv, section, name, Some(ty)
                             )?;
                             methods.push(method);
                         } else {
@@ -389,13 +438,15 @@ impl Parser {
 
     fn parse_method_body(
         &mut self,
-        visibility : Visibility,
-        static_    : bool,
-        abstract_  : bool,
-        override_  : bool,
-        inline_    : bool,
-        name       : String,
-        return_ty  : Option<Type>,
+        visibility   : Visibility,
+        static_      : bool,
+        abstract_    : bool,
+        override_    : bool,
+        inline_      : bool,
+        calling_conv : Option<CallingConv>,
+        section      : Option<String>,
+        name         : String,
+        return_ty    : Option<Type>,
     ) -> ParseResult<Method> {
         let params = self.parse_params()?;
 
@@ -415,7 +466,7 @@ impl Parser {
             Some(stmts)
         };
 
-        Ok(Method { visibility, static_, abstract_, override_, inline_, name, params, return_ty, body })
+        Ok(Method { visibility, static_, abstract_, override_, inline_, calling_conv, section, name, params, return_ty, body })
     }
 
     fn parse_operator_symbol(&mut self) -> ParseResult<String> {
@@ -450,7 +501,7 @@ impl Parser {
 
     // ── Struct parser ─────────────────────────────────────────────────────────
 
-    fn parse_struct(&mut self, visibility: Visibility) -> ParseResult<StructDecl> {
+    fn parse_struct(&mut self, visibility: Visibility, packed: bool, align: Option<usize>) -> ParseResult<StructDecl> {
         self.expect(&Token::Struct)?;
         let name     = self.expect_ident()?;
         let generics = self.parse_generics_decl()?;
@@ -467,17 +518,32 @@ impl Parser {
         let mut methods     = Vec::new();
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
-            // @inline annotation
             let mut inline_ = false;
-            if self.check(&Token::At) {
+            let mut calling_conv: Option<CallingConv> = None;
+            let mut section: Option<String> = None;
+            while self.check(&Token::At) {
                 self.advance();
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
-                    "inline" => { inline_ = true; }
+                    "inline"    => { inline_ = true; }
+                    "cdecl"     => { calling_conv = Some(CallingConv::Cdecl); }
+                    "stdcall"   => { calling_conv = Some(CallingConv::Stdcall); }
+                    "interrupt" => { calling_conv = Some(CallingConv::Interrupt); }
+                    "section"   => {
+                        self.expect(&Token::LParen)?;
+                        match self.current().clone() {
+                            Token::Str(s) => { section = Some(s); self.advance(); }
+                            _ => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new("@section expects a string literal", line, col));
+                            }
+                        }
+                        self.expect(&Token::RParen)?;
+                    }
                     other => {
                         let (line, col) = self.current_span();
                         return Err(ParseError::new(
-                            &format!("unknown method annotation '@{}' — only @inline is supported here", other),
+                            &format!("unknown method annotation '@{}'", other),
                             line, col,
                         ));
                     }
@@ -494,7 +560,7 @@ impl Parser {
                 self.advance();
                 let op_sym = self.parse_operator_symbol()?;
                 let method_name = format!("operator{}", op_sym);
-                let method = self.parse_method_body(vis, static_, false, override_, inline_, method_name, None)?;
+                let method = self.parse_method_body(vis, static_, false, override_, inline_, calling_conv, section, method_name, None)?;
                 methods.push(method);
                 continue;
             }
@@ -511,7 +577,7 @@ impl Parser {
                             if *next == Token::LParen {
                                 self.advance();
                                 let method = self.parse_method_body(
-                                    vis, static_, false, override_, inline_, iname, None
+                                    vis, static_, false, override_, inline_, calling_conv, section, iname, None
                                 )?;
                                 methods.push(method);
                                 continue;
@@ -539,7 +605,7 @@ impl Parser {
                         let name = self.expect_ident()?;
                         if self.check(&Token::LParen) {
                             let method = self.parse_method_body(
-                                vis, static_, false, override_, inline_, name, Some(ty)
+                                vis, static_, false, override_, inline_, calling_conv, section, name, Some(ty)
                             )?;
                             methods.push(method);
                         } else {
@@ -561,7 +627,92 @@ impl Parser {
         }
 
         self.expect(&Token::RBrace)?;
-        Ok(StructDecl { visibility, name, generics, implements, fields, constructor, methods })
+        Ok(StructDecl { visibility, packed, align, name, generics, implements, fields, constructor, methods })
+    }
+
+    // ── Union parser ─────────────────────────────────────────────────────────
+
+    fn parse_union(&mut self, visibility: Visibility) -> ParseResult<UnionDecl> {
+        self.expect(&Token::Union)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::LBrace)?;
+        let mut fields = Vec::new();
+        while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
+            let vis   = self.parse_visibility()?;
+            let fname = self.expect_ident()?;
+            self.expect(&Token::Colon)?;
+            let ty = self.parse_type()?;
+            self.expect(&Token::Semicolon)?;
+            fields.push(Field { visibility: vis, readonly: false, static_: false, name: fname, ty, value: None });
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(UnionDecl { visibility, name, fields })
+    }
+
+    fn parse_extern_block(&mut self) -> ParseResult<Item> {
+        self.expect(&Token::Extern)?;
+        let abi = match self.current().clone() {
+            Token::Str(s) => { self.advance(); s }
+            _ => {
+                let (line, col) = self.current_span();
+                return Err(ParseError::new("extern expects ABI string, e.g. \"C\"", line, col));
+            }
+        };
+        self.expect(&Token::LBrace)?;
+        let mut decls = Vec::new();
+        while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
+            decls.push(self.parse_extern_decl()?);
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Item::Extern(ExternBlock { abi, decls }))
+    }
+
+    fn parse_extern_decl(&mut self) -> ParseResult<ExternDecl> {
+        let name = self.expect_ident()?;
+        self.expect(&Token::LParen)?;
+        let mut params   = Vec::new();
+        let mut variadic = false;
+        while !self.check(&Token::RParen) && !self.check(&Token::Eof) {
+            if self.check(&Token::Ellipsis) {
+                self.advance();
+                variadic = true;
+                break;
+            }
+            let pname = self.expect_ident()?;
+            self.expect(&Token::Colon)?;
+            let pty = self.parse_type()?;
+            params.push(ExternParam { name: pname, ty: pty });
+            if !self.check(&Token::RParen) {
+                self.eat(&Token::Comma);
+            }
+        }
+        self.expect(&Token::RParen)?;
+        let return_ty = if self.eat(&Token::Colon) { Some(self.parse_type()?) } else { None };
+        self.expect(&Token::Semicolon)?;
+        Ok(ExternDecl { name, params, return_ty, variadic })
+    }
+
+    fn parse_asm_block(&mut self) -> ParseResult<String> {
+        self.expect(&Token::LBrace)?;
+        let mut content = String::new();
+        let mut depth   = 1usize;
+        while depth > 0 && !self.check(&Token::Eof) {
+            match self.current().clone() {
+                Token::LBrace  => { depth += 1; content.push_str("{ "); self.advance(); }
+                Token::RBrace  => {
+                    depth -= 1;
+                    if depth > 0 { content.push_str("} "); }
+                    self.advance();
+                }
+                Token::Ident(s) => { content.push_str(&s); content.push(' '); self.advance(); }
+                Token::Int(n)   => { content.push_str(&n.to_string()); content.push(' '); self.advance(); }
+                Token::Comma    => { content.push_str(", "); self.advance(); }
+                Token::Semicolon => { content.push('\n'); self.advance(); }
+                Token::Colon    => { content.push_str(": "); self.advance(); }
+                _ => { self.advance(); }
+            }
+        }
+        Ok(content.trim().to_string())
     }
 
     // ── Interface parser ──────────────────────────────────────────────────────
@@ -582,15 +733,17 @@ impl Parser {
             self.expect(&Token::Semicolon)?;
 
             methods.push(Method {
-                visibility : Visibility::Public,
-                static_    : false,
-                abstract_  : true,
-                override_  : false,
-                inline_    : false,
+                visibility   : Visibility::Public,
+                static_      : false,
+                abstract_    : true,
+                override_    : false,
+                inline_      : false,
+                calling_conv : None,
+                section      : None,
                 name,
                 params,
-                return_ty  : Some(return_ty),
-                body       : None,
+                return_ty    : Some(return_ty),
+                body         : None,
             });
         }
 
@@ -634,7 +787,7 @@ impl Parser {
             let vis     = self.parse_visibility()?;
             let static_ = self.eat(&Token::Static);
             let name    = self.expect_ident()?;
-            let method  = self.parse_method_body(vis, static_, false, false, false, name, None)?;
+            let method  = self.parse_method_body(vis, static_, false, false, false, None, None, name, None)?;
             methods.push(method);
         }
 
@@ -647,7 +800,7 @@ impl Parser {
     fn is_type_token(&self) -> bool {
         matches!(self.current(),
             Token::TypeInteger | Token::TypeFloat | Token::TypeBoolean |
-            Token::TypeString  | Token::TypeVoid  | Token::TypeList    |
+            Token::TypeString  | Token::TypeVoid  | Token::TypeNoReturn | Token::TypeList |
             Token::TypeMap     | Token::TypeHashMap | Token::TypeTreeMap |
             Token::TypePair    | Token::TypeException | Token::TypeRawPtr |
             Token::TypeU8  | Token::TypeU16 | Token::TypeU32 | Token::TypeU64 |
@@ -686,6 +839,7 @@ impl Parser {
             Token::TypeBoolean   => { self.advance(); Type::Boolean }
             Token::TypeString    => { self.advance(); Type::Str     }
             Token::TypeVoid      => { self.advance(); Type::Void    }
+            Token::TypeNoReturn  => { self.advance(); Type::NoReturn }
             Token::TypeException => { self.advance(); Type::Named("Exception".to_string()) }
 
             Token::TypeU8  => { self.advance(); Type::U8  }
@@ -925,6 +1079,25 @@ impl Parser {
                 Ok(Stmt::ExprStmt(expr))
             }
 
+            Token::Asm => {
+                self.advance();
+                let content = self.parse_asm_block()?;
+                Ok(Stmt::Asm(content))
+            }
+            Token::Defer => {
+                self.advance();
+                let expr = self.parse_expr(0)?;
+                self.expect(&Token::Semicolon)?;
+                Ok(Stmt::Defer(Box::new(expr)))
+            }
+            Token::Volatile => {
+                self.advance();
+                let ty   = self.parse_type()?;
+                let name = self.expect_ident()?;
+                let value = if self.eat(&Token::Eq) { Some(self.parse_expr(0)?) } else { None };
+                self.expect(&Token::Semicolon)?;
+                Ok(Stmt::VarDecl { volatile: true, ty, name, value })
+            }
             Token::Break    => { self.advance(); self.expect(&Token::Semicolon)?; Ok(Stmt::Break)    }
             Token::Continue => { self.advance(); self.expect(&Token::Semicolon)?; Ok(Stmt::Continue) }
 
@@ -952,10 +1125,11 @@ impl Parser {
             Some(self.parse_expr(0)?)
         } else { None };
         self.expect(&Token::Semicolon)?;
-        Ok(Stmt::VarDecl { ty, name, value })
+        Ok(Stmt::VarDecl { volatile: false, ty, name, value })
     }
 
     fn is_var_decl(&self) -> bool {
+        if self.check(&Token::Volatile) { return true; }
         // Function pointer var decl: (T, ...) -> R name = ...
         if self.check(&Token::LParen) {
             return self.is_fn_ptr_type_ahead();
@@ -1047,6 +1221,7 @@ impl Parser {
             self.expect(&Token::RBrace)?;
 
             let init = Box::new(Stmt::VarDecl {
+                volatile: false,
                 ty,
                 name,
                 value: Some(init_val),

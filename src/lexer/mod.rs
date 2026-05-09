@@ -92,6 +92,19 @@ pub enum Token {
     As,        // as  — type cast
     KwType,    // type — type alias declaration
 
+    // ── Systems & Performance keywords ───────────────────────────────────────
+    Volatile,       // volatile
+    Union,          // union
+    Extern,         // extern
+    Asm,            // asm
+    Defer,          // defer
+
+    // ── Additional type keywords ─────────────────────────────────────────────
+    TypeNoReturn,   // noreturn
+
+    // ── Variadic ─────────────────────────────────────────────────────────────
+    Ellipsis,       // ...
+
     // ── Operators ────────────────────────────────────────────────────────
     Plus,
     Minus,
@@ -372,6 +385,14 @@ impl<'a> Lexer<'a> {
             "as"          => Token::As,
             "type"        => Token::KwType,
 
+            // Systems & Performance
+            "volatile"  => Token::Volatile,
+            "union"     => Token::Union,
+            "extern"    => Token::Extern,
+            "asm"       => Token::Asm,
+            "defer"     => Token::Defer,
+            "noreturn"  => Token::TypeNoReturn,
+
             _             => Token::Ident(word),
         }
     }
@@ -534,7 +555,15 @@ impl<'a> Lexer<'a> {
                     '?' => if self.peek() == Some('.') { self.advance(); Token::QuestionDot } else { Token::Question },
 
                     ':' => Token::Colon,
-                    '.' => Token::Dot,
+                    '.' => {
+                        if self.peek() == Some('.') && self.peek_next() == Some('.') {
+                            self.advance();
+                            self.advance();
+                            Token::Ellipsis
+                        } else {
+                            Token::Dot
+                        }
+                    },
 
                     '(' => Token::LParen,
                     ')' => Token::RParen,

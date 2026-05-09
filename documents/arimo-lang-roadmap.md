@@ -1,6 +1,5 @@
 # Arimo Lang — Yol Haritası
 
-> Bu belge bir sonraki Claude Code oturumu için tam bağlam içerir.
 > Proje detayları: `arimo-lang-task-list.md`
 
 ---
@@ -60,103 +59,9 @@ Modern bir programlama dili:
 
 ---
 
-## FAZA 2 — CodeGen (LLVM / inkwell) ⬜ SIRADA
+## FAZA 2 — Systems Desteği ⬜ SIRADA
 
-**Bağımlılık:**
-```toml
-[dependencies]
-inkwell = { version = "0.4", features = ["llvm17-0"] }
-```
-
-### 2.1 Temel Altyapı
-- [ ] `src/codegen/mod.rs` — CodeGen struct, LLVM context/module/builder
-- [ ] Type mapping: Arimo tipi → LLVM tipi
-  ```
-  Integer   → i64      Float     → f64
-  Boolean   → i1       String    → { i8*, i64 }
-  Void      → void
-  u8/i8     → i8       u16/i16   → i16
-  u32/i32   → i32      u64/i64   → i64
-  RawPtr<T> → T*       Array<T,N> → [N x T]
-  Slice<T>  → { T*, i64 }
-  FnPtr     → function pointer
-  struct    → LLVM struct (stack-allocated)
-  ```
-- [ ] Primitif literal kod üretimi
-- [ ] Aritmetik ve bitwise operatörler
-
-### 2.2 Bellek Yönetimi
-- [ ] **Katman 1 (BorrowChecker Zone):** scope çıkışında `free()` insert
-  - BorrowChecker'ın `drop_schedule` kullan
-  - LIFO sırasında LLVM `free` call insert
-- [ ] **Katman 2 (ARC):** escape analysis + refcount
-  - Her heap objesi için `{ refcount: i64, data: T }` struct
-  - Constructor → `alloc + refcount=1`
-  - Method arg → `retain(ptr)` + call + `release(ptr)`
-  - Scope çıkış → `release(ptr)`, 0 ise `free(ptr)`
-- [ ] **Katman 3 (GC):** döngüsel referans tespiti — sonraya bırak
-
-### 2.3 Fonksiyon & Metot Üretimi
-- [ ] Static metot → LLVM function
-- [ ] Instance metot → LLVM function (ilk param: `this` pointer)
-- [ ] Constructor → alloc + field init + return pointer
-- [ ] `main()` → LLVM `main` entry point
-- [ ] Operator methods → LLVM function (operator+ gibi)
-
-### 2.4 Kontrol Akışı
-- [ ] if/else → LLVM branch
-- [ ] while → LLVM loop
-- [ ] for-each → iterator pattern
-- [ ] klasik for → counter loop
-- [ ] switch/match → LLVM switch veya chain of branches
-
-### 2.5 Runtime Kütüphane (arc_runtime)
-```
-arc_alloc(size: u64) → void*      // malloc wrapper
-arc_free(ptr: void*)              // free wrapper
-arc_retain(ptr: void*)            // refcount++
-arc_release(ptr: void*)           // refcount--, free if 0
-arc_print(str: char*, len: i64)   // IO.print impl
-arc_panic(msg: char*, line: u32)  // hata ve exit
-arc_str_concat(...)               // string interpolation
-```
-
-### 2.6 @manual Sınıflar
-- [ ] `Memory.alloc(n)` → `malloc(n)` LLVM call
-- [ ] `Memory.free(ptr)` → `free(ptr)` LLVM call
-- [ ] Drop schedule üretilmez (BorrowChecker zaten atlıyor)
-
-### 2.7 String
-- [ ] String literal → global LLVM constant
-- [ ] String interpolation → arc_str_concat
-- [ ] String metodları → runtime impl
-
-### 2.8 Koleksiyonlar
-- [ ] `List<T>` → dynamic array impl (arc_list_*)
-- [ ] `HashMap<K,V>` → hash table impl (arc_map_*)
-- [ ] Koleksiyon metodları → runtime call
-
-### 2.9 Exception + match
-- [ ] `throw` → `longjmp` veya LLVM `landingpad`
-- [ ] `try/catch` → LLVM exception handling
-- [ ] `match` → LLVM switch + pattern destructure
-
-### 2.10 Struct & Array CodeGen
-- [ ] `struct` → LLVM struct type, stack alloca
-- [ ] `Array<T,N>` → LLVM `[N x T]` alloca
-- [ ] `Slice<T>` → LLVM `{ T*, i64 }` pair
-- [ ] Operator methods → normal LLVM function call
-
-### 2.11 Output
-- [ ] Object file üretimi (`.o`)
-- [ ] Native binary (linker çağrısı)
-- [ ] `arc file.arm` → `./file` (Linux/macOS/Windows)
-
----
-
-## FAZA 3 — Systems Desteği ⬜
-
-### 3.1 Bellek Layout Kontrol
+### 2.1 Bellek Layout Kontrol
 ```arimo
 @packed
 public struct PacketHeader {
@@ -174,7 +79,7 @@ public struct SimdVec {
 - AST: StructDecl'da `packed: bool`, `align: Option<usize>`
 - CodeGen: LLVM struct packed layout, alignment attribute
 
-### 3.2 volatile Keyword
+### 2.2 volatile Keyword
 ```arimo
 // Memory-mapped I/O için
 volatile u32 status = hardware_register.read();
@@ -184,7 +89,7 @@ volatile u32 status = hardware_register.read();
 - CodeGen: LLVM `volatile load/store`
 - Sadece `@manual` sınıflar ve `@nostd` modüllerde kullanım tavsiyesi
 
-### 3.3 union Type
+### 2.3 union Type
 ```arimo
 public union Register {
     full  : u32;
@@ -197,7 +102,7 @@ public union Register {
 - TypeChecker: union erişimi `@manual` gerektiriyor
 - CodeGen: LLVM union layout
 
-### 3.4 C FFI
+### 2.4 C FFI
 ```arimo
 extern "C" {
     printf(fmt: RawPtr<u8>, ...) : i32;
@@ -210,7 +115,7 @@ extern "C" {
 - CodeGen: LLVM `declare` + C calling convention
 - Variadics (`...`) desteği
 
-### 3.5 Inline Assembly
+### 2.5 Inline Assembly
 ```arimo
 @manual
 public class Syscall {
@@ -228,7 +133,7 @@ public class Syscall {
 - AST: `Stmt::Asm(String)`
 - CodeGen: LLVM inline asm
 
-### 3.6 @nostd + @section + Calling Conventions
+### 2.6 @nostd + @section + Calling Conventions
 ```arimo
 @nostd
 module kernel.boot;
@@ -241,7 +146,7 @@ public static _start() : Void { ... }
 - `@section(".text.init")` → linker section
 - `@cdecl`, `@stdcall`, `@interrupt` → calling convention
 
-### 3.7 noreturn
+### 2.7 noreturn
 ```arimo
 public static panic(msg: String) : noreturn {
     IO.print(msg);
@@ -253,9 +158,9 @@ public static panic(msg: String) : noreturn {
 
 ---
 
-## FAZA 4 — Performance Desteği ⬜
+## FAZA 3 — Performance Desteği ⬜
 
-### 4.1 SIMD
+### 3.1 SIMD
 ```arimo
 Vec4f a = Vec4f(1.0, 2.0, 3.0, 4.0);
 Vec4f b = Vec4f(5.0, 6.0, 7.0, 8.0);
@@ -265,7 +170,7 @@ Vec4f c = a + b;   // LLVM SIMD instruction
 - Operator overloading ile LLVM vectorized operations
 - CodeGen: LLVM vector types
 
-### 4.2 Branch Prediction Hints
+### 3.2 Branch Prediction Hints
 ```arimo
 if @likely (fast_path) { ... }
 if @unlikely (error_path) { ... }
@@ -273,7 +178,7 @@ if @unlikely (error_path) { ... }
 - Lexer: `@likely`, `@unlikely` expression annotation
 - CodeGen: LLVM `branch_weights` metadata
 
-### 4.3 Interface Default Methods
+### 3.3 Interface Default Methods
 ```arimo
 interface Updatable {
     update(dt: Float) : Void;
@@ -288,7 +193,7 @@ interface Updatable {
 - AST: Method'da `default_: bool` (body olan interface metodu)
 - TypeChecker: default metotlar override edilmeyebilir
 
-### 4.4 defer Statement
+### 3.4 defer Statement
 ```arimo
 public static openFile(path: String) : Void {
     File f = File.open(path);
@@ -300,7 +205,7 @@ public static openFile(path: String) : Void {
 - AST: `Stmt::Defer(Expr)`
 - CodeGen: scope çıkışında, LIFO sırasında çalıştır
 
-### 4.5 async/await
+### 3.5 async/await
 ```arimo
 public async fetchUser(id: String) : User? {
     Response res = await Http.get("/users/${id}");
@@ -311,6 +216,97 @@ public async fetchUser(id: String) : User? {
 - Lexer: `Token::Async`, `Token::Await`
 - AST: `async_: bool` on Method, `Expr::Await`
 - CodeGen: state machine veya poll model
+
+---
+
+## FAZA 4 — CodeGen (LLVM / inkwell) ⬜
+
+**Bağımlılık:**
+```toml
+[dependencies]
+inkwell = { version = "0.4", features = ["llvm17-0"] }
+```
+
+### 4.1 Temel Altyapı
+- [ ] `src/codegen/mod.rs` — CodeGen struct, LLVM context/module/builder
+- [ ] Type mapping: Arimo tipi → LLVM tipi
+  ```
+  Integer   → i64      Float     → f64
+  Boolean   → i1       String    → { i8*, i64 }
+  Void      → void
+  u8/i8     → i8       u16/i16   → i16
+  u32/i32   → i32      u64/i64   → i64
+  RawPtr<T> → T*       Array<T,N> → [N x T]
+  Slice<T>  → { T*, i64 }
+  FnPtr     → function pointer
+  struct    → LLVM struct (stack-allocated)
+  union     → LLVM union layout
+  ```
+- [ ] Primitif literal kod üretimi
+- [ ] Aritmetik ve bitwise operatörler
+
+### 4.2 Bellek Yönetimi
+- [ ] **Katman 1 (BorrowChecker Zone):** scope çıkışında `free()` insert
+- [ ] **Katman 2 (ARC):** escape analysis + refcount
+- [ ] **Katman 3 (GC):** döngüsel referans tespiti — sonraya bırak
+
+### 4.3 Fonksiyon & Metot Üretimi
+- [ ] Static metot → LLVM function
+- [ ] Instance metot → LLVM function (ilk param: `this` pointer)
+- [ ] Constructor → alloc + field init + return pointer
+- [ ] `main()` → LLVM `main` entry point
+- [ ] Operator methods → LLVM function
+
+### 4.4 Kontrol Akışı
+- [ ] if/else → LLVM branch
+- [ ] while → LLVM loop
+- [ ] for-each → iterator pattern
+- [ ] klasik for → counter loop
+- [ ] switch/match → LLVM switch veya chain of branches
+- [ ] defer → scope çıkışında LIFO
+
+### 4.5 Runtime Kütüphane (arc_runtime)
+```
+arc_alloc(size: u64) → void*
+arc_free(ptr: void*)
+arc_retain(ptr: void*)
+arc_release(ptr: void*)
+arc_print(str: char*, len: i64)
+arc_panic(msg: char*, line: u32)
+arc_str_concat(...)
+```
+
+### 4.6 Systems CodeGen
+- [ ] `volatile load/store` — LLVM volatile flag
+- [ ] `union` → LLVM union layout (max field size)
+- [ ] `extern "C"` → LLVM `declare` + C calling convention
+- [ ] `asm {}` → LLVM inline asm
+- [ ] `@nostd` → `-nostdlib` linker flag
+- [ ] `@section` → LLVM section attribute
+- [ ] `@cdecl` / `@stdcall` / `@interrupt` → calling convention
+- [ ] `noreturn` → LLVM `unreachable` terminator
+- [ ] `@packed` → LLVM packed struct
+- [ ] `@align(N)` → LLVM alignment attribute
+
+### 4.7 Performance CodeGen
+- [ ] SIMD types → LLVM vector types
+- [ ] `@likely` / `@unlikely` → LLVM branch_weights metadata
+- [ ] `async/await` → state machine transform
+
+### 4.8 String & Koleksiyonlar
+- [ ] String literal → global LLVM constant
+- [ ] String interpolation → arc_str_concat
+- [ ] `List<T>` → arc_list_*
+- [ ] `HashMap<K,V>` → arc_map_*
+
+### 4.9 Exception
+- [ ] `throw` → LLVM `landingpad`
+- [ ] `try/catch` → LLVM exception handling
+
+### 4.10 Output
+- [ ] Object file üretimi (`.o`)
+- [ ] Native binary (linker çağrısı)
+- [ ] `arc file.arm` → `./file`
 
 ---
 
@@ -331,7 +327,6 @@ public async fetchUser(id: String) : User? {
 ## Önemli Notlar Yeni Oturum İçin
 
 ### Commit kuralı
-- `Co-Authored-By: Claude` satırı ASLA ekleme
 - Merge commit bırakma — cherry-pick kullan
 - Worktree branch'ini master'a cherry-pick ile aktar
 
