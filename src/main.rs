@@ -15,12 +15,16 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("arc v0.2.0");
-        eprintln!("Usage: arc <file.arm>");
+        eprintln!("arc v0.3.0");
+        eprintln!("Usage: arc <file.arm> [--emit-ir]");
         process::exit(1);
     }
 
-    let path = &args[1];
+    let emit_ir = args.contains(&"--emit-ir".to_string());
+    let path = args.iter().find(|a| a.ends_with(".arm")).unwrap_or_else(|| {
+        eprintln!("error: no .arm source file provided");
+        process::exit(1);
+    });
 
     if !path.ends_with(".arm") {
         eprintln!("error: source file must have .arm extension");
@@ -142,35 +146,52 @@ fn main() {
     let obj_path = format!("{}.o", stem);
     let exe_path = format!("{}.exe", stem);
 
-    print!("arc: codegen ...");
+    // --emit-ir: sadece LLVM IR göster, binary üretme
+    if emit_ir {
+        let ir = codegen::emit_ir_only(&module, stem);
+        match ir {
+            Ok(text) => { println!("\n; === LLVM IR ===\n{}", text); }
+            Err(e)   => { eprintln!("arc: ir error — {}", e); process::exit(1); }
+        }
+        return;
+    }
+
+    // Geçici .o dosyası — kullanıcıya gösterilmez, sonra silinir
+    let obj_path = std::env::temp_dir()
+        .join(format!("{}.o", stem))
+        .to_string_lossy()
+        .to_string();
+
+    print!("arc: compiling  ...");
     match codegen::compile_to_object(&module, stem, Path::new(&obj_path)) {
         Ok(()) => {
-            println!(" OK");
-            println!("arc: object file → {}", obj_path);
+            print!(" linking ...");
 
-            // Linker: gcc ile native binary üret
+            // Linker: gcc ile native binary üret (arc içinde, kullanıcı görmez)
             let linker_status = std::process::Command::new("gcc")
                 .args([&obj_path, "-o", &exe_path, "-lm"])
                 .status();
 
+            // Geçici .o dosyasını sil
+            let _ = fs::remove_file(&obj_path);
+
             match linker_status {
                 Ok(s) if s.success() => {
-                    println!("arc: linked     → {}", exe_path);
-                    println!("arc: done ✓");
+                    println!(" OK");
+                    println!("arc: → {}", exe_path);
                 }
                 Ok(s) => {
-                    eprintln!("arc: linker failed (exit {})", s);
+                    eprintln!("\narc: linker failed (exit {})", s);
                     process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("arc: linker not found — {}", e);
-                    eprintln!("arc: install gcc and add to PATH");
+                    eprintln!("\narc: linker not found — {}", e);
                     process::exit(1);
                 }
             }
         }
         Err(e) => {
-            eprintln!("arc: codegen error — {}", e);
+            eprintln!("\narc: codegen error — {}", e);
             process::exit(1);
         }
     }

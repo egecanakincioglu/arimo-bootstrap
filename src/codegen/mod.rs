@@ -1334,6 +1334,16 @@ impl<'ctx> CodeGen<'ctx> {
 // Giriş noktası: .arm → .o üretimi
 // ─────────────────────────────────────────────────────────────────────────────
 
+pub fn emit_ir_only(
+    module_ast  : &crate::ast::Module,
+    module_name : &str,
+) -> Result<String, CodeGenError> {
+    let ctx = Context::create();
+    let mut cg = CodeGen::new(&ctx, module_name);
+    cg.compile_module(module_ast)?;
+    Ok(cg.emit_ir())
+}
+
 pub fn compile_to_object(
     module_ast  : &crate::ast::Module,
     module_name : &str,
