@@ -53,7 +53,8 @@ type CgResult<T> = Result<T, CodeGenError>;
 struct VarSlot<'ctx> {
     ptr        : PointerValue<'ctx>,
     ty         : BasicTypeEnum<'ctx>,
-    class_name : Option<String>,   // class instance değişkenleri için
+    class_name : Option<String>,   // class instance veya "__List"/"__HashMap"/"__Pair"
+    elem_class : Option<String>,   // List<T> için T'nin class adı
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,6 +83,8 @@ pub struct CodeGen<'ctx> {
     static_fields : HashMap<String, inkwell::values::GlobalValue<'ctx>>,
     // Field Arimo tipleri: class adı → field adı → tür adı (method dispatch için)
     field_arimo_types : HashMap<String, HashMap<String, String>>,
+    // Lambda fonksiyonları için benzersiz sayaç
+    lambda_counter    : usize,
 }
 
 impl<'ctx> CodeGen<'ctx> {
@@ -101,6 +104,7 @@ impl<'ctx> CodeGen<'ctx> {
             enum_variants : HashMap::new(),
             static_fields         : HashMap::new(),
             field_arimo_types     : HashMap::new(),
+            lambda_counter        : 0,
         }
     }
 
@@ -126,7 +130,36 @@ impl<'ctx> CodeGen<'ctx> {
         class_name : Option<String>,
     ) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), VarSlot { ptr, ty, class_name });
+            scope.insert(name.to_string(), VarSlot { ptr, ty, class_name, elem_class: None });
+        }
+    }
+
+    fn define_collection_var(
+        &mut self,
+        name       : &str,
+        ptr        : PointerValue<'ctx>,
+        ty         : BasicTypeEnum<'ctx>,
+        class_name : Option<String>,
+        elem_class : Option<String>,
+    ) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), VarSlot { ptr, ty, class_name, elem_class });
+        }
+    }
+
+    fn infer_elem_class(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(name) => {
+                for scope in self.scopes.iter().rev() {
+                    if let Some(slot) = scope.get(name.as_str()) {
+                        if slot.elem_class.is_some() {
+                            return slot.elem_class.clone();
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -154,6 +187,11 @@ impl<'ctx> CodeGen<'ctx> {
             Type::U32 | Type::I32 => Some(self.ctx.i32_type().into()),
             Type::U64 | Type::I64 => Some(self.ctx.i64_type().into()),
             Type::RawPtr(_)       => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
+            // Koleksiyon tipleri — opaque pointer
+            Type::List(_) | Type::Map(..) | Type::HashMap(..) | Type::TreeMap(..)
+            | Type::Pair(..) | Type::Slice(_) | Type::Array(..)
+                => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
+            Type::Generic(_, _)   => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
             Type::Nullable(inner) => self.llvm_type(inner),
             // Enum tipler → i32 integer
             Type::Named(n) if self.is_enum(n) => Some(self.ctx.i32_type().into()),
@@ -184,9 +222,10 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // printf + malloc her zaman lazım
+        // printf + malloc + koleksiyon runtime her zaman lazım
         self.declare_printf();
         self.declare_malloc();
+        self.declare_collection_runtime();
 
         // Geçiş 0: enum variant'larını kayıt et
         for item in &module.items {
@@ -765,15 +804,26 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             Stmt::VarDecl { ty, name, value, .. } => {
-                // Class instance için class adını kaydet
-                let class_name = match ty {
+                // Koleksiyon tipi mi?
+                let (class_name, elem_class) = match ty {
                     Type::Named(n) if self.struct_types.contains_key(n.as_str()) => {
-                        Some(n.clone())
+                        (Some(n.clone()), None)
                     }
-                    _ => None,
+                    Type::List(inner) => {
+                        let ec = match inner.as_ref() {
+                            Type::Named(n) => Some(n.clone()),
+                            _ => None,
+                        };
+                        (Some("__List".to_string()), ec)
+                    }
+                    Type::HashMap(..) | Type::Map(..) | Type::TreeMap(..) => {
+                        (Some("__HashMap".to_string()), None)
+                    }
+                    Type::Pair(..) => (Some("__Pair".to_string()), None),
+                    _ => (None, None),
                 };
 
-                // Enum tip → i32, class instance → pointer, diğerleri → direkt tip
+                // Enum tip → i32, class/collection instance → pointer, diğerleri → direkt tip
                 let llvm_ty = if class_name.is_some() {
                     Some(BasicTypeEnum::from(self.ctx.ptr_type(AddressSpace::default())))
                 } else if let Type::Named(n) = ty {
@@ -796,7 +846,11 @@ impl<'ctx> CodeGen<'ctx> {
                                 .map_err(|e| CodeGenError::new(e.to_string()))?;
                         }
                     }
-                    self.define_var_with_class(name, alloca, llvm_ty, class_name);
+                    if elem_class.is_some() || matches!(class_name.as_deref(), Some("__List" | "__HashMap" | "__Pair")) {
+                        self.define_collection_var(name, alloca, llvm_ty, class_name, elem_class);
+                    } else {
+                        self.define_var_with_class(name, alloca, llvm_ty, class_name);
+                    }
                 }
                 Ok(false)
             }
@@ -819,9 +873,7 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             Stmt::ForEach { ty, name, iter, body } => {
-                // ForEach: koleksiyonlar üzerinde — şimdilik pass
-                let _ = (ty, name, iter, body);
-                Ok(false)
+                self.compile_for_each(ty, name, iter, body)
             }
 
             Stmt::Block(stmts) => {
@@ -1091,16 +1143,7 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(g.into()))
             }
             Expr::StrInterp(parts) => {
-                // String interpolation: şimdilik sadece ilk metin kısmını al
-                let mut result = String::new();
-                for part in parts {
-                    match part {
-                        StringPart::Text(t) => result.push_str(t),
-                        StringPart::Interp(_) => result.push_str("%s"),
-                    }
-                }
-                let g = self.build_global_string(&result)?;
-                Ok(Some(g.into()))
+                self.compile_str_interp(parts)
             }
             Expr::NullLit => {
                 let v = self.ctx.ptr_type(AddressSpace::default()).const_null();
@@ -1140,6 +1183,14 @@ impl<'ctx> CodeGen<'ctx> {
 
             // ── Instance metod çağrısı ─────────────────────────────────────────
             Expr::MethodCall { object, method, args } => {
+                // Koleksiyon metod kontrolü
+                let obj_class = self.infer_object_class(object);
+                if let Some(cls) = obj_class.as_deref() {
+                    if matches!(cls, "__List" | "__HashMap" | "__Pair") {
+                        let cls_owned = cls.to_string();
+                        return self.compile_collection_method(object, &cls_owned, method, args);
+                    }
+                }
                 // IO.print gibi statik benzer çağrılar da buraya düşebilir
                 if let Expr::Ident(class_name) = object.as_ref() {
                     // Statik metod gibi çağrı (nesne ismi ile)
@@ -1155,6 +1206,45 @@ impl<'ctx> CodeGen<'ctx> {
 
             // ── Constructor çağrısı ───────────────────────────────────────────
             Expr::ConstructorCall { class, args } => {
+                // Koleksiyon constructor'ları
+                match class.as_str() {
+                    "List" | "List.of" | "List.empty" => {
+                        let f = self.module.get_function("arc_list_new").unwrap();
+                        let call = self.builder.build_call(f, &[], "list")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        return Ok(call.try_as_basic_value().basic());
+                    }
+                    "HashMap" | "TreeMap" | "HashMap.of" | "HashMap.create"
+                    | "TreeMap.create" => {
+                        let f = self.module.get_function("arc_map_new").unwrap();
+                        let call = self.builder.build_call(f, &[], "map")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        return Ok(call.try_as_basic_value().basic());
+                    }
+                    "Pair" | "Pair.of" => {
+                        let compiled: Vec<BasicValueEnum<'ctx>> = args.iter()
+                            .filter_map(|a| self.compile_expr(a).ok().flatten())
+                            .collect();
+                        let fst_raw = compiled.get(0).copied();
+                        let snd_raw = compiled.get(1).copied();
+                        let fst = if let Some(v) = fst_raw {
+                            self.value_to_i64(v)?
+                        } else {
+                            self.ctx.i64_type().const_int(0, false)
+                        };
+                        let snd = if let Some(v) = snd_raw {
+                            self.value_to_i64(v)?
+                        } else {
+                            self.ctx.i64_type().const_int(0, false)
+                        };
+                        let f = self.module.get_function("arc_pair_new").unwrap();
+                        let call = self.builder.build_call(f, &[fst.into(), snd.into()], "pair")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        return Ok(call.try_as_basic_value().basic());
+                    }
+                    _ => {}
+                }
+
                 let ctor_name = format!("{}_new", class);
                 let compiled: Vec<BasicValueEnum<'ctx>> = args.iter()
                     .filter_map(|a| self.compile_expr(a).ok().flatten())
@@ -1169,7 +1259,6 @@ impl<'ctx> CodeGen<'ctx> {
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     Ok(call.try_as_basic_value().basic())
                 } else {
-                    // Struct tipi bilinen ama constructor'ı olmayan case
                     Ok(None)
                 }
             }
@@ -1296,6 +1385,94 @@ impl<'ctx> CodeGen<'ctx> {
             }
             Expr::NullSafeAccess { .. } => Ok(None),
         }
+    }
+
+    // ── String interpolation → sprintf tabanlı string üretimi ────────────────
+    //
+    // IO.print içinde StrInterp doğrudan printf ile işlenir.
+    // Diğer bağlamlarda (return, VarDecl) sprintf ile gerçek string üretilir.
+
+    fn compile_str_interp(
+        &mut self,
+        parts: &[StringPart],
+    ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
+        // sprintf'i bildir
+        if self.module.get_function("sprintf").is_none() {
+            let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+            let i32_ty = self.ctx.i32_type();
+            let ft = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], true);
+            self.module.add_function("sprintf", ft, None);
+        }
+
+        let mut fmt_str   = String::new();
+        let mut interp_vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+
+        for part in parts {
+            match part {
+                StringPart::Text(t) => {
+                    fmt_str.push_str(&t.replace('%', "%%"));
+                }
+                StringPart::Interp(inner_expr) => {
+                    if let Some(val) = self.compile_expr(inner_expr)? {
+                        let spec = match val {
+                            BasicValueEnum::IntValue(iv) => {
+                                match iv.get_type().get_bit_width() {
+                                    64 => "%lld",
+                                    _  => "%d",
+                                }
+                            }
+                            BasicValueEnum::FloatValue(_) => "%g",
+                            BasicValueEnum::PointerValue(_) => "%s",
+                            _ => "%d",
+                        };
+                        fmt_str.push_str(spec);
+                        // float promote, i8/i16 → i32
+                        let promoted = match val {
+                            BasicValueEnum::FloatValue(f) => {
+                                let f64ty = self.ctx.f64_type();
+                                if f.get_type().get_bit_width() < 64 {
+                                    self.builder.build_float_ext(f, f64ty, "fpext")
+                                        .map_err(|e| CodeGenError::new(e.to_string()))?.into()
+                                } else { val }
+                            }
+                            BasicValueEnum::IntValue(iv)
+                                if iv.get_type().get_bit_width() < 32 =>
+                            {
+                                let i32ty = self.ctx.i32_type();
+                                self.builder.build_int_s_extend(iv, i32ty, "sext")
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?.into()
+                            }
+                            _ => val,
+                        };
+                        interp_vals.push(promoted);
+                    } else {
+                        fmt_str.push_str("(null)");
+                    }
+                }
+            }
+        }
+
+        // malloc(1024) — heap buffer, fonksiyon sonrasında da geçerli
+        let malloc_fn = self.module.get_function("malloc").unwrap();
+        let i64_ty    = self.ctx.i64_type();
+        let sz        = i64_ty.const_int(1024, false);
+        let buf_call  = self.builder.build_call(malloc_fn, &[sz.into()], "interp_buf")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let buf_ptr = match buf_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::PointerValue(p)) => p,
+            _ => return Ok(None),
+        };
+
+        // sprintf(buf, fmt, args...)
+        let fmt_ptr = self.build_global_string(&fmt_str)?;
+        let sprintf_fn = self.module.get_function("sprintf").unwrap();
+        let mut sprintf_args: Vec<inkwell::values::BasicMetadataValueEnum> =
+            vec![buf_ptr.into(), fmt_ptr.into()];
+        for v in interp_vals { sprintf_args.push(v.into()); }
+        self.builder.build_call(sprintf_fn, &sprintf_args, "")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        Ok(Some(buf_ptr.into()))
     }
 
     // ── IO.print() ───────────────────────────────────────────────────────────
@@ -1444,6 +1621,596 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(None)
             }
         }
+    }
+
+    // ── Koleksiyon runtime — saf LLVM IR olarak üretilir ─────────────────────
+    //
+    // Flat-array düzeni (basit, yeterli):
+    //   ArcList  : malloc(8 * 257)  — [0]=len, [1..256]=data
+    //   ArcMap   : malloc(8 * 129)  — [0]=len, [1+i*2]=key_ptr, [2+i*2]=val_i64
+    //   ArcPair  : malloc(16)       — [0]=fst, [1]=snd  (i64 olarak)
+    //
+    // Her fonksiyon arc_generate_id gibi builder ile üretilir.
+    // Pipeline değişmez: .arm → LLVM IR → .o → .exe
+
+    fn declare_collection_runtime(&mut self) {
+        // Önce gerekli extern'leri bildir
+        self.declare_malloc();
+        self.declare_strcmp();
+
+        // İmzaları önceden kayıt et (diğer fonksiyonlardan çağırabilmek için)
+        self.pre_declare_arc_runtime_fns();
+
+        // Fonksiyon gövdelerini üret
+        let prev = self.builder.get_insert_block();
+
+        self.gen_arc_list_new();
+        self.gen_arc_list_append();
+        self.gen_arc_list_length();
+        self.gen_arc_list_get();
+        self.gen_arc_list_filter();
+        self.gen_arc_map_new();
+        self.gen_arc_map_set();
+        self.gen_arc_map_get_or_default();
+        self.gen_arc_pair_new();
+        self.gen_arc_pair_first();
+        self.gen_arc_pair_second();
+
+        if let Some(bb) = prev { self.builder.position_at_end(bb); }
+    }
+
+    fn declare_strcmp(&mut self) {
+        if self.module.get_function("strcmp").is_some() { return; }
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let i32_ty = self.ctx.i32_type();
+        let ft = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        self.module.add_function("strcmp", ft, None);
+    }
+
+    fn pre_declare_arc_runtime_fns(&mut self) {
+        let ptr_ty  = self.ctx.ptr_type(AddressSpace::default());
+        let i64_ty  = self.ctx.i64_type();
+        let void_ty = self.ctx.void_type();
+
+        let decls: &[(&str, bool, &[inkwell::types::BasicMetadataTypeEnum], bool)] = &[
+            // (name, returns_ptr, params, is_void)
+        ];
+        let _ = decls;
+
+        macro_rules! decl {
+            ($name:expr, ptr, [$($p:expr),*]) => {
+                if self.module.get_function($name).is_none() {
+                    let ps: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![$($p),*];
+                    self.module.add_function($name, ptr_ty.fn_type(&ps, false), None);
+                }
+            };
+            ($name:expr, i64, [$($p:expr),*]) => {
+                if self.module.get_function($name).is_none() {
+                    let ps: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![$($p),*];
+                    self.module.add_function($name, i64_ty.fn_type(&ps, false), None);
+                }
+            };
+            ($name:expr, void, [$($p:expr),*]) => {
+                if self.module.get_function($name).is_none() {
+                    let ps: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![$($p),*];
+                    self.module.add_function($name, void_ty.fn_type(&ps, false), None);
+                }
+            };
+        }
+
+        decl!("arc_list_new",    ptr,  []);
+        decl!("arc_list_append", void, [ptr_ty.into(), i64_ty.into()]);
+        decl!("arc_list_length", i64,  [ptr_ty.into()]);
+        decl!("arc_list_get",    i64,  [ptr_ty.into(), i64_ty.into()]);
+        decl!("arc_list_filter", ptr,  [ptr_ty.into(), ptr_ty.into()]);
+        decl!("arc_map_new",             ptr,  []);
+        decl!("arc_map_set",             void, [ptr_ty.into(), ptr_ty.into(), i64_ty.into()]);
+        decl!("arc_map_get_or_default",  i64,  [ptr_ty.into(), ptr_ty.into(), i64_ty.into()]);
+        decl!("arc_pair_new",    ptr,  [i64_ty.into(), i64_ty.into()]);
+        decl!("arc_pair_first",  i64,  [ptr_ty.into()]);
+        decl!("arc_pair_second", i64,  [ptr_ty.into()]);
+    }
+
+    // ── arc_list_new() → ptr ─────────────────────────────────────────────────
+    // malloc(8 * 257): [0]=len, [1..256]=i64 data
+
+    fn gen_arc_list_new(&mut self) {
+        let fn_val = match self.module.get_function("arc_list_new") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+        let malloc  = self.module.get_function("malloc").unwrap();
+
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
+        // malloc(8 * 257) bytes
+        let sz = i64_ty.const_int(8 * 257, false);
+        let ptr = self.builder.build_call(malloc, &[sz.into()], "list_ptr")
+            .unwrap().try_as_basic_value().basic().unwrap();
+        // Store len=0 at offset 0
+        if let inkwell::values::BasicValueEnum::PointerValue(p) = ptr {
+            self.builder.build_store(p, i64_ty.const_int(0, false)).unwrap();
+            self.builder.build_return(Some(&p)).unwrap();
+        }
+    }
+
+    // ── arc_list_append(ptr list, i64 item) → void ───────────────────────────
+    // list[0]++ then list[old_len+1] = item
+
+    fn gen_arc_list_append(&mut self) {
+        let fn_val = match self.module.get_function("arc_list_append") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
+        let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
+        let item     = fn_val.get_nth_param(1).unwrap().into_int_value();
+
+        // len = list[0]
+        let len = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), list_ptr, "len"
+        ).unwrap().into_int_value();
+
+        // list[len+1] = item
+        let idx = self.builder.build_int_add(len, i64_ty.const_int(1, false), "idx").unwrap();
+        let elem_ptr = unsafe {
+            self.builder.build_gep(i64_ty, list_ptr, &[idx], "elem_ptr").unwrap()
+        };
+        self.builder.build_store(elem_ptr, item).unwrap();
+
+        // list[0] = len+1
+        let new_len = self.builder.build_int_add(len, i64_ty.const_int(1, false), "nl").unwrap();
+        self.builder.build_store(list_ptr, new_len).unwrap();
+
+        self.builder.build_return(None).unwrap();
+    }
+
+    // ── arc_list_length(ptr list) → i64 ─────────────────────────────────────
+
+    fn gen_arc_list_length(&mut self) {
+        let fn_val = match self.module.get_function("arc_list_length") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
+        let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
+        let len = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), list_ptr, "len"
+        ).unwrap();
+        self.builder.build_return(Some(&len)).unwrap();
+    }
+
+    // ── arc_list_get(ptr list, i64 idx) → i64 ───────────────────────────────
+
+    fn gen_arc_list_get(&mut self) {
+        let fn_val = match self.module.get_function("arc_list_get") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
+        let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
+        let idx      = fn_val.get_nth_param(1).unwrap().into_int_value();
+
+        // real_idx = idx + 1
+        let real_idx = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "ri").unwrap();
+        let elem_ptr = unsafe {
+            self.builder.build_gep(i64_ty, list_ptr, &[real_idx], "ep").unwrap()
+        };
+        let val = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), elem_ptr, "val"
+        ).unwrap();
+        self.builder.build_return(Some(&val)).unwrap();
+    }
+
+    // ── arc_list_filter(ptr list, ptr fn_ptr) → ptr ──────────────────────────
+
+    fn gen_arc_list_filter(&mut self) {
+        let fn_val = match self.module.get_function("arc_list_filter") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+
+        let entry_bb  = self.ctx.append_basic_block(fn_val, "entry");
+        let cond_bb   = self.ctx.append_basic_block(fn_val, "filter.cond");
+        let body_bb   = self.ctx.append_basic_block(fn_val, "filter.body");
+        let append_bb = self.ctx.append_basic_block(fn_val, "filter.append");
+        let next_bb   = self.ctx.append_basic_block(fn_val, "filter.next");
+        let exit_bb   = self.ctx.append_basic_block(fn_val, "filter.exit");
+
+        // entry: out = arc_list_new(), len = arc_list_length(list), idx = 0
+        self.builder.position_at_end(entry_bb);
+        let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
+        let fn_ptr   = fn_val.get_nth_param(1).unwrap().into_pointer_value();
+
+        let new_fn   = self.module.get_function("arc_list_new").unwrap();
+        let len_fn   = self.module.get_function("arc_list_length").unwrap();
+        let get_fn   = self.module.get_function("arc_list_get").unwrap();
+        let app_fn   = self.module.get_function("arc_list_append").unwrap();
+
+        let out = self.builder.build_call(new_fn, &[], "out")
+            .unwrap().try_as_basic_value().basic().unwrap();
+        let len_v = self.builder.build_call(len_fn, &[list_ptr.into()], "len")
+            .unwrap().try_as_basic_value().basic().unwrap().into_int_value();
+
+        let idx_slot = self.builder.build_alloca(i64_ty, "idx_slot").unwrap();
+        self.builder.build_store(idx_slot, i64_ty.const_int(0, false)).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        // cond: idx < len
+        self.builder.position_at_end(cond_bb);
+        let idx = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), idx_slot, "idx"
+        ).unwrap().into_int_value();
+        let cmp = self.builder.build_int_compare(
+            inkwell::IntPredicate::SLT, idx, len_v, "cmp"
+        ).unwrap();
+        self.builder.build_conditional_branch(cmp, body_bb, exit_bb).unwrap();
+
+        // body: item = get(list, idx), res = fn(item)
+        self.builder.position_at_end(body_bb);
+        let idx2 = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), idx_slot, "idx2"
+        ).unwrap().into_int_value();
+        let item = self.builder.build_call(get_fn, &[list_ptr.into(), idx2.into()], "item")
+            .unwrap().try_as_basic_value().basic().unwrap().into_int_value();
+
+        // Indirect call through fn_ptr: fn_ptr(item) → i64
+        let fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
+        let res = self.builder.build_indirect_call(fn_ty, fn_ptr, &[item.into()], "res")
+            .unwrap().try_as_basic_value().basic().unwrap().into_int_value();
+        let is_true = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, res, i64_ty.const_int(0, false), "is_true"
+        ).unwrap();
+        self.builder.build_conditional_branch(is_true, append_bb, next_bb).unwrap();
+
+        // append: arc_list_append(out, item)
+        self.builder.position_at_end(append_bb);
+        let out_ptr = out.into_pointer_value();
+        self.builder.build_call(app_fn, &[out_ptr.into(), item.into()], "").unwrap();
+        self.builder.build_unconditional_branch(next_bb).unwrap();
+
+        // next: idx++
+        self.builder.position_at_end(next_bb);
+        let idx3 = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), idx_slot, "idx3"
+        ).unwrap().into_int_value();
+        let idx4 = self.builder.build_int_add(idx3, i64_ty.const_int(1, false), "idx4").unwrap();
+        self.builder.build_store(idx_slot, idx4).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        // exit
+        self.builder.position_at_end(exit_bb);
+        self.builder.build_return(Some(&out)).unwrap();
+    }
+
+    // ── arc_map_new() → ptr ──────────────────────────────────────────────────
+    // malloc(8 * 129): [0]=len, [1+i*2]=key_ptr (i64), [2+i*2]=val (i64)
+
+    fn gen_arc_map_new(&mut self) {
+        let fn_val = match self.module.get_function("arc_map_new") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+        let malloc  = self.module.get_function("malloc").unwrap();
+
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
+        let sz = i64_ty.const_int(8 * 129, false);
+        let ptr = self.builder.build_call(malloc, &[sz.into()], "map_ptr")
+            .unwrap().try_as_basic_value().basic().unwrap();
+        if let inkwell::values::BasicValueEnum::PointerValue(p) = ptr {
+            // len = 0
+            self.builder.build_store(p, i64_ty.const_int(0, false)).unwrap();
+            self.builder.build_return(Some(&p)).unwrap();
+        }
+    }
+
+    // ── arc_map_set(ptr map, ptr key, i64 val) → void ───────────────────────
+    // Lineer arama; eşleşirse güncelle, yoksa ekle
+
+    fn gen_arc_map_set(&mut self) {
+        let fn_val = match self.module.get_function("arc_map_set") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty  = self.ctx.i64_type();
+        let strcmp  = self.module.get_function("strcmp").unwrap();
+
+        let entry_bb  = self.ctx.append_basic_block(fn_val, "entry");
+        let cond_bb   = self.ctx.append_basic_block(fn_val, "set.cond");
+        let check_bb  = self.ctx.append_basic_block(fn_val, "set.check");
+        let update_bb = self.ctx.append_basic_block(fn_val, "set.update");
+        let next_bb   = self.ctx.append_basic_block(fn_val, "set.next");
+        let insert_bb = self.ctx.append_basic_block(fn_val, "set.insert");
+
+        self.builder.position_at_end(entry_bb);
+        let map_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
+        let key_ptr = fn_val.get_nth_param(1).unwrap().into_pointer_value();
+        let val_v   = fn_val.get_nth_param(2).unwrap().into_int_value();
+
+        let len = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), map_ptr, "len"
+        ).unwrap().into_int_value();
+
+        let i_slot = self.builder.build_alloca(i64_ty, "i").unwrap();
+        self.builder.build_store(i_slot, i64_ty.const_int(0, false)).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        // cond: i < len
+        self.builder.position_at_end(cond_bb);
+        let i = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i"
+        ).unwrap().into_int_value();
+        let lt = self.builder.build_int_compare(
+            inkwell::IntPredicate::SLT, i, len, "lt"
+        ).unwrap();
+        self.builder.build_conditional_branch(lt, check_bb, insert_bb).unwrap();
+
+        // check: existing_key = map[1+i*2]; if strcmp==0 → update
+        self.builder.position_at_end(check_bb);
+        let i2 = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i2"
+        ).unwrap().into_int_value();
+        // key_idx = 1 + i*2
+        let two    = i64_ty.const_int(2, false);
+        let one    = i64_ty.const_int(1, false);
+        let i2t    = self.builder.build_int_mul(i2, two, "i2t").unwrap();
+        let ki     = self.builder.build_int_add(i2t, one, "ki").unwrap();
+        let kslot  = unsafe {
+            self.builder.build_gep(i64_ty, map_ptr, &[ki], "kslot").unwrap()
+        };
+        // load stored key as i64, then inttoptr
+        let stored_key_i = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), kslot, "ski"
+        ).unwrap().into_int_value();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let stored_key_ptr = self.builder.build_int_to_ptr(stored_key_i, ptr_ty, "skp").unwrap();
+
+        let cmp_res = self.builder.build_call(
+            strcmp, &[stored_key_ptr.into(), key_ptr.into()], "cmp"
+        ).unwrap().try_as_basic_value().basic().unwrap().into_int_value();
+        let cmp_zero = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ, cmp_res, self.ctx.i32_type().const_int(0, false), "eq"
+        ).unwrap();
+        self.builder.build_conditional_branch(cmp_zero, update_bb, next_bb).unwrap();
+
+        // update: map[ki+1] = val; return
+        self.builder.position_at_end(update_bb);
+        let i3 = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i3"
+        ).unwrap().into_int_value();
+        let i3t   = self.builder.build_int_mul(i3, two, "i3t").unwrap();
+        let vi    = self.builder.build_int_add(i3t, i64_ty.const_int(2, false), "vi").unwrap();
+        let vslot = unsafe {
+            self.builder.build_gep(i64_ty, map_ptr, &[vi], "vs").unwrap()
+        };
+        self.builder.build_store(vslot, val_v).unwrap();
+        self.builder.build_return(None).unwrap();
+
+        // next: i++
+        self.builder.position_at_end(next_bb);
+        let i4 = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i4"
+        ).unwrap().into_int_value();
+        let i5 = self.builder.build_int_add(i4, one, "i5").unwrap();
+        self.builder.build_store(i_slot, i5).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        // insert: map[1+len*2] = key (as i64), map[2+len*2] = val, len++
+        self.builder.position_at_end(insert_bb);
+        let len2 = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), map_ptr, "len2"
+        ).unwrap().into_int_value();
+        let l2t  = self.builder.build_int_mul(len2, two, "l2t").unwrap();
+        let ki2  = self.builder.build_int_add(l2t, one, "ki2").unwrap();
+        let vi2  = self.builder.build_int_add(l2t, i64_ty.const_int(2, false), "vi2").unwrap();
+
+        // store key as i64 (ptrtoint)
+        let key_as_i = self.builder.build_ptr_to_int(key_ptr, i64_ty, "kasi").unwrap();
+        let kslot2 = unsafe {
+            self.builder.build_gep(i64_ty, map_ptr, &[ki2], "ksl2").unwrap()
+        };
+        self.builder.build_store(kslot2, key_as_i).unwrap();
+
+        let vslot2 = unsafe {
+            self.builder.build_gep(i64_ty, map_ptr, &[vi2], "vsl2").unwrap()
+        };
+        self.builder.build_store(vslot2, val_v).unwrap();
+
+        let new_len = self.builder.build_int_add(len2, one, "nl").unwrap();
+        self.builder.build_store(map_ptr, new_len).unwrap();
+        self.builder.build_return(None).unwrap();
+    }
+
+    // ── arc_map_get_or_default(ptr map, ptr key, i64 def) → i64 ─────────────
+
+    fn gen_arc_map_get_or_default(&mut self) {
+        let fn_val = match self.module.get_function("arc_map_get_or_default") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+        let strcmp = self.module.get_function("strcmp").unwrap();
+
+        let entry_bb  = self.ctx.append_basic_block(fn_val, "entry");
+        let cond_bb   = self.ctx.append_basic_block(fn_val, "get.cond");
+        let check_bb  = self.ctx.append_basic_block(fn_val, "get.check");
+        let found_bb  = self.ctx.append_basic_block(fn_val, "get.found");
+        let next_bb   = self.ctx.append_basic_block(fn_val, "get.next");
+        let miss_bb   = self.ctx.append_basic_block(fn_val, "get.miss");
+
+        self.builder.position_at_end(entry_bb);
+        let map_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
+        let key_ptr = fn_val.get_nth_param(1).unwrap().into_pointer_value();
+        let def_v   = fn_val.get_nth_param(2).unwrap().into_int_value();
+
+        let len = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), map_ptr, "len"
+        ).unwrap().into_int_value();
+
+        let i_slot = self.builder.build_alloca(i64_ty, "i").unwrap();
+        self.builder.build_store(i_slot, i64_ty.const_int(0, false)).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        // cond
+        self.builder.position_at_end(cond_bb);
+        let i = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i"
+        ).unwrap().into_int_value();
+        let lt = self.builder.build_int_compare(
+            inkwell::IntPredicate::SLT, i, len, "lt"
+        ).unwrap();
+        self.builder.build_conditional_branch(lt, check_bb, miss_bb).unwrap();
+
+        // check
+        self.builder.position_at_end(check_bb);
+        let ic = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "ic"
+        ).unwrap().into_int_value();
+        let two = i64_ty.const_int(2, false);
+        let one = i64_ty.const_int(1, false);
+        let ict  = self.builder.build_int_mul(ic, two, "ict").unwrap();
+        let ki   = self.builder.build_int_add(ict, one, "ki").unwrap();
+        let kslot = unsafe {
+            self.builder.build_gep(i64_ty, map_ptr, &[ki], "ks").unwrap()
+        };
+        let ski = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), kslot, "ski"
+        ).unwrap().into_int_value();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let skp = self.builder.build_int_to_ptr(ski, ptr_ty, "skp").unwrap();
+        let cmp = self.builder.build_call(
+            strcmp, &[skp.into(), key_ptr.into()], "cmp"
+        ).unwrap().try_as_basic_value().basic().unwrap().into_int_value();
+        let eq = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ, cmp, self.ctx.i32_type().const_int(0, false), "eq"
+        ).unwrap();
+        self.builder.build_conditional_branch(eq, found_bb, next_bb).unwrap();
+
+        // found: return map[ki+1]
+        self.builder.position_at_end(found_bb);
+        let if2 = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "if2"
+        ).unwrap().into_int_value();
+        let if2t = self.builder.build_int_mul(if2, two, "if2t").unwrap();
+        let vi   = self.builder.build_int_add(if2t, i64_ty.const_int(2, false), "vi").unwrap();
+        let vslot = unsafe {
+            self.builder.build_gep(i64_ty, map_ptr, &[vi], "vs").unwrap()
+        };
+        let val = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), vslot, "val"
+        ).unwrap();
+        self.builder.build_return(Some(&val)).unwrap();
+
+        // next: i++
+        self.builder.position_at_end(next_bb);
+        let in_ = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "in"
+        ).unwrap().into_int_value();
+        let in2 = self.builder.build_int_add(in_, one, "in2").unwrap();
+        self.builder.build_store(i_slot, in2).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        // miss
+        self.builder.position_at_end(miss_bb);
+        self.builder.build_return(Some(&def_v)).unwrap();
+    }
+
+    // ── arc_pair_new(i64 fst, i64 snd) → ptr ────────────────────────────────
+    // malloc(16): [0]=fst, [1]=snd
+
+    fn gen_arc_pair_new(&mut self) {
+        let fn_val = match self.module.get_function("arc_pair_new") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+        let malloc  = self.module.get_function("malloc").unwrap();
+
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
+        let fst = fn_val.get_nth_param(0).unwrap().into_int_value();
+        let snd = fn_val.get_nth_param(1).unwrap().into_int_value();
+
+        let sz = i64_ty.const_int(16, false);
+        let p  = self.builder.build_call(malloc, &[sz.into()], "pair_ptr")
+            .unwrap().try_as_basic_value().basic().unwrap();
+
+        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = p {
+            // [0] = fst
+            self.builder.build_store(ptr, fst).unwrap();
+            // [1] = snd
+            let snd_ptr = unsafe {
+                self.builder.build_gep(i64_ty, ptr, &[i64_ty.const_int(1, false)], "snd_ptr").unwrap()
+            };
+            self.builder.build_store(snd_ptr, snd).unwrap();
+            self.builder.build_return(Some(&ptr)).unwrap();
+        }
+    }
+
+    // ── arc_pair_first(ptr pair) → i64 ──────────────────────────────────────
+
+    fn gen_arc_pair_first(&mut self) {
+        let fn_val = match self.module.get_function("arc_pair_first") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
+        let pair_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
+        let val = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), pair_ptr, "fst"
+        ).unwrap();
+        self.builder.build_return(Some(&val)).unwrap();
+    }
+
+    // ── arc_pair_second(ptr pair) → i64 ─────────────────────────────────────
+
+    fn gen_arc_pair_second(&mut self) {
+        let fn_val = match self.module.get_function("arc_pair_second") {
+            Some(f) if f.count_basic_blocks() > 0 => return,
+            Some(f) => f,
+            None => return,
+        };
+        let i64_ty = self.ctx.i64_type();
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
+        let pair_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
+        let snd_ptr = unsafe {
+            self.builder.build_gep(i64_ty, pair_ptr, &[i64_ty.const_int(1, false)], "sp").unwrap()
+        };
+        let val = self.builder.build_load(
+            inkwell::types::BasicTypeEnum::IntType(i64_ty), snd_ptr, "snd"
+        ).unwrap();
+        self.builder.build_return(Some(&val)).unwrap();
     }
 
     fn declare_math_fns(&mut self) {
@@ -1681,6 +2448,15 @@ impl<'ctx> CodeGen<'ctx> {
         // Bulunamadı — belki 'class' bir değişken ismi (instance method call)
         // Parser StaticCall üretir: c.increment() → StaticCall("c","increment")
         let obj_expr = Expr::Ident(class.to_string());
+
+        // Koleksiyon değişkeni kontrolü (List, HashMap, Pair)
+        if let Some(col_cls) = self.infer_object_class(&obj_expr) {
+            if matches!(col_cls.as_str(), "__List" | "__HashMap" | "__Pair") {
+                let col_cls_owned = col_cls.clone();
+                return self.compile_collection_method(&obj_expr.clone(), &col_cls_owned, method, args);
+            }
+        }
+
         if let Some(class_name) = self.infer_object_class(&obj_expr) {
             let instance_fn = format!("{}_{}", class_name, method);
             if let Some(fn_val) = self.fns.get(&instance_fn).copied()
@@ -2326,6 +3102,426 @@ impl<'ctx> CodeGen<'ctx> {
             bb.get_terminator().is_some()
         } else {
             false
+        }
+    }
+
+    // ── Koleksiyon metod dispatch ─────────────────────────────────────────────
+
+    fn compile_collection_method(
+        &mut self,
+        object     : &Expr,
+        collection : &str,
+        method     : &str,
+        args       : &[Expr],
+    ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let i64_ty = self.ctx.i64_type();
+
+        // Nesneyi derle → pointer değeri al
+        let obj_val = match self.compile_expr(object)? {
+            Some(v) => v,
+            None    => return Ok(None),
+        };
+        let list_ptr = match obj_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Ok(None),
+        };
+
+        match (collection, method) {
+            // ── List metodları ───────────────────────────────────────────────
+            ("__List", "append") => {
+                let item_val = if let Some(a) = args.first() {
+                    self.compile_expr(a)?.map(|v| self.value_to_i64(v)).transpose()?
+                        .unwrap_or_else(|| i64_ty.const_int(0, false))
+                } else {
+                    i64_ty.const_int(0, false)
+                };
+                let f = self.module.get_function("arc_list_append").unwrap();
+                self.builder.build_call(f, &[list_ptr.into(), item_val.into()], "")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(None)
+            }
+
+            ("__List", "length") => {
+                let f = self.module.get_function("arc_list_length").unwrap();
+                let r = self.builder.build_call(f, &[list_ptr.into()], "list_len")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(r.try_as_basic_value().basic())
+            }
+
+            ("__List", "isEmpty") => {
+                let f = self.module.get_function("arc_list_length").unwrap();
+                let r = self.builder.build_call(f, &[list_ptr.into()], "list_len")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                if let Some(BasicValueEnum::IntValue(len)) = r.try_as_basic_value().basic() {
+                    let zero = i64_ty.const_int(0, false);
+                    let eq = self.builder.build_int_compare(
+                        inkwell::IntPredicate::EQ, len, zero, "is_empty"
+                    ).map_err(|e| CodeGenError::new(e.to_string()))?;
+                    return Ok(Some(eq.into()));
+                }
+                Ok(None)
+            }
+
+            ("__List", "filter") => {
+                // Elem class'ı bul (lambda parametre tipi için)
+                let elem_cls = self.infer_elem_class(object);
+                let lambda_expr = args.first();
+                if let Some(lambda) = lambda_expr {
+                    let fn_ptr = self.compile_lambda_for_filter(lambda, elem_cls)?;
+                    if let Some(fn_ptr_val) = fn_ptr {
+                        let f = self.module.get_function("arc_list_filter").unwrap();
+                        let r = self.builder.build_call(
+                            f,
+                            &[list_ptr.into(), fn_ptr_val.into()],
+                            "filtered"
+                        ).map_err(|e| CodeGenError::new(e.to_string()))?;
+                        return Ok(r.try_as_basic_value().basic());
+                    }
+                }
+                // Lambda derlenemezse boş liste döndür
+                let f = self.module.get_function("arc_list_new").unwrap();
+                let r = self.builder.build_call(f, &[], "empty_list")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(r.try_as_basic_value().basic())
+            }
+
+            // take / takeLast / sortedBy — şimdilik listeyi olduğu gibi döndür
+            ("__List", "take") | ("__List", "takeLast") | ("__List", "sortedBy") => {
+                for a in args { self.compile_expr(a)?; }
+                Ok(Some(list_ptr.into()))
+            }
+
+            ("__List", "reduce") => {
+                for a in args { self.compile_expr(a)?; }
+                Ok(Some(i64_ty.const_int(0, false).into()))
+            }
+
+            // ── HashMap metodları ────────────────────────────────────────────
+            ("__HashMap", "set") => {
+                let key = if let Some(a) = args.first() {
+                    self.compile_expr(a)?
+                        .map(|v| if let BasicValueEnum::PointerValue(p) = v { p }
+                             else { ptr_ty.const_null() })
+                        .unwrap_or(ptr_ty.const_null())
+                } else { ptr_ty.const_null() };
+
+                let val = if let Some(a) = args.get(1) {
+                    self.compile_expr(a)?.map(|v| self.value_to_i64(v)).transpose()?
+                        .unwrap_or_else(|| i64_ty.const_int(0, false))
+                } else { i64_ty.const_int(0, false) };
+
+                let f = self.module.get_function("arc_map_set").unwrap();
+                self.builder.build_call(f, &[list_ptr.into(), key.into(), val.into()], "")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(None)
+            }
+
+            ("__HashMap", "getOrDefault") => {
+                let key = if let Some(a) = args.first() {
+                    self.compile_expr(a)?
+                        .map(|v| if let BasicValueEnum::PointerValue(p) = v { p }
+                             else { ptr_ty.const_null() })
+                        .unwrap_or(ptr_ty.const_null())
+                } else { ptr_ty.const_null() };
+
+                let def = if let Some(a) = args.get(1) {
+                    self.compile_expr(a)?.map(|v| self.value_to_i64(v)).transpose()?
+                        .unwrap_or_else(|| i64_ty.const_int(0, false))
+                } else { i64_ty.const_int(0, false) };
+
+                let f = self.module.get_function("arc_map_get_or_default").unwrap();
+                let r = self.builder.build_call(
+                    f, &[list_ptr.into(), key.into(), def.into()], "map_val"
+                ).map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(r.try_as_basic_value().basic())
+            }
+
+            ("__HashMap", "get") => {
+                // get → nullable: default olarak 0 döndür (null semantiği yok henüz)
+                let key = if let Some(a) = args.first() {
+                    self.compile_expr(a)?
+                        .map(|v| if let BasicValueEnum::PointerValue(p) = v { p }
+                             else { ptr_ty.const_null() })
+                        .unwrap_or(ptr_ty.const_null())
+                } else { ptr_ty.const_null() };
+                let def = i64_ty.const_int(0, false);
+                let f = self.module.get_function("arc_map_get_or_default").unwrap();
+                let r = self.builder.build_call(
+                    f, &[list_ptr.into(), key.into(), def.into()], "map_val"
+                ).map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(r.try_as_basic_value().basic())
+            }
+
+            ("__HashMap", "containsKey") => {
+                for a in args { self.compile_expr(a)?; }
+                Ok(Some(self.ctx.bool_type().const_int(0, false).into()))
+            }
+
+            ("__HashMap", "length") => {
+                Ok(Some(i64_ty.const_int(0, false).into()))
+            }
+
+            ("__HashMap", "keys") | ("__HashMap", "values") | ("__HashMap", "entries")
+            | ("__HashMap", "remove") => {
+                for a in args { self.compile_expr(a)?; }
+                Ok(None)
+            }
+
+            // ── Pair metodları ───────────────────────────────────────────────
+            ("__Pair", "getFirst") => {
+                let f = self.module.get_function("arc_pair_first").unwrap();
+                let r = self.builder.build_call(f, &[list_ptr.into()], "pair_fst")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                // i64 → ptr (String ise) : inttoptr
+                if let Some(BasicValueEnum::IntValue(v)) = r.try_as_basic_value().basic() {
+                    let ptr = self.builder.build_int_to_ptr(v, ptr_ty, "fst_ptr")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    return Ok(Some(ptr.into()));
+                }
+                Ok(r.try_as_basic_value().basic())
+            }
+
+            ("__Pair", "getSecond") => {
+                let f = self.module.get_function("arc_pair_second").unwrap();
+                let r = self.builder.build_call(f, &[list_ptr.into()], "pair_snd")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(r.try_as_basic_value().basic())
+            }
+
+            _ => {
+                for a in args { self.compile_expr(a)?; }
+                Ok(None)
+            }
+        }
+    }
+
+    // ── Lambda → LLVM function pointer (filter için) ──────────────────────────
+
+    fn compile_lambda_for_filter(
+        &mut self,
+        lambda   : &Expr,
+        elem_cls : Option<String>,
+    ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
+        let (params, body) = match lambda {
+            Expr::Lambda { params, body } => (params.clone(), body.clone()),
+            _ => return Ok(None),
+        };
+
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let i64_ty = self.ctx.i64_type();
+        let i1_ty  = self.ctx.bool_type();
+
+        // Benzersiz lambda fonksiyon adı
+        self.lambda_counter += 1;
+        let fn_name = format!("arc_lambda_{}", self.lambda_counter);
+
+        // Fonksiyon tipi: i64(i64) — item'ı i64 olarak alır, bool (i64) döner
+        let fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
+        let fn_val = self.module.add_function(&fn_name, fn_ty, None);
+
+        // Builder konumunu kaydet
+        let prev_block = self.builder.get_insert_block();
+        let prev_fn = self.cur_fn;
+        let prev_class = self.cur_class.clone();
+
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+        self.cur_fn = Some(fn_val);
+        self.push_scope();
+
+        // Parametre: i64 → ptr (item pointer)
+        let param_name = params.first().map(|s| s.as_str()).unwrap_or("item");
+        let item_i64 = fn_val.get_nth_param(0).unwrap().into_int_value();
+
+        // i64 → ptr dönüşümü
+        let item_ptr = self.builder.build_int_to_ptr(item_i64, ptr_ty, "item_ptr")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // Lambda parametresini scope'a ekle
+        let alloca = self.builder.build_alloca(ptr_ty, param_name)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(alloca, item_ptr)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // class_name ile define et (elem_class'tan)
+        let ec = elem_cls.clone();
+        self.define_collection_var(param_name, alloca, ptr_ty.into(), ec.clone(), None);
+
+        // cur_class'ı geçici olarak set et (method dispatch için)
+        if let Some(ref cls) = ec {
+            self.cur_class = Some(cls.clone());
+        }
+
+        // Body'yi derle
+        let result = self.compile_expr(&body)?;
+
+        // Sonucu i64'e genişlet (bool → i64)
+        let ret_val = match result {
+            Some(BasicValueEnum::IntValue(v)) => {
+                if v.get_type().get_bit_width() == 1 {
+                    self.builder.build_int_z_extend(v, i64_ty, "zext_ret")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                } else if v.get_type().get_bit_width() < 64 {
+                    self.builder.build_int_z_extend(v, i64_ty, "zext_ret")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                } else {
+                    v
+                }
+            }
+            Some(BasicValueEnum::PointerValue(p)) => {
+                self.builder.build_ptr_to_int(p, i64_ty, "ptr2i")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?
+            }
+            _ => i64_ty.const_int(0, false),
+        };
+
+        // Return değeri döndür
+        let _ = i1_ty;
+        self.builder.build_return(Some(&ret_val))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.pop_scope();
+        self.cur_fn = prev_fn;
+        self.cur_class = prev_class;
+
+        // Builder konumunu geri yükle
+        if let Some(bb) = prev_block {
+            self.builder.position_at_end(bb);
+        }
+
+        fn_val.verify(true);
+
+        // Fonksiyon pointer'ını döndür
+        Ok(Some(fn_val.as_global_value().as_pointer_value().into()))
+    }
+
+    // ── ForEach döngüsü: List üzerinde ───────────────────────────────────────
+
+    fn compile_for_each(
+        &mut self,
+        ty   : &Type,
+        name : &str,
+        iter : &Expr,
+        body : &[Stmt],
+    ) -> CgResult<bool> {
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let i64_ty = self.ctx.i64_type();
+
+        let iter_val = match self.compile_expr(iter)? {
+            Some(BasicValueEnum::PointerValue(p)) => p,
+            _ => return Ok(false),
+        };
+
+        let list_len_fn = self.module.get_function("arc_list_length").unwrap();
+        let list_get_fn = self.module.get_function("arc_list_get").unwrap();
+
+        let len_call = self.builder.build_call(list_len_fn, &[iter_val.into()], "fe_len")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let len_val = len_call.try_as_basic_value().basic()
+            .ok_or_else(|| CodeGenError::new("arc_list_length returned void"))?;
+        let len_i64 = match len_val { BasicValueEnum::IntValue(v) => v, _ => return Ok(false) };
+
+        // Sayaç alloca
+        let idx_alloca = self.builder.build_alloca(i64_ty, "fe_idx")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(idx_alloca, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        let cur_fn = self.cur_fn.unwrap();
+        let cond_bb = self.ctx.append_basic_block(cur_fn, "fe.cond");
+        let body_bb = self.ctx.append_basic_block(cur_fn, "fe.body");
+        let exit_bb = self.ctx.append_basic_block(cur_fn, "fe.exit");
+
+        self.builder.build_unconditional_branch(cond_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // Koşul: idx < len
+        self.builder.position_at_end(cond_bb);
+        let idx = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), idx_alloca, "fe_i")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let cond = self.builder.build_int_compare(
+            inkwell::IntPredicate::SLT, idx, len_i64, "fe_cond"
+        ).map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(cond, body_bb, exit_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // Gövde: item al, değişkene bağla, body'yi derle
+        self.builder.position_at_end(body_bb);
+        self.push_scope();
+
+        let item_call = self.builder.build_call(
+            list_get_fn, &[iter_val.into(), idx.into()], "fe_item"
+        ).map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        if let Some(BasicValueEnum::IntValue(item_i64)) = item_call.try_as_basic_value().basic() {
+            // i64 → ptr (class instance)
+            let item_ptr = self.builder.build_int_to_ptr(item_i64, ptr_ty, "fe_ptr")
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+            let alloca = self.builder.build_alloca(ptr_ty, name)
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+            self.builder.build_store(alloca, item_ptr)
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+            // class_name'i Type'dan çıkar
+            let class_name = match ty {
+                Type::Named(n) => Some(n.clone()),
+                _ => None,
+            };
+            self.define_collection_var(name, alloca, ptr_ty.into(), class_name, None);
+        }
+
+        for s in body {
+            if self.compile_stmt(s)? { break; }
+        }
+        self.pop_scope();
+
+        // idx++
+        if !self.current_block_terminated() {
+            let idx2 = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), idx_alloca, "fe_i2")
+                .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+            let idx3 = self.builder.build_int_add(idx2, i64_ty.const_int(1, false), "fe_inc")
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+            self.builder.build_store(idx_alloca, idx3)
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+            self.builder.build_unconditional_branch(cond_bb)
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+        }
+
+        self.builder.position_at_end(exit_bb);
+        Ok(false)
+    }
+
+    // ── Değer → i64 dönüşümü (koleksiyon item storage için) ──────────────────
+
+    fn value_to_i64(
+        &mut self,
+        val : BasicValueEnum<'ctx>,
+    ) -> CgResult<inkwell::values::IntValue<'ctx>> {
+        let i64_ty = self.ctx.i64_type();
+        match val {
+            BasicValueEnum::IntValue(v) => {
+                let w = v.get_type().get_bit_width();
+                if w < 64 {
+                    self.builder.build_int_z_extend(v, i64_ty, "zext64")
+                        .map_err(|e| CodeGenError::new(e.to_string()))
+                } else if w > 64 {
+                    self.builder.build_int_truncate(v, i64_ty, "trunc64")
+                        .map_err(|e| CodeGenError::new(e.to_string()))
+                } else {
+                    Ok(v)
+                }
+            }
+            BasicValueEnum::PointerValue(p) => {
+                self.builder.build_ptr_to_int(p, i64_ty, "ptr2i64")
+                    .map_err(|e| CodeGenError::new(e.to_string()))
+            }
+            BasicValueEnum::FloatValue(f) => {
+                self.builder.build_float_to_signed_int(f, i64_ty, "f2i64")
+                    .map_err(|e| CodeGenError::new(e.to_string()))
+            }
+            _ => Ok(i64_ty.const_int(0, false)),
         }
     }
 
