@@ -1,6 +1,10 @@
 # Build output
 /target/
 
+# Arimo derlenmiş çıktılar (kök dizinde)
+*.exe
+*.o
+
 # Claude Code worktrees & settings
 .claude/
 
