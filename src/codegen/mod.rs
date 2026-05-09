@@ -80,6 +80,8 @@ pub struct CodeGen<'ctx> {
     enum_variants : HashMap<String, HashMap<String, u32>>,
     // Static field global'ları: "ClassName.fieldName" → global pointer
     static_fields : HashMap<String, inkwell::values::GlobalValue<'ctx>>,
+    // Field Arimo tipleri: class adı → field adı → tür adı (method dispatch için)
+    field_arimo_types : HashMap<String, HashMap<String, String>>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
@@ -97,7 +99,8 @@ impl<'ctx> CodeGen<'ctx> {
             field_indices : HashMap::new(),
             cur_class     : None,
             enum_variants : HashMap::new(),
-            static_fields : HashMap::new(),
+            static_fields         : HashMap::new(),
+            field_arimo_types     : HashMap::new(),
         }
     }
 
@@ -268,6 +271,27 @@ impl<'ctx> CodeGen<'ctx> {
         self.struct_types.insert(c.name.clone(), struct_ty);
         self.field_indices.insert(c.name.clone(), idx_map);
 
+        // Arimo tip bilgisini kaydet (dispatch için)
+        let mut arimo_types: HashMap<String, String> = HashMap::new();
+        // Önce parent'ın tiplerini kopyala
+        if let Some(parent_name) = &c.extends {
+            if let Some(parent_arimo) = self.field_arimo_types.get(parent_name).cloned() {
+                arimo_types.extend(parent_arimo);
+            }
+        }
+        for f in c.fields.iter().filter(|f| !f.static_) {
+            let type_name = match &f.ty {
+                Type::Named(n) => n.clone(),
+                Type::Nullable(inner) => match inner.as_ref() {
+                    Type::Named(n) => n.clone(),
+                    other => format!("{:?}", other),
+                },
+                other => format!("{:?}", other),
+            };
+            arimo_types.insert(f.name.clone(), type_name);
+        }
+        self.field_arimo_types.insert(c.name.clone(), arimo_types);
+
         // Static field'lar → LLVM global değişkenler
         for f in c.fields.iter().filter(|f| f.static_) {
             let global_name = format!("{}_{}", c.name, f.name);
@@ -306,10 +330,16 @@ impl<'ctx> CodeGen<'ctx> {
                         Expr::FloatLit(f) => Some(self.ctx.f64_type().const_float(*f).into()),
                         Expr::BoolLit(b)  => Some(self.ctx.bool_type().const_int(*b as u64, false).into()),
                         Expr::StrLit(s)   => {
-                            // String → global string pointer
-                            let gs = self.builder.build_global_string_ptr(s, &format!("{}_str", global_name))
-                                .map_err(|e| CodeGenError::new(e.to_string()))?;
-                            Some(gs.as_pointer_value().into())
+                            // String static field: global char array olarak sakla
+                            let bytes = s.as_bytes();
+                            let char_arr = self.ctx.const_string(bytes, true);
+                            let str_global = self.module.add_global(
+                                char_arr.get_type(), None,
+                                &format!("{}_strdata", global_name)
+                            );
+                            str_global.set_initializer(&char_arr);
+                            str_global.set_linkage(inkwell::module::Linkage::Internal);
+                            Some(str_global.as_pointer_value().into())
                         }
                         _ => None,
                     };
@@ -1096,6 +1126,13 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(None)
             }
 
+            // ── Stdlib çağrıları ──────────────────────────────────────────────
+            Expr::StaticCall { class, method, args } if
+                matches!(class.as_str(), "IO"|"Math"|"Time"|"Memory") =>
+            {
+                self.compile_stdlib_call(class, method, args)
+            }
+
             // ── Diğer static çağrılar ─────────────────────────────────────────
             Expr::StaticCall { class, method, args } => {
                 self.compile_static_call(class, method, args)
@@ -1262,6 +1299,249 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     // ── IO.print() ───────────────────────────────────────────────────────────
+
+    // ── Stdlib çağrıları ─────────────────────────────────────────────────────
+
+    fn compile_stdlib_call(
+        &mut self,
+        class  : &str,
+        method : &str,
+        args   : &[Expr],
+    ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
+        match (class, method) {
+            // IO
+            ("IO", "print") => {
+                self.compile_io_print(args)?;
+                Ok(None)
+            }
+            ("IO", "read") => {
+                // TODO: stdin okuma — şimdilik boş string
+                let s = self.build_global_string("")?;
+                Ok(Some(s.into()))
+            }
+
+            // Math
+            ("Math", "sqrt") => {
+                self.declare_math_fns();
+                if let Some(arg) = args.first() {
+                    if let Some(v) = self.compile_expr(arg)? {
+                        let f64v = self.to_f64(v)?;
+                        let sqrt_fn = self.module.get_function("sqrt").unwrap();
+                        let r = self.builder.build_call(sqrt_fn, &[f64v.into()], "sqrt")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        return Ok(r.try_as_basic_value().basic());
+                    }
+                }
+                Ok(None)
+            }
+            ("Math", "abs") => {
+                if let Some(arg) = args.first() {
+                    if let Some(v) = self.compile_expr(arg)? {
+                        match v {
+                            BasicValueEnum::FloatValue(f) => {
+                                self.declare_math_fns();
+                                let fabs = self.module.get_function("fabs").unwrap();
+                                let r = self.builder.build_call(fabs, &[f.into()], "abs")
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                return Ok(r.try_as_basic_value().basic());
+                            }
+                            BasicValueEnum::IntValue(i) => {
+                                // abs = max(x, -x)
+                                let neg = self.builder.build_int_neg(i, "neg")
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                let cmp = self.builder.build_int_compare(
+                                    inkwell::IntPredicate::SGE, i, neg, "cmp"
+                                ).map_err(|e| CodeGenError::new(e.to_string()))?;
+                                let r = self.builder.build_select(cmp, i, neg, "abs")
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                return Ok(Some(r));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            ("Math", "pow") => {
+                self.declare_math_fns();
+                let vals: Vec<_> = args.iter()
+                    .filter_map(|a| self.compile_expr(a).ok().flatten())
+                    .collect();
+                if vals.len() >= 2 {
+                    let a = self.to_f64(vals[0])?;
+                    let b = self.to_f64(vals[1])?;
+                    let pow_fn = self.module.get_function("pow").unwrap();
+                    let r = self.builder.build_call(pow_fn, &[a.into(), b.into()], "pow")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    return Ok(r.try_as_basic_value().basic());
+                }
+                Ok(None)
+            }
+            ("Math", "PI") | ("Math", "E") => {
+                let val = if method == "PI" { std::f64::consts::PI } else { std::f64::consts::E };
+                Ok(Some(self.ctx.f64_type().const_float(val).into()))
+            }
+
+            // Time — stub implementasyonlar
+            ("Time", "now") => {
+                // Şimdi için sabit string — gerçek impl Faza 5'te
+                let s = self.build_global_string("2026-01-01")?;
+                Ok(Some(s.into()))
+            }
+            ("Time", "generateId") => {
+                // Unique ID için static counter kullan
+                self.declare_arc_runtime();
+                let id_fn = self.module.get_function("arc_generate_id");
+                if let Some(f) = id_fn {
+                    let r = self.builder.build_call(f, &[], "id")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    Ok(r.try_as_basic_value().basic())
+                } else {
+                    // Fallback: sabit string
+                    let s = self.build_global_string("id-1")?;
+                    Ok(Some(s.into()))
+                }
+            }
+
+            // Memory
+            ("Memory", "alloc") => {
+                if let Some(arg) = args.first() {
+                    if let Some(v) = self.compile_expr(arg)? {
+                        let malloc = self.module.get_function("malloc")
+                            .ok_or_else(|| CodeGenError::new("malloc not declared"))?;
+                        let size = self.to_i64(v)?;
+                        let r = self.builder.build_call(malloc, &[size.into()], "alloc")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        return Ok(r.try_as_basic_value().basic());
+                    }
+                }
+                Ok(None)
+            }
+            ("Memory", "free") => {
+                if let Some(arg) = args.first() {
+                    if let Some(v) = self.compile_expr(arg)? {
+                        let free = self.module.get_function("free")
+                            .or_else(|| {
+                                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                                let ft = self.ctx.void_type().fn_type(&[ptr_ty.into()], false);
+                                Some(self.module.add_function("free", ft, None))
+                            }).unwrap();
+                        self.builder.build_call(free, &[v.into()], "")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    }
+                }
+                Ok(None)
+            }
+            ("Memory", "set") | ("Memory", "copy") => {
+                // TODO: memset/memcpy
+                for a in args { self.compile_expr(a)?; }
+                Ok(None)
+            }
+
+            _ => {
+                // Bilinmeyen stdlib çağrısı — argümanları derle, None döndür
+                for a in args { self.compile_expr(a)?; }
+                Ok(None)
+            }
+        }
+    }
+
+    fn declare_math_fns(&mut self) {
+        let f64_ty = self.ctx.f64_type();
+        for (name, nargs) in &[("sqrt", 1usize), ("fabs", 1), ("pow", 2)] {
+            if self.module.get_function(name).is_some() { continue; }
+            let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                (0..*nargs).map(|_| f64_ty.into()).collect();
+            let ft = f64_ty.fn_type(&params, false);
+            self.module.add_function(name, ft, None);
+        }
+    }
+
+    fn declare_arc_runtime(&mut self) {
+        if self.module.get_function("arc_generate_id").is_some() { return; }
+
+        // sprintf declare et
+        if self.module.get_function("sprintf").is_none() {
+            let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+            let i32_ty = self.ctx.i32_type();
+            let ft = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], true);
+            self.module.add_function("sprintf", ft, None);
+        }
+
+        // arc_generate_id: her çağrıda benzersiz "id-N" string döndür
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let i64_ty = self.ctx.i64_type();
+
+        // Global counter
+        let counter = self.module.add_global(i64_ty, None, "arc_id_counter");
+        counter.set_initializer(&i64_ty.const_int(0, false));
+        counter.set_linkage(inkwell::module::Linkage::Internal);
+
+        // 32 byte buffer
+        let buf_ty = self.ctx.i8_type().array_type(32);
+        let buf = self.module.add_global(buf_ty, None, "arc_id_buf");
+        buf.set_initializer(&buf_ty.const_zero());
+        buf.set_linkage(inkwell::module::Linkage::Internal);
+
+        // format string "id-%lld"
+        let fmt_bytes = b"id-%lld\0";
+        let fmt_arr = self.ctx.const_string(fmt_bytes, false);
+        let fmt_global = self.module.add_global(fmt_arr.get_type(), None, "arc_id_fmt");
+        fmt_global.set_initializer(&fmt_arr);
+        fmt_global.set_linkage(inkwell::module::Linkage::Internal);
+
+        // Fonksiyon gövdesi
+        let ft = ptr_ty.fn_type(&[], false);
+        let fn_val = self.module.add_function("arc_generate_id", ft, None);
+        let entry = self.ctx.append_basic_block(fn_val, "entry");
+
+        // Builder'ın mevcut konumunu kaydet
+        let prev_block = self.builder.get_insert_block();
+        self.builder.position_at_end(entry);
+
+        // Counter yükle ve artır
+        let n = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), counter.as_pointer_value(), "n")
+            .unwrap().into_int_value();
+        let n1 = self.builder.build_int_add(n, i64_ty.const_int(1, false), "n1").unwrap();
+        self.builder.build_store(counter.as_pointer_value(), n1).unwrap();
+
+        // buf pointer
+        let buf_ptr = buf.as_pointer_value();
+
+        // sprintf(buf, fmt, n)
+        let sprintf = self.module.get_function("sprintf").unwrap();
+        let fmt_ptr = fmt_global.as_pointer_value();
+        self.builder.build_call(sprintf, &[buf_ptr.into(), fmt_ptr.into(), n.into()], "").unwrap();
+
+        // buf döndür
+        self.builder.build_return(Some(&buf_ptr)).unwrap();
+
+        // Builder'ı eski konuma geri döndür
+        if let Some(bb) = prev_block {
+            self.builder.position_at_end(bb);
+        }
+    }
+
+    fn to_f64(&mut self, val: BasicValueEnum<'ctx>)
+        -> CgResult<inkwell::values::FloatValue<'ctx>>
+    {
+        let f64ty = self.ctx.f64_type();
+        match val {
+            BasicValueEnum::FloatValue(f) => {
+                if f.get_type().get_bit_width() < 64 {
+                    self.builder.build_float_ext(f, f64ty, "fpext64")
+                        .map_err(|e| CodeGenError::new(e.to_string()))
+                } else {
+                    Ok(f)
+                }
+            }
+            BasicValueEnum::IntValue(i) => {
+                self.builder.build_signed_int_to_float(i, f64ty, "itof")
+                    .map_err(|e| CodeGenError::new(e.to_string()))
+            }
+            _ => Err(CodeGenError::new("cannot convert to f64")),
+        }
+    }
 
     fn compile_io_print(&mut self, args: &[Expr]) -> CgResult<()> {
         let printf = self.module.get_function("printf")
@@ -1557,20 +1837,28 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // Nesnenin class adını VarSlot'tan veya cur_class'tan çıkar
+    // Nesnenin class adını VarSlot'tan, field tipinden veya cur_class'tan çıkar
     fn infer_object_class(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::This => self.cur_class.clone(),
             Expr::Ident(name) => {
                 for scope in self.scopes.iter().rev() {
                     if let Some(slot) = scope.get(name.as_str()) {
-                        // VarSlot'ta class adı saklıysa onu kullan
                         if slot.class_name.is_some() {
                             return slot.class_name.clone();
                         }
                     }
                 }
                 None
+            }
+            // this.field → field'ın tipi
+            Expr::FieldAccess { object, field } => {
+                let owner_class = self.infer_object_class(object)?;
+                // field_arimo_types'ta bu class'ın field tipini bul
+                self.field_arimo_types
+                    .get(&owner_class)?
+                    .get(field.as_str())
+                    .cloned()
             }
             _ => None,
         }
