@@ -323,12 +323,35 @@ impl Parser {
                 self.advance();
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
-                    "ForceInline"      => { inline_ = true; }
-                    "async"            => { async_ = true; }
-                    "CDecl"            => { calling_conv = Some(CallingConv::Cdecl); }
-                    "StdCall"          => { calling_conv = Some(CallingConv::Stdcall); }
-                    "InterruptHandler" => { calling_conv = Some(CallingConv::Interrupt); }
-                    "Section"          => {
+                    "ForceInline" => { inline_ = true; }
+                    "async"       => { async_  = true; }
+                    "CallingConvention" => {
+                        self.expect(&Token::LParen)?;
+                        let conv = match self.current().clone() {
+                            Token::Str(s) => { self.advance(); s }
+                            _ => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new(
+                                    "@CallingConvention expects a string: \"C\", \"Windows\" or \"Interrupt\"",
+                                    line, col,
+                                ));
+                            }
+                        };
+                        self.expect(&Token::RParen)?;
+                        calling_conv = Some(match conv.as_str() {
+                            "C"         => CallingConv::Cdecl,
+                            "Windows"   => CallingConv::Stdcall,
+                            "Interrupt" => CallingConv::Interrupt,
+                            other => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new(
+                                    &format!("unknown calling convention '{}' — use \"C\", \"Windows\" or \"Interrupt\"", other),
+                                    line, col,
+                                ));
+                            }
+                        });
+                    }
+                    "Section" => {
                         self.expect(&Token::LParen)?;
                         match self.current().clone() {
                             Token::Str(s) => { section = Some(s); self.advance(); }
@@ -342,7 +365,7 @@ impl Parser {
                     other => {
                         let (line, col) = self.current_span();
                         return Err(ParseError::new(
-                            &format!("unknown method annotation '@{}' — available: @ForceInline, @CDecl, @StdCall, @InterruptHandler, @Section(\"...\")", other),
+                            &format!("unknown method annotation '@{}' — available: @ForceInline, @CallingConvention(\"...\"), @Section(\"...\")", other),
                             line, col,
                         ));
                     }
@@ -531,12 +554,35 @@ impl Parser {
                 self.advance();
                 let ann = self.expect_ident()?;
                 match ann.as_str() {
-                    "ForceInline"      => { inline_ = true; }
-                    "async"            => { async_ = true; }
-                    "CDecl"            => { calling_conv = Some(CallingConv::Cdecl); }
-                    "StdCall"          => { calling_conv = Some(CallingConv::Stdcall); }
-                    "InterruptHandler" => { calling_conv = Some(CallingConv::Interrupt); }
-                    "Section"          => {
+                    "ForceInline" => { inline_ = true; }
+                    "async"       => { async_  = true; }
+                    "CallingConvention" => {
+                        self.expect(&Token::LParen)?;
+                        let conv = match self.current().clone() {
+                            Token::Str(s) => { self.advance(); s }
+                            _ => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new(
+                                    "@CallingConvention expects a string: \"C\", \"Windows\" or \"Interrupt\"",
+                                    line, col,
+                                ));
+                            }
+                        };
+                        self.expect(&Token::RParen)?;
+                        calling_conv = Some(match conv.as_str() {
+                            "C"         => CallingConv::Cdecl,
+                            "Windows"   => CallingConv::Stdcall,
+                            "Interrupt" => CallingConv::Interrupt,
+                            other => {
+                                let (line, col) = self.current_span();
+                                return Err(ParseError::new(
+                                    &format!("unknown calling convention '{}' — use \"C\", \"Windows\" or \"Interrupt\"", other),
+                                    line, col,
+                                ));
+                            }
+                        });
+                    }
+                    "Section" => {
                         self.expect(&Token::LParen)?;
                         match self.current().clone() {
                             Token::Str(s) => { section = Some(s); self.advance(); }
@@ -550,7 +596,7 @@ impl Parser {
                     other => {
                         let (line, col) = self.current_span();
                         return Err(ParseError::new(
-                            &format!("unknown method annotation '@{}' — available: @ForceInline, @CDecl, @StdCall, @InterruptHandler, @Section(\"...\")", other),
+                            &format!("unknown method annotation '@{}' — available: @ForceInline, @CallingConvention(\"...\"), @Section(\"...\")", other),
                             line, col,
                         ));
                     }

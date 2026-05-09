@@ -139,12 +139,12 @@ public class Syscall {
 module kernel.boot;
 
 @Section(".boot")
-@CDecl
+@CallingConvention("C")
 public static _start() : Void { ... }
 ```
 - `@Freestanding` → stdlib import yok, `_start()` entry point, `-nostdlib` linker
 - `@Section(".text.init")` → linker section
-- `@CDecl`, `@StdCall`, `@InterruptHandler` → calling convention
+- `@CallingConvention("C")`, `@CallingConvention("Windows")`, `@CallingConvention("Interrupt")` → calling convention
 
 ### 2.7 noreturn
 ```arimo
@@ -283,7 +283,7 @@ arc_str_concat(...)
 - [ ] `asm {}` → LLVM inline asm
 - [ ] `@Freestanding` → `-nostdlib` linker flag
 - [ ] `@Section` → LLVM section attribute
-- [ ] `@CDecl` / `@StdCall` / `@InterruptHandler` → calling convention
+- [ ] `@CallingConvention("C")` / `@CallingConvention("Windows")` / `@CallingConvention("Interrupt")` → calling convention
 - [ ] `noreturn` → LLVM `unreachable` terminator
 - [ ] `@Packed` → LLVM packed struct
 - [ ] `@align(N)` → LLVM alignment attribute

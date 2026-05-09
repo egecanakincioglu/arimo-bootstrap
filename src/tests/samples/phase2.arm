@@ -55,12 +55,12 @@ public class Syscall {
 
 public class KernelEntry {
     @Section(".boot")
-    @CDecl
+    @CallingConvention("C")
     public static start() : Void {
         HardwareDriver.readStatus();
     }
 
-    @InterruptHandler
+    @CallingConvention("Interrupt")
     public static onTimer() : Void {
         Syscall.exit(0);
     }
