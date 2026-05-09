@@ -71,6 +71,41 @@ Result<T, E>                  // yerleşik generic enum
 type NodeId = u32;             // type alias
 ```
 
+### 2.6 Tip Uyumu Kuralları
+
+```arimo
+// Integer literal → Float'a atanabilir
+Float pi = 3;        // ✅  (3 → 3.0)
+Float f  = 42;       // ✅
+
+// Integer literal → herhangi bir sized integer'a atanabilir
+u8  byte  = 255;     // ✅
+i32 val   = -1;      // ✅
+
+// Sized integer → Integer (genel tip) atanabilir
+Integer n  = some_u32;   // ✅
+
+// Implicit widening YOK — aynı boyut grubu dışında cast zorunlu
+u32 word   = some_u64;   // ❌ HATA — as kullan
+u32 casted = some_u64 as u32;  // ✅
+
+// HashMap / TreeMap → Map (interface) atanabilir
+Map<String, Integer> m = HashMap();  // ✅
+```
+
+### 2.7 toString()
+
+Tüm class'lar otomatik olarak `toString() : String` metoduna sahiptir (Object'ten gelir).
+Override etmek için class içinde aynı imzalı metodu tanımla:
+
+```arimo
+public class Task {
+    public toString() : String {
+        return "[${this.status}] ${this.title}";
+    }
+}
+```
+
 ---
 
 ## 3. Tip Ayracı — Her Yerde Aynı Kural
@@ -396,14 +431,15 @@ if (r.isOk()) {
 ## 18. Koleksiyonlar
 
 ```arimo
-// List
-List<Task> tasks = List();
-List<String> names = List.of("Alice", "Bob");
+// List — üç oluşturma yolu
+List<Task>   tasks = List();                        // boş
+List<String> names = List.of("Alice", "Bob");       // başlangıç değerleriyle
+List<Task>   empty = List.empty();                  // boş (alternatif)
 
 tasks.append(task);
 tasks.length();
 tasks.isEmpty();
-tasks.filter((task) -> task.isDone());
+tasks.filter((task)   -> task.isDone());
 tasks.sortedBy((a, b) -> a.getTitle().compareTo(b.getTitle()));
 tasks.take(5);
 tasks.takeLast(5);
@@ -411,9 +447,12 @@ tasks.reduce(0, (sum, item) -> sum + item.getCount());
 
 // HashMap — sırasız
 Map<String, Integer> scores = HashMap();
+Map<String, Integer> preset = HashMap.of("alice", 100, "bob", 90);  // veya
+Map<String, Integer> alt    = HashMap.create();   // alternatif factory
+
 scores.set("alice", 100);
-scores.get("alice");
-scores.getOrDefault("bob", 0);
+Integer? val = scores.get("alice");              // nullable döndürür!
+Integer  v   = scores.getOrDefault("bob", 0);   // null-safe
 scores.containsKey("alice");
 scores.remove("alice");
 scores.keys();
@@ -421,17 +460,30 @@ scores.values();
 scores.entries();
 scores.length();
 
-// TreeMap — sıralı
+// TreeMap — key'e göre sıralı
 Map<String, Integer> sorted = TreeMap();
+Map<String, Integer> sortedAlt = TreeMap.create();
 
 // Array — compile-time boyut, stack
 Array<Float, 4> vec = Array.zeroed();
-vec[0] = 1.0;
-Integer len = vec.length();
-Slice<Float> view = vec.asSlice();
+vec[0] = 1.0;              // index ile yaz
+Float f = vec[0];          // index ile oku
+vec.get(0);                // alternatif getter
+vec.set(0, 1.0);           // alternatif setter
+Integer len  = vec.length();
+Slice<Float> view  = vec.asSlice();   // Slice'a dönüştür
+Slice<Float> view2 = vec.slice();     // alternatif
 
-// Pair
-Pair<String, Integer> pair = Pair.of("score", 100);
+// Slice — non-owning view
+Slice<Float> s = Slice.of(rawPtr, count);  // pointer'dan oluştur
+s.length();
+Float elem = s[0];   // index ile oku
+s.get(0);            // alternatif
+s.set(0, 1.0);       // alternatif setter
+
+// Pair — iki yol
+Pair<String, Integer> pair  = Pair.of("score", 100);   // factory
+Pair<String, Integer> pair2 = Pair("score", 100);       // direkt constructor
 pair.getFirst();
 pair.getSecond();
 ```
@@ -739,7 +791,25 @@ public class Application {
 
 ---
 
-## 30. Stdlib
+## 30. String Metodları
+
+```arimo
+String s = "Merhaba Dünya";
+
+s.length();                   // → Integer
+s.compareTo("other");         // → Integer  (-1 / 0 / 1)
+s.contains("Dünya");          // → Boolean
+s.startsWith("Mer");          // → Boolean
+s.endsWith("ya");             // → Boolean
+s.toUpper();                  // → String  ("MERHABA DÜNYA")
+s.toLower();                  // → String  ("merhaba dünya")
+s.trim();                     // → String  (baştan/sondan boşluk siler)
+s.split(" ");                 // → List<String>  (["Merhaba", "Dünya"])
+```
+
+---
+
+## 31. Stdlib
 
 ```arimo
 IO.print("mesaj");

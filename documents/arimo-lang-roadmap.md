@@ -318,7 +318,7 @@ arc_str_concat(...)
 ### Worktree Çalışma Düzeni
 ```powershell
 # Değişiklik yap (worktree'de)
-cd "C:\Users\Arimo\Desktop\arimo-compiler\.claude\worktrees\<worktree-adı>"
+cd "<worktree-dizini>"
 git add ...
 git commit -m "..."
 
@@ -330,7 +330,7 @@ git push origin master
 
 ### Derleme ve Test
 ```powershell
-cd "C:\Users\Arimo\Desktop\arimo-compiler\.claude\worktrees\<worktree-adı>"
+cd "<worktree-dizini>"
 cargo build
 .\target\debug\arc.exe src\tests\samples\comprehensive.arm
 .\target\debug\arc.exe src\tests\samples\phase2.arm
