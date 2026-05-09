@@ -78,6 +78,8 @@ pub struct CodeGen<'ctx> {
     cur_class : Option<String>,
     // Enum variant değerleri: enum adı → variant adı → i32 değeri
     enum_variants : HashMap<String, HashMap<String, u32>>,
+    // Static field global'ları: "ClassName.fieldName" → global pointer
+    static_fields : HashMap<String, inkwell::values::GlobalValue<'ctx>>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
@@ -95,6 +97,7 @@ impl<'ctx> CodeGen<'ctx> {
             field_indices : HashMap::new(),
             cur_class     : None,
             enum_variants : HashMap::new(),
+            static_fields : HashMap::new(),
         }
     }
 
@@ -200,6 +203,12 @@ impl<'ctx> CodeGen<'ctx> {
                 self.register_class_methods(c)?;
             }
         }
+        // Geçiş 2.5: static field başlangıç değerlerini ayarla
+        for item in &module.items {
+            if let Item::Class(c) = item {
+                self.init_static_fields(c)?;
+            }
+        }
         // Geçiş 3: gövdeleri üret
         for item in &module.items {
             match item {
@@ -224,26 +233,94 @@ impl<'ctx> CodeGen<'ctx> {
     // ── Class struct tipi kayıt ──────────────────────────────────────────────
 
     fn register_class_struct(&mut self, c: &ClassDecl) {
-        // Sadece instance field'ları (static değil)
-        let field_types: Vec<BasicTypeEnum<'ctx>> = c.fields.iter()
-            .filter(|f| !f.static_)
-            .filter_map(|f| self.llvm_type(&f.ty))
-            .collect();
-
-        let struct_ty = self.ctx.struct_type(&field_types, false);
-        self.struct_types.insert(c.name.clone(), struct_ty);
-
-        // Field adı → indeks eşlemesi
-        let mut idx_map = HashMap::new();
+        // Inheritance: parent field'larını da struct'a ekle
+        let mut all_field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+        let mut idx_map: HashMap<String, u32> = HashMap::new();
         let mut idx = 0u32;
-        for f in c.fields.iter().filter(|f| !f.static_) {
-            idx_map.insert(f.name.clone(), idx);
-            idx += 1;
+
+        // Parent struct field'ları önce gelir
+        if let Some(parent_name) = &c.extends {
+            if let Some(parent_fields) = self.field_indices.get(parent_name).cloned() {
+                if let Some(parent_struct) = self.struct_types.get(parent_name).copied() {
+                    for fi in 0..parent_struct.count_fields() {
+                        if let Some(ft) = parent_struct.get_field_type_at_index(fi) {
+                            all_field_types.push(ft);
+                        }
+                    }
+                    for (fname, fidx) in &parent_fields {
+                        idx_map.insert(fname.clone(), *fidx);
+                        idx = idx.max(*fidx + 1);
+                    }
+                }
+            }
         }
+
+        // Kendi instance field'ları
+        for f in c.fields.iter().filter(|f| !f.static_) {
+            if let Some(ft) = self.llvm_type(&f.ty) {
+                all_field_types.push(ft);
+                idx_map.insert(f.name.clone(), idx);
+                idx += 1;
+            }
+        }
+
+        let struct_ty = self.ctx.struct_type(&all_field_types, false);
+        self.struct_types.insert(c.name.clone(), struct_ty);
         self.field_indices.insert(c.name.clone(), idx_map);
+
+        // Static field'lar → LLVM global değişkenler
+        for f in c.fields.iter().filter(|f| f.static_) {
+            let global_name = format!("{}_{}", c.name, f.name);
+            if self.module.get_global(&global_name).is_some() { continue; }
+
+            if let Some(llvm_ty) = self.llvm_type(&f.ty) {
+                let zero = self.make_zero_value(llvm_ty);
+                let global = self.module.add_global(llvm_ty, None, &global_name);
+                global.set_initializer(&zero);
+                global.set_linkage(inkwell::module::Linkage::Internal);
+                self.static_fields.insert(global_name, global);
+            }
+        }
+    }
+
+    fn make_zero_value(&self, ty: BasicTypeEnum<'ctx>) -> inkwell::values::BasicValueEnum<'ctx> {
+        match ty {
+            BasicTypeEnum::IntType(t)     => t.const_int(0, false).into(),
+            BasicTypeEnum::FloatType(t)   => t.const_float(0.0).into(),
+            BasicTypeEnum::PointerType(t) => t.const_null().into(),
+            _                             => self.ctx.i64_type().const_int(0, false).into(),
+        }
     }
 
     // ── Enum kayıt ───────────────────────────────────────────────────────────
+
+    // Static field başlangıç değerleri — compile zamanında sabit ise global'e yaz
+    fn init_static_fields(&mut self, c: &ClassDecl) -> CgResult<()> {
+        for f in c.fields.iter().filter(|f| f.static_) {
+            let global_name = format!("{}_{}", c.name, f.name);
+            if let Some(gv) = self.module.get_global(&global_name) {
+                if let Some(init_expr) = &f.value {
+                    // Sadece compile-time sabit değerleri direkt ata
+                    let const_val: Option<inkwell::values::BasicValueEnum> = match init_expr {
+                        Expr::IntLit(n)   => Some(self.ctx.i64_type().const_int(*n as u64, *n < 0).into()),
+                        Expr::FloatLit(f) => Some(self.ctx.f64_type().const_float(*f).into()),
+                        Expr::BoolLit(b)  => Some(self.ctx.bool_type().const_int(*b as u64, false).into()),
+                        Expr::StrLit(s)   => {
+                            // String → global string pointer
+                            let gs = self.builder.build_global_string_ptr(s, &format!("{}_str", global_name))
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            Some(gs.as_pointer_value().into())
+                        }
+                        _ => None,
+                    };
+                    if let Some(cv) = const_val {
+                        gv.set_initializer(&cv);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     fn register_enum(&mut self, e: &EnumDecl) {
         let mut variants = HashMap::new();
@@ -1161,11 +1238,21 @@ impl<'ctx> CodeGen<'ctx> {
 
             // ── FieldAccess ───────────────────────────────────────────────────
             Expr::FieldAccess { object, field } => {
-                // Enum.Variant → integer sabit
-                if let Expr::Ident(enum_name) = object.as_ref() {
-                    if let Some(val) = self.enum_variant_value(enum_name, field) {
+                if let Expr::Ident(class_or_enum) = object.as_ref() {
+                    // Enum.Variant → integer sabit
+                    if let Some(val) = self.enum_variant_value(class_or_enum, field) {
                         let iv = self.ctx.i32_type().const_int(val as u64, false);
                         return Ok(Some(iv.into()));
+                    }
+                    // ClassName.staticField → global değişken okuma
+                    let global_name = format!("{}_{}", class_or_enum, field);
+                    if let Some(gv) = self.module.get_global(&global_name) {
+                        let ptr  = gv.as_pointer_value();
+                        if let Some(g_ty) = self.any_to_basic(gv.get_value_type()) {
+                            let val = self.builder.build_load(g_ty, ptr, field)
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            return Ok(Some(val));
+                        }
                     }
                 }
                 self.compile_field_load(object, field)
@@ -1640,12 +1727,32 @@ impl<'ctx> CodeGen<'ctx> {
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
                     }
                 }
-                // this.field = value
+                // this.field = value  veya  ClassName.staticField = value
                 Expr::FieldAccess { object, field } => {
-                    let class_name = self.infer_object_class(object);
-                    let obj_ptr = self.compile_expr(object)?;
-                    if let (Some(cn), Some(BasicValueEnum::PointerValue(ptr))) = (class_name, obj_ptr) {
-                        self.gep_field_store(&cn.clone(), ptr, field, v)?;
+                    // Static field yazmayı önce dene
+                    if let Expr::Ident(class_name) = object.as_ref() {
+                        let global_name = format!("{}_{}", class_name, field);
+                        if let Some(gv) = self.module.get_global(&global_name) {
+                            let ptr = gv.as_pointer_value();
+                            if let Some(g_ty) = self.any_to_basic(gv.get_value_type()) {
+                                let coerced = self.coerce_value(v, g_ty)?;
+                                self.builder.build_store(ptr, coerced)
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            }
+                        } else {
+                            // Instance field yazma
+                            let cn = self.infer_object_class(object);
+                            let obj_ptr = self.compile_expr(object)?;
+                            if let (Some(cn), Some(BasicValueEnum::PointerValue(ptr))) = (cn, obj_ptr) {
+                                self.gep_field_store(&cn.clone(), ptr, field, v)?;
+                            }
+                        }
+                    } else {
+                        let class_name = self.infer_object_class(object);
+                        let obj_ptr = self.compile_expr(object)?;
+                        if let (Some(cn), Some(BasicValueEnum::PointerValue(ptr))) = (class_name, obj_ptr) {
+                            self.gep_field_store(&cn.clone(), ptr, field, v)?;
+                        }
                     }
                 }
                 _ => {}
@@ -1746,6 +1853,19 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     /// Shift için: sağ operandı sol operandın genişliğine getir
+    fn any_to_basic(&self, any: inkwell::types::AnyTypeEnum<'ctx>) -> Option<BasicTypeEnum<'ctx>> {
+        use inkwell::types::AnyTypeEnum;
+        match any {
+            AnyTypeEnum::IntType(t)     => Some(t.into()),
+            AnyTypeEnum::FloatType(t)   => Some(t.into()),
+            AnyTypeEnum::PointerType(t) => Some(t.into()),
+            AnyTypeEnum::ArrayType(t)   => Some(t.into()),
+            AnyTypeEnum::StructType(t)  => Some(t.into()),
+            AnyTypeEnum::VectorType(t)  => Some(t.into()),
+            _ => None,
+        }
+    }
+
     fn match_int_width(
         &mut self,
         val  : inkwell::values::IntValue<'ctx>,

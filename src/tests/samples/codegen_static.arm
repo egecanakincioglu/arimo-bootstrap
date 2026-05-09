@@ -1,0 +1,35 @@
+module arimo.codegenstatic;
+
+public class Config {
+    public static readonly VERSION : Integer = 14;
+    public static readonly MAX_SIZE : Integer = 1024;
+    public static count : Integer = 0;
+
+    public static increment() : Void {
+        Config.count = Config.count + 1;
+    }
+
+    public static getCount() : Integer {
+        return Config.count;
+    }
+}
+
+public class Application {
+    public static main() : Void {
+        // Static readonly field okuma
+        Integer v = Config.VERSION;
+        IO.print("Versiyon: ${v}");
+
+        Integer m = Config.MAX_SIZE;
+        IO.print("Max: ${m}");
+
+        // Static mutable field
+        Config.increment();
+        Config.increment();
+        Config.increment();
+        Integer c = Config.getCount();
+        IO.print("Sayac: ${c}");
+
+        IO.print("codegen_static: OK");
+    }
+}

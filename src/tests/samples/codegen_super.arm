@@ -1,0 +1,63 @@
+module arimo.codegensuper;
+
+public abstract class Shape {
+    private readonly color : Integer;
+
+    protected constructor(color: Integer) {
+        this.color = color;
+    }
+
+    public getColor() : Integer {
+        return this.color;
+    }
+
+    public abstract area() : Float;
+}
+
+public class Circle extends Shape {
+    private readonly radius : Float;
+
+    public constructor(radius: Float, color: Integer) {
+        super(color);
+        this.radius = radius;
+    }
+
+    public area() : Float {
+        return 3.14 * this.radius * this.radius;
+    }
+
+    public getRadius() : Float {
+        return this.radius;
+    }
+}
+
+public class Rectangle extends Shape {
+    private readonly width  : Float;
+    private readonly height : Float;
+
+    public constructor(width: Float, height: Float, color: Integer) {
+        super(color);
+        this.width  = width;
+        this.height = height;
+    }
+
+    public area() : Float {
+        return this.width * this.height;
+    }
+}
+
+public class Application {
+    public static main() : Void {
+        Circle c = Circle(5.0, 1);
+        Float cArea = c.area();
+        Integer cColor = c.getColor();
+        IO.print("Daire alan: ${cArea}");
+        IO.print("Daire renk: ${cColor}");
+
+        Rectangle r = Rectangle(4.0, 3.0, 2);
+        Float rArea = r.area();
+        IO.print("Dikdortgen alan: ${rArea}");
+
+        IO.print("codegen_super: OK");
+    }
+}
