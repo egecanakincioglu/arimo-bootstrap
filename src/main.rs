@@ -5,7 +5,7 @@ mod typechecker;
 mod borrow;
 mod codegen;
 
-use std::{env, fs, process};
+use std::{env, fs, path::Path, process};
 use lexer::Lexer;
 use parser::Parser;
 use typechecker::TypeChecker;
@@ -132,5 +132,46 @@ fn main() {
             eprintln!("arc: {}", err);
         }
         process::exit(1);
+    }
+
+    // CodeGen
+    println!("");
+    let stem   = Path::new(path).file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let obj_path = format!("{}.o", stem);
+    let exe_path = format!("{}.exe", stem);
+
+    print!("arc: codegen ...");
+    match codegen::compile_to_object(&module, stem, Path::new(&obj_path)) {
+        Ok(()) => {
+            println!(" OK");
+            println!("arc: object file → {}", obj_path);
+
+            // Linker: gcc ile native binary üret
+            let linker_status = std::process::Command::new("gcc")
+                .args([&obj_path, "-o", &exe_path, "-lm"])
+                .status();
+
+            match linker_status {
+                Ok(s) if s.success() => {
+                    println!("arc: linked     → {}", exe_path);
+                    println!("arc: done ✓");
+                }
+                Ok(s) => {
+                    eprintln!("arc: linker failed (exit {})", s);
+                    process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("arc: linker not found — {}", e);
+                    eprintln!("arc: install gcc and add to PATH");
+                    process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("arc: codegen error — {}", e);
+            process::exit(1);
+        }
     }
 }
