@@ -64,320 +64,575 @@ Nihai hedef: Arimo compiler'ını (arc) Arimo'nun kendisiyle yeniden yazmak.
 ## FAZA 3 — Performance + Annotation Sistemi ✅ TAMAMLANDI
 
 ### 3.1 SIMD Tipleri ✅
-- `Vec4f`, `Vec8f`, `Vec4i`, `Vec8i` — TypeChecker'da kayıtlı
-
 ### 3.2 @Likely / @Unlikely ✅
-- `if @Likely (cond)` — AST'de saklanır, CodeGen'de implement edilecek
-
 ### 3.3 Interface default metodlar ✅
-- `default methodName() : Type { body }` — override etmek zorunda değil
-
-### 3.4 async / await ✅
-- Parse+AST tamam; CodeGen state machine (Faza 4'te)
-
-### 3.5 Annotation Sistemi ✅ (PascalCase, Java/Kotlin stilinde)
-
-| Annotation | Seviye | Durum |
-|---|---|---|
-| `@ManualMemory` | class | ✅ BorrowChecker atlar |
-| `@ForceInline` | method | ✅ Kaydedilir |
-| `@Freestanding` | module | ✅ -nostdlib flag |
-| `@Packed` | struct | ✅ Kaydedilir |
-| `@Align(N)` | struct | ✅ Kaydedilir |
-| `@Section("...")` | method | ✅ Kaydedilir |
-| `@CallingConvention("...")` | method | ✅ Kaydedilir |
-| `@Likely` / `@Unlikely` | if | ✅ AST'de BranchHint |
-| `@Deprecated("msg")` | class/method | ✅ Kullanımda uyarı |
-| `@Experimental` | class/method | ✅ Kullanımda uyarı |
-| `@FunctionalInterface` | interface | ✅ 1 abstract metod zorunlu |
-| `@Throws(...)` | method | ✅ Kaydedilir |
-| `@SuppressWarnings(...)` | class/method | ✅ Kaydedilir |
-| `@Sealed` | class/interface | ✅ Aynı modülden extend zorunlu |
-| `@Pure` | method | ✅ Kaydedilir |
-| `@Immutable` | class | ✅ Tüm field'lar readonly zorunlu |
+### 3.4 async / await ✅ (parse + AST)
+### 3.5 Annotation Sistemi ✅ (16 annotation)
 
 ---
 
-## FAZA 4 — CodeGen (LLVM / inkwell) 🚧 DEVAM EDİYOR
+## FAZA 4 — CodeGen (LLVM / inkwell) 🚧
 
 **Kurulum:**
 - LLVM 21.1.8 (MSYS2 MinGW): `C:\msys64\mingw64`
 - inkwell 0.9.0 — `llvm21-1` feature
 - Target: `x86_64-pc-windows-gnu`
-- `.cargo/config.toml` → linker + env ayarları
 
-**Derleme:**
-```powershell
-$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
-cargo build --target x86_64-pc-windows-gnu
-.\target\x86_64-pc-windows-gnu\debug\arc.exe src\tests\samples\hello.arm
-```
+### 4.1–4.11 ✅ TAMAMLANDI
+Temel altyapı, operatörler, kontrol akışı, fonksiyon/metod üretimi, class instances, enum codegen, inheritance, static fields, stdlib stubs, collections runtime (List/HashMap/Pair).
 
-### 4.1 Temel Altyapı ✅
-### 4.2 Operatörler ✅
-### 4.3 Kontrol Akışı ✅
-### 4.4 Fonksiyon ve Metod Üretimi ✅
-### 4.5 Class Instances ✅
-### 4.6 Enum CodeGen ✅
-### 4.7 Inheritance ✅
-### 4.8 Static Fields ✅
-### 4.9 Stdlib Stubs ✅
-### 4.10 comprehensive.arm → native .exe ✅
+### 4.12–4.18 ✅ TAMAMLANDI (2026-05-10)
+Break/Continue, string metodları (14 metod), string concat, IO.println, lambda genel codegen, match expression, asm{} codegen, @Packed struct, LLVM fonksiyon attribute'ları (@ForceInline/@Pure/@Section/@CallingConvention), output flag'leri (-O2/-c).
 
-### 4.11 Collections Runtime ✅ TAMAMLANDI
-- `List<T>` → saf LLVM IR, flat-array tasarımı
-  - `append()`, `length()`, `isEmpty()`, `get(i)`, `filter(lambda)`, `for-each`
-- `HashMap<K,V>` → lineer arama, strcmp ile key karşılaştırma
-  - `set()`, `getOrDefault()`, `get()`
-- `Pair<A,B>` → 16-byte malloc blok
-  - constructor, `getFirst()`, `getSecond()`
-- Lambda → LLVM function pointer (`arc_lambda_N`)
-- ForEach → `arc_list_length` + `arc_list_get` döngüsü
-- StrInterp return bağlamında → `sprintf` + `malloc(1024)`
+### 4.19 Kalan CodeGen Eksikleri ⬜
 
----
+#### 4.19.1 Bellek Yönetimi — ARC
+- [ ] Class struct'a `refcount` field'ı ekle (i64)
+- [ ] Constructor'da `refcount = 1` init
+- [ ] Nesne paylaşılınca `refcount++`
+- [ ] `refcount--` + `if refcount == 0 { free() }` — scope çıkışında
+- [ ] `@ManualMemory` class'larında otomatik free atla
+- [ ] BorrowChecker `drop_schedule`'ı kullanarak scope sırasını belirle
+- [ ] Weak referanslar için `weak_count` field'ı (gelecek)
 
-## FAZA 4 — Kalan CodeGen İşleri ⬜
+#### 4.19.2 Exception Handling — Gerçek Implementasyon
+- [ ] `throw ExceptionType(msg)` → heap'te exception nesnesi oluştur + LLVM `resume`
+- [ ] `try/catch` → LLVM `invoke` + `landingpad` + `personality` fonksiyonu
+- [ ] Birden fazla `catch` tipi → tip karşılaştırması (RTTI benzeri)
+- [ ] `finally` bloğu → her çıkış yolunda (return, throw) çalışması garanti
+- [ ] `Exception.message()` → heap'teki mesaj string'ini döndür
+- [ ] Exception kalıtımı → `instanceof` kontrolü (parent type catch)
 
-### 4.12 Lambda — Tam Destek
-- [ ] Genel lambda → LLVM function pointer (şu an sadece filter'da çalışıyor)
-- [ ] Closure capture — dış scope değişkenlerine erişim
-- [ ] `list.sortedBy(comparator)` → qsort entegrasyonu
-- [ ] `list.reduce(init, fn)` → fold işlemi
-- [ ] Lambda'nın değişkene atanması: `(Integer) -> Boolean fn = (x) -> x > 0;`
-- [ ] Atanan lambda'nın çağrılması: `Boolean r = fn(42);`
+#### 4.19.3 Lambda — Closure Capture
+- [ ] Dış scope değişkenlerini tespit et (free variable analysis)
+- [ ] Capture list'i heap'te struct olarak paketle
+- [ ] Lambda fonksiyonuna closure ptr'ı ekstra parametre olarak geç
+- [ ] `[x, y] -> x + y` syntax ile explicit capture (gelecek)
 
-### 4.13 String Metodları
-- [ ] `str.length()` → strlen
-- [ ] `str.contains(sub)` → strstr != null
-- [ ] `str.startsWith(prefix)` → strncmp
-- [ ] `str.endsWith(suffix)` → strncmp + offset
-- [ ] `str.toUpper()` → toupper loop
-- [ ] `str.toLower()` → tolower loop
-- [ ] `str.trim()` → baştan ve sondan boşluk sil
-- [ ] `str.split(delim)` → `List<String>` döndür
-- [ ] `str.compareTo(other)` → strcmp → Integer
-- [ ] `str + other` → runtime concat (strcat tabanlı)
-- [ ] Enum değerinin string'e otomatik dönüşümü: `${this.status}` → `TaskStatus_label(val)`
+#### 4.19.4 Eksik Expression Codegen
+- [ ] `Expr::NullSafeAccess { object, field, args }` → null check + conditional dispatch
+- [ ] `Expr::Super` → parent class field/metod erişimi (constructor dışında)
+- [ ] `Stmt::Defer` → scope sonunda çalışacak ifade listesi (LIFO sırasıyla)
 
-### 4.14 Exception Handling
-- [ ] `throw ExceptionType(args)` → basit: `abort()` çağrısı
-- [ ] `try/catch` → catch bloğunu şimdilik atla, try body'yi çalıştır (mevcut)
-- [ ] `try/catch` → LLVM `landingpad` ile gerçek exception (gelişmiş, sonraki adım)
-- [ ] `finally` bloğu → her durumda çalışması garantilenmeli
-- [ ] `Exception.message()` → mesaj string'i döndür
-- [ ] Exception kalıtımı → `instanceof` benzeri kontrol
-
-### 4.15 ARC Memory Management
-- [ ] BorrowChecker `drop_schedule`'ı kullanarak scope çıkışında `free()` ekle
-- [ ] `@ManualMemory` class'larda otomatik free atla
-- [ ] Referans sayımı için refcount field'ı (class struct'a ekle)
-- [ ] `refcount++` → nesne paylaşılınca
-- [ ] `refcount--` + `free()` → refcount 0'a düşünce
-
-### 4.16 Systems CodeGen
-- [ ] `volatile load/store` → LLVM `volatile` attribute
-- [ ] `extern "C" { ... }` → LLVM `declare` (şu an TypeChecker'da kayıtlı, CodeGen'e taşınmalı)
-- [ ] `asm { ... }` → LLVM inline asm string
-- [ ] `noreturn` → LLVM `unreachable` terminatörü
-- [ ] `@Packed` struct → LLVM `{ packed }` struct type
-- [ ] `@Align(N)` struct → LLVM alignment attribute
-- [ ] `@Section("isim")` → LLVM section attribute
-- [ ] `@CallingConvention("C")` → LLVM calling convention
-
-### 4.17 Performance CodeGen
-- [ ] SIMD tipleri → LLVM vector types (`<4 x float>` vb.)
-  - `Vec4f` + `Vec8f` operatörleri → `fadd <4 x float>` vb.
+#### 4.19.5 Systems CodeGen Tamamlama
+- [ ] `volatile` load/store → LLVM `volatile` flag
+- [ ] `noreturn` fonksiyon → LLVM `noreturn` attribute + `unreachable` terminatör
 - [ ] `@Likely/@Unlikely` → LLVM `branch_weights` metadata
-- [ ] `async/await` → state machine dönüşümü (coroutine tabanlı)
-- [ ] `@ForceInline` → LLVM `alwaysinline` attribute
-- [ ] `@Pure` → LLVM `readnone` attribute
+- [ ] `@Align(N)` → alloca ve global'lere alignment attribute
+- [ ] SIMD tipleri → LLVM `<4 x float>` vb. vector types
+  - Vec4f/Vec8f/Vec4i/Vec8i için aritmetik operatörler
+  - `length()`, `normalize()`, `dot(other)` metodları
 
-### 4.18 Output İyileştirme
-- [ ] `-O2` / `-O0` flag → `OptimizationLevel::Aggressive` / `None`
-- [ ] Debug info (DWARF) → inkwell debug info API
-- [ ] Cross-compilation: Linux (`x86_64-unknown-linux-gnu`), macOS (`aarch64-apple-darwin`)
-- [ ] `-emit-llvm` flag → ham LLVM IR dosyası (şu an `--emit-ir` var, geliştirilebilir)
-- [ ] `-c` flag → sadece `.o` üret, link etme
+#### 4.19.6 Collections Tamamlama
+- [ ] `List.sortedBy(comparator)` → C `qsort` entegrasyonu
+- [ ] `List.reduce(init, fn)` → fold işlemi
+- [ ] `List.map(fn)` → dönüştürme, yeni liste döndür
+- [ ] `List.flatMap(fn)` → nested list düzleştirme
+- [ ] `List.any(fn)` / `List.all(fn)` → boolean aggregate
+- [ ] `List.distinct()` → tekrar edenleri çıkar
+- [ ] `HashMap.entries()` → `List<Pair<K,V>>`
+- [ ] `HashMap.remove(key)` → slot temizle
+- [ ] `HashMap.containsKey(key)` → gerçek implementasyon (şu an stub)
+- [ ] `HashMap.length()` → kayıtlı eleman sayısı
+
+#### 4.19.7 String Tamamlama
+- [ ] `str.substring(start, end)` → malloc + memcpy
+- [ ] `str.replace(old, new)` → strstr + malloc + concat
+- [ ] Enum değerinin string'e dönüşümü: `${enumVal}` → label fonksiyonu
+
+#### 4.19.8 async/await — State Machine
+- [ ] Async fonksiyon → LLVM coroutine (`llvm.coro.*` intrinsics)
+- [ ] `await expr` → suspend point
+- [ ] Basit polling tabanlı executor (Faza 9'a bağımlı)
 
 ---
 
 ## FAZA 5 — Stdlib ⬜
 
 Stdlib, Arimo kaynak dosyaları (`.arm`) olarak yazılır ve arc ile derlenir.
-Her modül ayrı bir `.arm` dosyasıdır.
 
 ### 5.1 arimo.io — Giriş/Çıkış
 - [ ] `IO.print(msg)` → terminal çıktısı (şu an çalışıyor, stdlib'e taşınacak)
-- [ ] `IO.println(msg)` → newline ekleyerek yaz
+- [ ] `IO.println(msg)` → newline ekleyerek yaz (codegen var, stdlib'e taşınacak)
 - [ ] `IO.read()` → stdin'den satır oku
 - [ ] `IO.readInt()` → stdin'den Integer oku
+- [ ] `IO.readFloat()` → stdin'den Float oku
 - [ ] `IO.error(msg)` → stderr'e yaz
 
-### 5.2 arimo.fs — Dosya Sistemi
-- [ ] `File.open(path)` → dosya aç
+### 5.2 arimo.fs — Dosya Sistemi ← **Bootstrap için öncelikli**
+- [ ] `File.open(path, mode)` → dosya handle'ı aç
 - [ ] `File.read(path)` → tüm içeriği String olarak oku
+- [ ] `File.readLines(path)` → `List<String>`
 - [ ] `File.write(path, content)` → dosyaya yaz
 - [ ] `File.append(path, content)` → dosyaya ekle
 - [ ] `File.exists(path)` → Boolean
 - [ ] `File.delete(path)` → dosyayı sil
+- [ ] `File.size(path)` → Integer (byte)
 - [ ] `Directory.list(path)` → `List<String>` dosya/klasör adları
 - [ ] `Directory.create(path)` → klasör oluştur
+- [ ] `Directory.exists(path)` → Boolean
 - [ ] `Path.join(parts...)` → yol birleştir
 - [ ] `Path.extension(path)` → uzantı al
+- [ ] `Path.basename(path)` → dosya adı
+- [ ] `Path.dirname(path)` → klasör adı
 
 ### 5.3 arimo.time — Tarih/Saat
-- [ ] `Time.now()` → gerçek zaman damgası (şu an stub)
+- [ ] `Time.now()` → gerçek zaman damgası
 - [ ] `Time.nowMillis()` → Unix millisaniye
-- [ ] `Time.generateId()` → gerçek UUID (şu an counter tabanlı)
+- [ ] `Time.nowNanos()` → yüksek çözünürlüklü zaman
+- [ ] `Time.generateId()` → gerçek UUID (time-based)
 - [ ] `Time.format(timestamp, pattern)` → tarih formatlama
+- [ ] `Time.parse(str, pattern)` → string → timestamp
+- [ ] `Time.sleep(ms)` → bekle
 
 ### 5.4 arimo.collections — Gelişmiş Koleksiyonlar
-- [ ] `List.sortedBy()` → qsort entegrasyonu
-- [ ] `List.take(n)` / `List.takeLast(n)`
-- [ ] `List.reduce(init, fn)`
+- [ ] `List.sortedBy(fn)` → sıralı liste
+- [ ] `List.take(n)` / `List.drop(n)`
+- [ ] `List.takeLast(n)` / `List.dropLast(n)`
+- [ ] `List.reduce(init, fn)` → fold
 - [ ] `List.map(fn)` → dönüştürme
-- [ ] `List.flatMap(fn)`
+- [ ] `List.flatMap(fn)` → nested düzleştirme
 - [ ] `List.any(fn)` / `List.all(fn)`
-- [ ] `List.distinct()` → tekrar edenleri çıkar
+- [ ] `List.distinct()` → tekrarsız
+- [ ] `List.zip(other)` → `List<Pair<A,B>>`
+- [ ] `List.chunked(n)` → `List<List<T>>`
+- [ ] `List.reversed()` → tersine sıralı
+- [ ] `List.joinToString(sep)` → String
 - [ ] `HashMap.entries()` → `List<Pair<K,V>>`
 - [ ] `HashMap.keys()` → `List<K>`
 - [ ] `HashMap.values()` → `List<V>`
-- [ ] `HashMap.remove(key)`
-- [ ] `HashMap.containsKey(key)`
+- [ ] `HashMap.remove(key)` → sil
+- [ ] `HashMap.containsKey(key)` → Boolean
+- [ ] `HashMap.forEach((k,v) -> ...)` → iterasyon
 - [ ] `TreeMap<K,V>` → sıralı map implementasyonu
+- [ ] `Set<T>` → benzersiz eleman koleksiyonu
+- [ ] `Queue<T>` → FIFO kuyruk
+- [ ] `Stack<T>` → LIFO yığın
+- [ ] `LinkedList<T>` → çift bağlı liste
 
 ### 5.5 arimo.math — Matematik
 - [ ] `Math.min(a, b)` / `Math.max(a, b)`
 - [ ] `Math.floor(f)` / `Math.ceil(f)` / `Math.round(f)`
 - [ ] `Math.log(x)` / `Math.log2(x)` / `Math.log10(x)`
 - [ ] `Math.sin(x)` / `Math.cos(x)` / `Math.tan(x)`
+- [ ] `Math.asin(x)` / `Math.acos(x)` / `Math.atan2(y, x)`
 - [ ] `Math.random()` → 0.0–1.0 arası Float
+- [ ] `Math.randomInt(min, max)` → Integer
 - [ ] `Integer.MAX` / `Integer.MIN` sabitleri
+- [ ] `Float.INFINITY` / `Float.NAN` sabitleri
+- [ ] `Float.isNaN(f)` / `Float.isInfinite(f)`
 
 ### 5.6 arimo.string — String Yardımcıları
 - [ ] `String.format(template, args...)` → sprintf benzeri
-- [ ] `String.parseInt(s)` → Integer
-- [ ] `String.parseFloat(s)` → Float
+- [ ] `String.parseInt(s)` → Integer veya throws
+- [ ] `String.parseFloat(s)` → Float veya throws
 - [ ] `Integer.toString(n)` → String
 - [ ] `Float.toString(f)` → String
+- [ ] `Boolean.toString(b)` → "true" / "false"
+- [ ] `String.repeat(n)` → tekrarlı string
+- [ ] `String.padStart(len, char)` → sola pad
+- [ ] `String.padEnd(len, char)` → sağa pad
+- [ ] `String.isEmpty()` → Boolean
+- [ ] `String.isBlank()` → boşluk kontrolü
+- [ ] `String.chars()` → `List<Char>` (Char tipi sonraki fazda)
 
-### 5.7 arimo.net — Ağ (İleri Aşama)
+### 5.7 arimo.env — Ortam
+- [ ] `Env.get(key)` → String? (nullable)
+- [ ] `Env.set(key, value)` → Void
+- [ ] `Env.args()` → `List<String>` (komut satırı argümanları)
+- [ ] `Env.exit(code)` → noreturn
+- [ ] `Env.platform()` → "windows" / "linux" / "macos"
+
+### 5.8 arimo.process — Süreç
+- [ ] `Process.run(cmd, args)` → çıktı + exit code
+- [ ] `Process.spawn(cmd, args)` → arka planda çalıştır
+- [ ] `Process.pid()` → mevcut process ID
+
+### 5.9 arimo.net — Ağ *(ileri aşama)*
 - [ ] `HttpClient.get(url)` → String response
 - [ ] `HttpClient.post(url, body)` → String response
-- [ ] `TcpSocket` — bağlantı aç/kapat, oku/yaz
+- [ ] `TcpSocket.connect(host, port)` → bağlantı aç
+- [ ] `TcpSocket.read()` → String
+- [ ] `TcpSocket.write(data)` → Void
+- [ ] `TcpSocket.close()` → Void
+- [ ] `UdpSocket` → temel UDP desteği
 
-### 5.8 Tooling
-- [ ] VSCode extension — syntax highlighting (`.arm` dosyaları için)
-- [ ] Language Server Protocol (LSP) — otomatik tamamlama, hata gösterimi
-- [ ] `arc.toml` — proje manifest dosyası (bağımlılık yönetimi)
-- [ ] `arc build` / `arc run` / `arc test` — CLI komutları
+### 5.10 arimo.sync — Eşzamanlılık *(Faza 9'a bağımlı)*
+- [ ] `Mutex<T>` → karşılıklı dışlama kilidi
+- [ ] `RwLock<T>` → okuma/yazma kilidi
+- [ ] `Channel<T>` → mesaj iletimi (mpsc)
+- [ ] `Atomic<T>` → atomik okuma/yazma
+- [ ] `Barrier` → senkronizasyon noktası
 
 ---
 
-## FAZA 6 — Bootstrapping (arc'ı Arimo ile Yeniden Yazma) ⬜
+## FAZA 6 — Dil Genişletmeleri v2.0 ⬜
 
-Bootstrapping: bir derleyiciyi kendi derlediği dille yeniden yazmak.
-Bu Arimo'nun olgunluk kanıtıdır.
+Arimo v1.4 üzerine eklenen yeni dil özellikleri.
 
-### Ön Koşullar
+### 6.1 Null Coalescing `??`
+```arimo
+String name = user.getName() ?? "Anonim";
+Integer port = config.port ?? 8080;
+```
 
-Bootstrapping başlamadan önce şunlar tamamlanmış olmalıdır:
+### 6.2 `is` Type Check + `as?` Safe Cast
+```arimo
+if (shape is Circle) { ... }
+Circle? c = shape as? Circle;  // null döner, throw değil
+```
+
+### 6.3 `?` Error Propagation Operatörü
+```arimo
+// Result<T,E> döndüren metodlarda ? kullanılabilir
+Integer n = parseInt(input)?;  // Err ise dışarı fırlat
+```
+
+### 6.4 Default Parametre Değerleri
+```arimo
+method greet(String name, String prefix = "Merhaba") : String {
+    return "${prefix}, ${name}!";
+}
+greet("Ali");            // "Merhaba, Ali!"
+greet("Ali", "Selam");  // "Selam, Ali!"
+```
+
+### 6.5 Named Parameters
+```arimo
+method connect(String host, Integer port = 80, Boolean ssl = false) : Connection { ... }
+connect(host: "example.com", ssl: true);  // port varsayılan
+```
+
+### 6.6 Destructuring
+```arimo
+Pair<Integer, String> p = Pair(42, "merhaba");
+Integer (n, s) = p;  // n=42, s="merhaba"
+
+// List destructuring
+List<Integer> nums = [1, 2, 3, 4, 5];
+Integer [first, second, ...rest] = nums;
+```
+
+### 6.7 `when` Expression (Gelişmiş Match)
+```arimo
+String result = when (status) {
+    TaskStatus.PENDING  -> "Bekliyor"
+    TaskStatus.DONE     -> "Tamamlandı"
+    else                -> "Bilinmiyor"
+};
+
+// Tip kontrolü ile
+when (obj) {
+    is Circle c    -> IO.println("Çap: ${c.radius}")
+    is Rectangle r -> IO.println("Alan: ${r.w * r.h}")
+    else           -> IO.println("Bilinmeyen şekil")
+}
+```
+
+### 6.8 Match Guard (Koşullu Pattern)
+```arimo
+match n {
+    x if x < 0  => IO.println("Negatif")
+    x if x == 0 => IO.println("Sıfır")
+    x           => IO.println("Pozitif: ${x}")
+}
+```
+
+### 6.9 String Pattern Matching
+```arimo
+match command {
+    "quit" | "exit" => Env.exit(0)
+    "help"          => printHelp()
+    _               => IO.println("Bilinmeyen komut")
+}
+```
+
+### 6.10 Range Type + Range Patterns
+```arimo
+Range<Integer> r = 1..=100;
+for n in r { IO.println(n); }
+
+match score {
+    90..=100 => IO.println("A")
+    80..=89  => IO.println("B")
+    _        => IO.println("F")
+}
+```
+
+### 6.11 Extension Methods
+```arimo
+extend Integer {
+    method isEven() : Boolean { return this % 2 == 0; }
+    method squared() : Integer { return this * this; }
+}
+
+IO.println(42.isEven());   // true
+IO.println(5.squared());   // 25
+```
+
+### 6.12 Char Tipi
+```arimo
+Char c = 'A';
+Integer code = c.code();     // 65
+String s = c.toString();     // "A"
+Boolean isDigit = c.isDigit();
+Boolean isAlpha = c.isAlpha();
+```
+
+### 6.13 Enum Iteration
+```arimo
+for status in TaskStatus.values() {
+    IO.println(status);  // otomatik toString
+}
+Integer count = TaskStatus.count();  // variant sayısı
+```
+
+### 6.14 Object Copy Expression
+```arimo
+Task updated = original.copy(
+    status: TaskStatus.DONE,
+    priority: 1
+);
+```
+
+### 6.15 `@Test` + `@Benchmark` Annotation
+```arimo
+@Test
+public static testAddition() : Void {
+    Integer result = add(2, 3);
+    assert(result == 5, "2 + 3 should be 5");
+}
+
+@Benchmark(iterations: 1000)
+public static benchmarkSort() : Void { ... }
+```
+
+### 6.16 Const Expressions
+```arimo
+const Integer MAX_SIZE = 1024;
+const Float PI = 3.14159265358979;
+const String VERSION = "1.0.0";
+// Compile-time sabit — static readonly'den farklı: değer derleme zamanında hesaplanır
+```
+
+### 6.17 Multiple Exception Catch
+```arimo
+try {
+    risky();
+} catch (IOException | NetworkException e) {
+    IO.println(e.message());
+} catch (Exception e) {
+    IO.println("Genel hata");
+}
+```
+
+### 6.18 String Template Fonksiyonları
+```arimo
+// Multiline string
+String sql = """
+    SELECT *
+    FROM users
+    WHERE id = ${userId}
+""";
+
+// Raw string (escape yok)
+String path = r"C:\Users\Arimo\Documents";
+```
+
+---
+
+## FAZA 7 — Araçlar ⬜
+
+### 7.1 Gelişmiş Hata Mesajları
+- [ ] Her hata için satır + sütun numarası
+- [ ] Hata bağlamı (ilgili kod satırı + `^^^` işaretçi)
+- [ ] "did you mean?" önerisi (benzer isim bulma)
+- [ ] Renklendirmeli terminal çıktısı
+- [ ] Hata kodu sistemi (E001, E002, ...)
+
+### 7.2 Uyarı Sistemi
+- [ ] Kullanılmayan değişken uyarısı
+- [ ] Erişilemeyen kod uyarısı (dead code)
+- [ ] Kullanılmayan `import` uyarısı
+- [ ] Gölgelenen değişken uyarısı
+- [ ] `--no-warnings` flag
+
+### 7.3 Debug Bilgisi (DWARF)
+- [ ] `--debug` flag → DWARF debug info üret
+- [ ] Satır numarası eşlemesi (source map)
+- [ ] Değişken adları binary'de saklansın
+- [ ] GDB/LLDB ile debug edilebilsin
+
+### 7.4 Cross-Compilation
+- [ ] `--target linux-x64` → `x86_64-unknown-linux-gnu`
+- [ ] `--target macos-arm64` → `aarch64-apple-darwin`
+- [ ] `--target linux-arm64` → `aarch64-unknown-linux-gnu`
+- [ ] `--target wasm32` → WebAssembly (gelecek)
+
+### 7.5 arc.toml — Proje Manifestosu
+```toml
+[project]
+name = "myapp"
+version = "1.0.0"
+entry = "src/Main.arm"
+
+[dependencies]
+arimo-collections = "1.0"
+
+[build]
+optimize = true
+target = "x86_64-pc-windows-gnu"
+```
+
+### 7.6 arc CLI Komutları
+- [ ] `arc build` → projeyi derle (arc.toml'a göre)
+- [ ] `arc run` → derle + çalıştır
+- [ ] `arc test` → @Test metotlarını çalıştır
+- [ ] `arc clean` → build çıktılarını sil
+- [ ] `arc check` → sadece tip kontrolü (binary üretme)
+- [ ] `arc fmt` → kodu formatla
+- [ ] `arc init <name>` → yeni proje oluştur
+
+### 7.7 Multi-File Compilation
+- [ ] Birden fazla `.arm` dosyasını tek binary'e derle
+- [ ] `import` ifadelerini dosya bağımlılığı olarak çözümle
+- [ ] Döngüsel import tespiti + hata
+
+### 7.8 İnkremental Derleme
+- [ ] Değişen dosyaları tespit et
+- [ ] Sadece etkilenen dosyaları yeniden derle
+- [ ] `.arc-cache/` klasöründe ara sonuçları sakla
+
+---
+
+## FAZA 8 — Araç Ekosistemi ⬜
+
+### 8.1 VSCode Extension
+- [ ] `.arm` dosyaları için syntax highlighting
+- [ ] Anahtar kelime, tip, annotation renklendirmesi
+- [ ] Temel kod parçacıkları (snippets)
+- [ ] Dosya simgesi
+
+### 8.2 Language Server Protocol (LSP)
+- [ ] Otomatik tamamlama (completions)
+- [ ] Hata ve uyarı gösterimi (diagnostics)
+- [ ] Tanıma git (go-to-definition)
+- [ ] Referansları bul (find references)
+- [ ] Hover bilgisi (tip + dokümantasyon)
+- [ ] Yeniden adlandırma (rename symbol)
+- [ ] Kod aksiyonları (quick fixes)
+
+### 8.3 arc fmt — Formatter
+- [ ] Girinti standardizasyonu (4 boşluk)
+- [ ] Operatör etrafında boşluk
+- [ ] Blok açma/kapama kuralları
+- [ ] Maksimum satır uzunluğu (120 karakter)
+- [ ] Import sıralama
+
+### 8.4 arc doc — Dokümantasyon Üreticisi
+- [ ] `/** */` yorum bloklarından HTML/Markdown üret
+- [ ] Class, metod, field dokümantasyonu
+- [ ] `@param`, `@return`, `@throws` tag'leri
+- [ ] Arama desteği
+
+### 8.5 arc pkg — Paket Yöneticisi
+- [ ] Paket yayınlama / indirme
+- [ ] Versiyon çözümleme (semver)
+- [ ] `arc.lock` — bağımlılık kilitleme
+- [ ] Merkezi paket deposu (arimo-packages)
+
+---
+
+## FAZA 9 — Runtime & Concurrency ⬜
+
+### 9.1 Thread Desteği
+- [ ] `Thread.spawn(() -> { ... })` → yeni thread
+- [ ] `Thread.join()` → thread tamamlanmasını bekle
+- [ ] `Thread.sleep(ms)` → bekle
+- [ ] `Thread.current().id()` → thread kimliği
+- [ ] Platform: pthreads (Linux/macOS) + Windows Threads
+
+### 9.2 Eşzamanlı Veri Yapıları
+- [ ] `Mutex<T>` → `lock()` / `unlock()` / `withLock(() -> ...)`
+- [ ] `RwLock<T>` → çoklu okuyucu, tekil yazıcı
+- [ ] `Atomic<Integer>` → atomik sayaç
+- [ ] `Channel<T>` → bounded/unbounded mesaj kanalı
+- [ ] `Barrier(n)` → n thread'in buluşma noktası
+
+### 9.3 Async Runtime
+- [ ] Event loop (poll tabanlı)
+- [ ] `Task<T>` → async hesaplama birimi
+- [ ] `Task.run(asyncFn)` → event loop'a gönder
+- [ ] `Task.await(task)` → tamamlanmasını bekle
+- [ ] I/O multiplexing (epoll/IOCP)
+
+### 9.4 Signal Handling
+- [ ] `Signal.handle(SIGTERM, () -> { ... })` → graceful shutdown
+- [ ] `Signal.handle(SIGINT, handler)` → Ctrl+C
+- [ ] `Signal.ignore(SIGPIPE)` → broken pipe
+
+### 9.5 Panic Handler + Stack Traces
+- [ ] `panic(msg)` → programı sonlandır, mesaj yaz
+- [ ] Stack trace yazdırma (debug modda)
+- [ ] `@catchPanic` → panic'i yakalama mekanizması
+- [ ] Out-of-bounds, null-deref → otomatik panic
+
+### 9.6 Thread-Local Storage
+- [ ] `@ThreadLocal` annotation → thread başına ayrı değişken
+- [ ] `ThreadLocal<T>` tip
+
+---
+
+## FAZA 10 — Bootstrapping ⬜
+
+Bootstrapping: arc compiler'ını Arimo diliyle yeniden yazmak.
+
+### Ön Koşullar (Faza 10 başlamadan önce tamamlanmalı)
 
 | Bileşen | Neden Gerekli |
 |---|---|
-| String metodları (4.13) | Lexer karakter/string işleme yapar |
-| Exception handling (4.14) | Parse hataları, tip hataları fırlatılır |
-| Lambda tam destek (4.12) | Derleyici içi yüksek seviye işlemler |
+| String metodları (4.19.7) | Lexer karakter/string işleme yapar |
+| Exception handling (4.19.2) | Parse hataları, tip hataları fırlatılır |
+| Lambda closure (4.19.3) | Derleyici içi yüksek seviye işlemler |
 | arimo.fs (5.2) | Kaynak `.arm` dosyası okunur |
 | arimo.io (5.1) | Hata ve bilgi mesajları |
 | arimo.collections (5.4) | Token listesi, AST node'ları, scope tabloları |
-| ARC bellek yönetimi (4.15) | Derleyici uzun süre çalışır, bellek sızmamalı |
+| ARC bellek yönetimi (4.19.1) | Derleyici uzun süre çalışır, bellek sızmamalı |
 
-### Bootstrapping Aşamaları
-
-#### Stage 0 — Rust Derleyici (arc-rust)
+### Stage 0 — Rust Derleyici (arc-rust)
 - Mevcut `arc` (Rust ile yazılmış)
-- Arimo kodunu derleyebilir
-- Tarihsel referans olarak saklanır, public kalır
-- Bu repo: `arimo-compiler` (mevcut)
+- Bu repo: `arimo-compiler` — tarihsel referans olarak saklanır
 
-#### Stage 1 — Arimo Derleyici İlk Derleme (arc-arimo)
-- Yeni repo: `arimo-compiler-self` (veya `arc`)
-- Arimo diliyle yazılmış yeni compiler
-- Stage 0 (Rust compiler) ile derlenir
-- Backend: LLVM IR metin çıktısı üretir (inkwell gerekmez)
-  - `arc --emit-ir src.arm > src.ll`
-  - `llc src.ll -o src.o`
-  - `gcc src.o -o src.exe`
-- Rust compiler ile aynı çıktıyı üretmesi doğrulama kriteri
-
-#### Stage 2 — Kendini Derleyen Compiler
-- Stage 1'deki arc-arimo, Stage 1'in kendisiyle derlenir
-- Eğer aynı binary çıkıyorsa bootstrapping tamamdır
-- Artık Rust bağımlılığı yok
-
-### Bootstrapping Stratejisi
-
-Arimo'daki compiler yapısı:
-
+### Stage 1 — Arimo Derleyici İlk Derleme
 ```
 arc-arimo/
 ├── src/
-│   ├── Lexer.arm       — token üretimi
-│   ├── Parser.arm      — AST üretimi
-│   ├── TypeChecker.arm — tip kontrolü
+│   ├── Lexer.arm
+│   ├── Parser.arm
+│   ├── TypeChecker.arm
 │   ├── BorrowChecker.arm
-│   ├── CodeGen.arm     — LLVM IR metin çıktısı
-│   └── Main.arm        — pipeline
+│   ├── CodeGen.arm     — LLVM IR metin çıktısı (inkwell gerekmez)
+│   └── Main.arm
 ```
+- Stage 0 ile derlenir
+- LLVM IR metin olarak üretir → `llc` + `gcc` ile binary
 
-LLVM IR metin üretimi Arimo'dan çok daha basit:
-```arimo
-// LLVM IR metin olarak üretilir — inkwell binding gerekmez
-IO.write("define i32 @main() {\n");
-IO.write("  ret i32 0\n");
-IO.write("}\n");
-```
-
-### Neden Önemli
-
-- Dilin kendisini ifade edebildiğinin kanıtı (Turing completeness değil, pratik yeterlilik)
-- Rust bağımlılığı ortadan kalkar
-- Arimo ile Arimo geliştirilebilir hale gelir
-- Rust derleyici tarihsel belge olarak kalır — dilin sıfırdan nasıl inşa edildiğini gösterir
+### Stage 2 — Kendini Derleyen Compiler
+- Stage 1'deki arc-arimo, kendisiyle derlenir
+- Aynı binary çıkıyorsa bootstrapping tamamdır
+- Artık Rust bağımlılığı yok
 
 ---
 
 ## Önemli Notlar
 
 ### Commit Kuralı
+- Co-Authored-By veya benzeri otomatik imza ekleme
 - Merge commit bırakma — cherry-pick kullan
-- Worktree branch'ini master'a cherry-pick ile aktar
 
-### Çalışma Düzeni
-```powershell
-# Worktree'de değişiklik yap
-cd "<worktree-dizini>"
-git add ...
-git commit -m "..."
-
-# Master'a aktar
-cd "C:\Users\Arimo\Desktop\arimo-compiler"
-git cherry-pick <commit-hash>
-git push origin master
-```
-
-### Derleme ve Test
+### Derleme
 ```powershell
 $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
-cd "<worktree-dizini>"
 cargo build --target x86_64-pc-windows-gnu
-.\target\x86_64-pc-windows-gnu\debug\arc.exe src\tests\samples\comprehensive.arm
-```
-
-### Beklenen Çıktı
-```
-arc: compiling  ... linking ... OK
-arc: → hello.exe
+.\target\x86_64-pc-windows-gnu\debug\arc.exe src.arm [-O2] [-c] [--emit-ir]
 ```
