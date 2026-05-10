@@ -1422,6 +1422,13 @@ impl TypeChecker {
 
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                // String concat: Str + Str → Str
+                if matches!(op, BinOp::Add)
+                    && matches!(left, Type::Str)
+                    && matches!(right, Type::Str)
+                {
+                    return Type::Str;
+                }
                 if !self.is_numeric(left) || !self.is_numeric(right) {
                     // operator overload denemesi
                     let op_sym = match op {
@@ -1762,6 +1769,31 @@ impl TypeChecker {
         }
     }
 
+    // ── String metod dönüş tipleri ───────────────────────────────────────────
+
+    fn resolve_string_method(&mut self, method: &str, _args: &[Type]) -> Type {
+        match method {
+            "length"     => Type::Integer,
+            "contains"   => Type::Boolean,
+            "startsWith" => Type::Boolean,
+            "endsWith"   => Type::Boolean,
+            "compareTo"  => Type::Integer,
+            "indexOf"    => Type::Integer,
+            "toUpper"    => Type::Str,
+            "toLower"    => Type::Str,
+            "trim"       => Type::Str,
+            "substring"  => Type::Str,
+            "replace"    => Type::Str,
+            "split"      => Type::List(Box::new(Type::Str)),
+            "parseInt"   => Type::Integer,
+            "parseFloat" => Type::Float,
+            _ => {
+                self.error(format!("unknown String method '{}'", method));
+                Type::Named("Error".to_string())
+            }
+        }
+    }
+
     // ── Metod çözümleme ───────────────────────────────────────────────────────
 
     fn resolve_method_call(
@@ -1798,6 +1830,10 @@ impl TypeChecker {
             Type::I16 => "i16".to_string(),
             Type::I32 => "i32".to_string(),
             Type::I64 => "i64".to_string(),
+            // String metodları — Str üzerinde method çağrısına izin ver
+            Type::Str => {
+                return self.resolve_string_method(method, args);
+            }
             _ => {
                 self.error(format!(
                     "cannot call method '{}' on type {:?}", method, ty
@@ -1961,8 +1997,12 @@ impl TypeChecker {
             ("Map" | "HashMap" | "TreeMap", "of")     => Some(ty.clone()),
             ("Map" | "HashMap" | "TreeMap", "create") => Some(ty.clone()),
 
-            ("IO", "print") => Some(Type::Void),
-            ("IO", "read")  => Some(Type::Str),
+            ("IO", "print")   => Some(Type::Void),
+            ("IO", "println") => Some(Type::Void),
+            ("IO", "error")   => Some(Type::Void),
+            ("IO", "read")    => Some(Type::Str),
+            ("IO", "readInt") => Some(Type::Integer),
+            ("IO", _)         => Some(Type::Void),  // diğer IO metodları
 
             ("Math", "sqrt") => Some(Type::Float),
             ("Math", "abs")  => Some(Type::Float),

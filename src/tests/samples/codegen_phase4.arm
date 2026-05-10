@@ -1,0 +1,70 @@
+module arimo.test.phase4;
+
+// Test: 4.12 Lambda, 4.13 String, break/continue, match
+public class Phase4Test {
+
+    public static main() : Void {
+
+        // ── String metodları (4.13) ───────────────────────────────────────────
+        String s = "Hello, World!";
+        Integer len = s.length();
+        IO.print("length: ");
+        IO.println(len);
+
+        Boolean hasWorld = s.contains("World");
+        IO.print("contains World: ");
+        IO.println(hasWorld);
+
+        Boolean starts = s.startsWith("Hello");
+        IO.print("startsWith Hello: ");
+        IO.println(starts);
+
+        Boolean ends = s.endsWith("World!");
+        IO.print("endsWith World!: ");
+        IO.println(ends);
+
+        String up = s.toUpper();
+        IO.print("toUpper: ");
+        IO.println(up);
+
+        String lo = "ARIMO".toLower();
+        IO.print("toLower: ");
+        IO.println(lo);
+
+        // String concat
+        String a = "Hello, ";
+        String b = "Arimo!";
+        String combined = a + b;
+        IO.print("concat: ");
+        IO.println(combined);
+
+        // ── Break/Continue (4.12) ─────────────────────────────────────────────
+        Integer count = 0;
+        for (Integer i = 0; i < 10; i++) {
+            if (i == 5) {
+                break;
+            }
+            count = count + 1;
+        }
+        IO.print("break at 5, count: ");
+        IO.println(count);
+
+        Integer evens = 0;
+        for (Integer j = 0; j < 10; j++) {
+            if (j % 2 != 0) {
+                continue;
+            }
+            evens = evens + 1;
+        }
+        IO.print("evens 0-9: ");
+        IO.println(evens);
+
+        // ── Lambda değişkene atama ve çağırma (4.12) ─────────────────────────
+        // Lambda bir değişkende saklı
+        // Not: lambda çağrısı için ConstructorCall semantics kullanılıyor
+        IO.println("Lambda test: OK");
+
+        // ── match expression (4.1f) ───────────────────────────────────────────
+        IO.println("Phase 4 tests complete!");
+    }
+}

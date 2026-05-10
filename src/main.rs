@@ -38,7 +38,9 @@ fn main() {
         process::exit(1);
     }
 
-    let emit_ir = args.contains(&"--emit-ir".to_string());
+    let emit_ir    = args.contains(&"--emit-ir".to_string());
+    let only_obj   = args.contains(&"-c".to_string());
+    let optimize   = args.contains(&"-O2".to_string()) || args.contains(&"-O3".to_string());
     let path = args.iter().find(|a| a.ends_with(".arm")).unwrap_or_else(|| {
         eprintln!("error: no .arm source file provided");
         process::exit(1);
@@ -174,24 +176,34 @@ fn main() {
         return;
     }
 
-    // Geçici .o dosyası — kullanıcıya gösterilmez, sonra silinir
-    let obj_path = std::env::temp_dir()
-        .join(format!("{}.o", stem))
-        .to_string_lossy()
-        .to_string();
+    // -c: sadece .o üret (linker çalıştırma)
+    let obj_out = if only_obj {
+        format!("{}.o", stem)
+    } else {
+        std::env::temp_dir()
+            .join(format!("{}.o", stem))
+            .to_string_lossy()
+            .to_string()
+    };
 
     print!("arc: compiling  ...");
-    match codegen::compile_to_object(&module, stem, Path::new(&obj_path)) {
+    match codegen::compile_to_object_opts(&module, stem, Path::new(&obj_out), optimize) {
         Ok(()) => {
+            if only_obj {
+                println!(" OK");
+                println!("arc: → {}", obj_out);
+                return;
+            }
+
             print!(" linking ...");
 
-            // Linker: gcc ile native binary üret (arc içinde, kullanıcı görmez)
+            // Linker: gcc ile native binary üret
             let linker_status = std::process::Command::new("gcc")
-                .args([&obj_path, "-o", &exe_path, "-lm"])
+                .args([&obj_out, "-o", &exe_path, "-lm"])
                 .status();
 
             // Geçici .o dosyasını sil
-            let _ = fs::remove_file(&obj_path);
+            let _ = fs::remove_file(&obj_out);
 
             match linker_status {
                 Ok(s) if s.success() => {
