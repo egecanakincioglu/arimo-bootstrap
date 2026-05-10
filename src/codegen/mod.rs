@@ -1217,14 +1217,15 @@ impl<'ctx> CodeGen<'ctx> {
                                 .map_err(|e| CodeGenError::new(e.to_string()))?;
                             if is_volatile { let _ = store.set_volatile(true); }
 
-                            // ARC retain: constructor call zaten refcount=1 verir.
-                            // Başka bir class instance'ı atıyorsak (b = a) → retain gerekli.
-                            // __List/__HashMap/__Pair için retain yok (collection runtime ayrı yönetir).
+                            // ARC retain:
+                            // - ConstructorCall → yapıcı zaten refcount=1 verir → retain YOK
+                            // - StaticCall/MethodCall → callee +1 döndürür → retain YOK
+                            // - Ident → mevcut nesneyi kopyalıyoruz → retain GEREKLİ
+                            // - Diğer (FieldAccess vs.) → retain yapılmaz (sınır: gelecekte eklenecek)
                             if let Some(cn) = &class_name {
                                 if !matches!(cn.as_str(), "__List" | "__HashMap" | "__Pair") {
-                                    let is_ctor = matches!(init_expr, Expr::ConstructorCall { .. });
-                                    if !is_ctor {
-                                        // Var olan instance → retain (refcount++)
+                                    let needs_retain = matches!(init_expr, Expr::Ident(_));
+                                    if needs_retain {
                                         if let BasicValueEnum::PointerValue(ptr) = coerced {
                                             let cn_owned = cn.clone();
                                             self.arc_retain_ptr(ptr, &cn_owned)?;
@@ -4007,6 +4008,86 @@ impl<'ctx> CodeGen<'ctx> {
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let field_ty = struct_ty.get_field_type_at_index(idx)
             .ok_or_else(|| CodeGenError::new(format!("field {} not found", field)))?;
+
+        // ARC: field pointer tipinde ve class instance'ı ise release eski + retain yeni
+        if matches!(field_ty, BasicTypeEnum::PointerType(_)) {
+            // Field'ın Arimo class adını bul
+            let field_class = self.field_arimo_types
+                .get(class)
+                .and_then(|m| m.get(field))
+                .cloned()
+                .filter(|cn| self.struct_types.contains_key(cn.as_str()));
+
+            if let Some(ref fcn) = field_class {
+                if !self.manual_memory_classes.contains(fcn.as_str()) {
+                    // Eski field değerini yükle ve release et
+                    if let Ok(old_val) = self.builder.build_load(field_ty, gep, "field_old") {
+                        if let BasicValueEnum::PointerValue(old_ptr) = old_val {
+                            let fcn_clone = fcn.clone();
+                            // Geçici VarSlot ile release (alloca olarak gep kullanıyoruz — inline release)
+                            let i64_ty  = self.ctx.i64_type();
+                            let ptr_ty  = self.ctx.ptr_type(inkwell::AddressSpace::default());
+                            let cur_fn  = self.cur_fn;
+                            if let Some(cur_fn) = cur_fn {
+                                if !self.current_block_terminated() {
+                                    // Null check + dec + maybe free inline
+                                    let dec_bb  = self.ctx.append_basic_block(cur_fn, "fs.dec");
+                                    let free_bb = self.ctx.append_basic_block(cur_fn, "fs.free");
+                                    let cont_bb = self.ctx.append_basic_block(cur_fn, "fs.cont");
+                                    let pi = self.builder.build_ptr_to_int(old_ptr, i64_ty, "fs_pi")
+                                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                    let is_null = self.builder.build_int_compare(
+                                        inkwell::IntPredicate::EQ, pi, i64_ty.const_int(0, false), "fs_null"
+                                    ).map_err(|e| CodeGenError::new(e.to_string()))?;
+                                    self.builder.build_conditional_branch(is_null, cont_bb, dec_bb)
+                                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                    self.builder.position_at_end(dec_bb);
+                                    if let Some(&rc_idx) = self.refcount_indices.get(&fcn_clone) {
+                                        if let Some(sty) = self.struct_types.get(&fcn_clone).copied() {
+                                            let rc_gep = self.builder.build_struct_gep(sty, old_ptr, rc_idx, "fs_rc_gep")
+                                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                            let rc_old = self.builder.build_load(i64_ty, rc_gep, "fs_rc")
+                                                .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+                                            let rc_new = self.builder.build_int_sub(rc_old, i64_ty.const_int(1, false), "fs_rcdec")
+                                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                            self.builder.build_store(rc_gep, rc_new)
+                                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                            let is_zero = self.builder.build_int_compare(
+                                                inkwell::IntPredicate::EQ, rc_new, i64_ty.const_int(0, false), "fs_zero"
+                                            ).map_err(|e| CodeGenError::new(e.to_string()))?;
+                                            self.builder.build_conditional_branch(is_zero, free_bb, cont_bb)
+                                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                        } else {
+                                            self.builder.build_unconditional_branch(cont_bb)
+                                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                        }
+                                    } else {
+                                        self.builder.build_unconditional_branch(cont_bb)
+                                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                    }
+                                    self.builder.position_at_end(free_bb);
+                                    let free_fn = self.module.get_function("free").unwrap_or_else(|| {
+                                        let ft = self.ctx.void_type().fn_type(&[ptr_ty.into()], false);
+                                        self.module.add_function("free", ft, None)
+                                    });
+                                    self.builder.build_call(free_fn, &[old_ptr.into()], "")
+                                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                    self.builder.build_unconditional_branch(cont_bb)
+                                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                    self.builder.position_at_end(cont_bb);
+                                }
+                            }
+                        }
+                    }
+                    // Yeni değeri retain et
+                    if let BasicValueEnum::PointerValue(new_ptr) = val {
+                        let fcn_clone = fcn.clone();
+                        self.arc_retain_ptr(new_ptr, &fcn_clone)?;
+                    }
+                }
+            }
+        }
+
         let coerced = self.coerce_value(val, field_ty)?;
         self.builder.build_store(gep, coerced)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -4217,6 +4298,10 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn compile_assign(&mut self, target: &Expr, value: &Expr) -> CgResult<Option<BasicValueEnum<'ctx>>> {
+        // RHS'nin kaynağını belirle: Ident ise mevcut nesne kopyalanıyor → retain gerekli
+        // StaticCall/MethodCall/ConstructorCall → callee +1 döndürüyor → retain YAPMA
+        let rhs_needs_retain = matches!(value, Expr::Ident(_));
+
         let val = self.compile_expr(value)?;
         if let Some(v) = val {
             match target {
@@ -4224,25 +4309,22 @@ impl<'ctx> CodeGen<'ctx> {
                     if let Some(slot) = self.lookup_var(name).cloned() {
                         let coerced = self.coerce_value(v, slot.ty)?;
 
-                        // ARC: eski değeri release et, yeni değeri retain et
+                        // ARC: eski değeri her zaman release et, yeni değeri sadece Ident ise retain et
                         if let Some(ref cn) = slot.class_name.clone() {
                             if !matches!(cn.as_str(), "__List" | "__HashMap" | "__Pair") {
-                                // Eski değeri oku ve release et
-                                if let Ok(old_val) = self.builder.build_load(slot.ty, slot.ptr, "assign_old") {
-                                    if let BasicValueEnum::PointerValue(old_ptr) = old_val {
+                                // Eski değeri release et
+                                self.arc_release_var(VarSlot {
+                                    ptr: slot.ptr,
+                                    ty: slot.ty,
+                                    class_name: Some(cn.clone()),
+                                    elem_class: None,
+                                })?;
+                                // Yeni değeri retain et — sadece Ident RHS ise
+                                if rhs_needs_retain {
+                                    if let BasicValueEnum::PointerValue(new_ptr) = coerced {
                                         let cn_clone = cn.clone();
-                                        self.arc_release_var(VarSlot {
-                                            ptr: slot.ptr,
-                                            ty: slot.ty,
-                                            class_name: Some(cn_clone),
-                                            elem_class: None,
-                                        })?;
+                                        self.arc_retain_ptr(new_ptr, &cn_clone)?;
                                     }
-                                }
-                                // Yeni değeri retain et
-                                if let BasicValueEnum::PointerValue(new_ptr) = coerced {
-                                    let cn_clone = cn.clone();
-                                    self.arc_retain_ptr(new_ptr, &cn_clone)?;
                                 }
                             }
                         }
