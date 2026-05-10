@@ -1,3 +1,6 @@
+© 2026 Egecan Akıncıoğlu - Arimo Lang
+Licensed under GNU AGPL v3.0
+
 # Arimo Lang — Dil Spesifikasyonu v1.4
 
 > Statically typed · Compiled · OOP · GC-free ownership  
