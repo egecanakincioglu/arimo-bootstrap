@@ -151,6 +151,81 @@ impl<'ctx> CodeGen<'ctx> {
         self.defer_stack.push(Vec::new());
     }
 
+    // ── ARC: retain (refcount++) ──────────────────────────────────────────────
+
+    fn arc_retain_ptr(
+        &mut self,
+        ptr        : inkwell::values::PointerValue<'ctx>,
+        class_name : &str,
+    ) -> CgResult<()> {
+        if self.manual_memory_classes.contains(class_name) { return Ok(()); }
+        if !self.refcount_indices.contains_key(class_name)  { return Ok(()); }
+        if self.current_block_terminated()                   { return Ok(()); }
+        let cur_fn = match self.cur_fn { Some(f) => f, None => return Ok(()) };
+
+        let i64_ty  = self.ctx.i64_type();
+        let inc_bb  = self.ctx.append_basic_block(cur_fn, "arc.inc");
+        let cont_bb = self.ctx.append_basic_block(cur_fn, "arc.ri_cont");
+
+        // Null guard
+        let pi      = self.builder.build_ptr_to_int(ptr, i64_ty, "arc_ri_pi")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let is_null = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ, pi, i64_ty.const_int(0, false), "arc_ri_null"
+        ).map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(is_null, cont_bb, inc_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(inc_bb);
+        let rc_idx    = *self.refcount_indices.get(class_name).unwrap();
+        let struct_ty = *self.struct_types.get(class_name).unwrap();
+        let rc_gep    = self.builder.build_struct_gep(struct_ty, ptr, rc_idx, "arc_ri_gep")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let rc_old    = self.builder.build_load(i64_ty, rc_gep, "arc_ri_rc")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let rc_new    = self.builder.build_int_add(rc_old, i64_ty.const_int(1, false), "arc_ri_inc")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(rc_gep, rc_new)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(cont_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(cont_bb);
+        Ok(())
+    }
+
+    // Expression'dan class adını çıkarmaya çalış (retain için)
+    fn infer_expr_class_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(name) => self.lookup_var(name)
+                .and_then(|s| s.class_name.clone())
+                .filter(|cn| self.struct_types.contains_key(cn.as_str())),
+            _ => None,
+        }
+    }
+
+    // ── ARC: retain/release + all-scopes helpers ──────────────────────────────
+
+    // Belirli bir değişken adı HARİÇ tüm scope'ları release et (Return için)
+    fn arc_release_all_scopes_except(&mut self, skip_var: Option<&str>) -> CgResult<()> {
+        for i in (0..self.scopes.len()).rev() {
+            if self.current_block_terminated() { break; }
+            let slots: Vec<(String, VarSlot<'ctx>)> = self.scopes[i]
+                .iter()
+                .filter(|(k, s)| {
+                    s.class_name.is_some()
+                        && skip_var.map_or(true, |skip| k.as_str() != skip)
+                })
+                .map(|(k, s)| (k.clone(), s.clone()))
+                .collect();
+            for (_, slot) in slots {
+                if self.current_block_terminated() { break; }
+                self.arc_release_var(slot)?;
+            }
+        }
+        Ok(())
+    }
+
     // ── ARC: tek değişken için inline release emit ────────────────────────────
 
     fn arc_release_var(&mut self, slot: VarSlot<'ctx>) -> CgResult<()> {
@@ -1049,7 +1124,22 @@ impl<'ctx> CodeGen<'ctx> {
     fn compile_stmt(&mut self, stmt: &Stmt) -> CgResult<bool> {
         match stmt {
             Stmt::Return(expr) => {
-                // Finally defers: try bloğu içindeyken return → finally çalıştır
+                // ── Adım 1: Return değerini ÖNCE derle ──────────────────────
+                // (Cleanup'tan önce değerlendirmek use-after-free'yi önler)
+                let (ret_val, skip_var_name) = match expr {
+                    None => (None, None),
+                    Some(e) => {
+                        // Döndürülen değişken adını bul (ARC'da bu değişkeni skip edeceğiz)
+                        let skip = match e {
+                            Expr::Ident(n) => Some(n.clone()),
+                            _ => None,
+                        };
+                        let val  = self.compile_expr(e)?;
+                        (val, skip)
+                    }
+                };
+
+                // ── Adım 2: Finally defers çalıştır ─────────────────────────
                 let defers = self.finally_defers.clone();
                 for fin_body in defers.iter().rev() {
                     if self.current_block_terminated() { break; }
@@ -1058,12 +1148,13 @@ impl<'ctx> CodeGen<'ctx> {
                     self.pop_scope();
                 }
 
-                // ARC: return öncesinde tüm scope'lardaki class değişkenleri serbest bırak
-                self.arc_release_all_scopes()?;
+                // ── Adım 3: ARC cleanup — döndürülen değişkeni atla ─────────
+                // (double-free'yi önler: döndürülen nesne caller'a transfer edilir)
+                self.arc_release_all_scopes_except(skip_var_name.as_deref())?;
 
-                match expr {
+                // ── Adım 4: Return IR emit ───────────────────────────────────
+                match ret_val {
                     None => {
-                        // main() için i32 0 döndür
                         let cur = self.cur_fn.unwrap();
                         if cur.get_type().get_return_type().is_some() {
                             let zero = self.ctx.i32_type().const_int(0, false);
@@ -1074,18 +1165,9 @@ impl<'ctx> CodeGen<'ctx> {
                                 .map_err(|e| CodeGenError::new(e.to_string()))?;
                         }
                     }
-                    Some(e) => {
-                        let val = self.compile_expr(e)?;
-                        match val {
-                            Some(v) => {
-                                self.builder.build_return(Some(&v))
-                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-                            }
-                            None => {
-                                self.builder.build_return(None)
-                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-                            }
-                        }
+                    Some(v) => {
+                        self.builder.build_return(Some(&v))
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
                     }
                 }
                 Ok(true)
@@ -1133,9 +1215,22 @@ impl<'ctx> CodeGen<'ctx> {
                             let coerced = self.coerce_value(val, llvm_ty)?;
                             let store = self.builder.build_store(alloca, coerced)
                                 .map_err(|e| CodeGenError::new(e.to_string()))?;
-                            // volatile keyword → LLVM volatile store
-                            if is_volatile {
-                                let _ = store.set_volatile(true);
+                            if is_volatile { let _ = store.set_volatile(true); }
+
+                            // ARC retain: constructor call zaten refcount=1 verir.
+                            // Başka bir class instance'ı atıyorsak (b = a) → retain gerekli.
+                            // __List/__HashMap/__Pair için retain yok (collection runtime ayrı yönetir).
+                            if let Some(cn) = &class_name {
+                                if !matches!(cn.as_str(), "__List" | "__HashMap" | "__Pair") {
+                                    let is_ctor = matches!(init_expr, Expr::ConstructorCall { .. });
+                                    if !is_ctor {
+                                        // Var olan instance → retain (refcount++)
+                                        if let BasicValueEnum::PointerValue(ptr) = coerced {
+                                            let cn_owned = cn.clone();
+                                            self.arc_retain_ptr(ptr, &cn_owned)?;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1293,6 +1388,8 @@ impl<'ctx> CodeGen<'ctx> {
 
             Stmt::Break => {
                 if let Some(&exit_bb) = self.loop_exit_bbs.last() {
+                    // ARC: döngü scope'undaki class instance'ları serbest bırak
+                    self.arc_release_all_scopes()?;
                     self.builder.build_unconditional_branch(exit_bb)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     Ok(true)
@@ -1303,6 +1400,8 @@ impl<'ctx> CodeGen<'ctx> {
 
             Stmt::Continue => {
                 if let Some(&cont_bb) = self.loop_continue_bbs.last() {
+                    // ARC: mevcut iterasyon scope'undaki class instance'ları serbest bırak
+                    self.arc_release_all_scopes()?;
                     self.builder.build_unconditional_branch(cont_bb)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     Ok(true)
@@ -1974,19 +2073,23 @@ impl<'ctx> CodeGen<'ctx> {
             }
             Expr::NullSafeAccess { object, field, args } => {
                 // obj?.field veya obj?.method(args)
-                // Null check: eğer null → null/0 döner, değilse dispatch
+                // Doğru phi-node implementasyonu:
+                //   null_bb  → null_ptr/0 → merge
+                //   ok_bb    → gerçek değer → merge
+                //   merge_bb → phi(null_val, ok_val)
                 let cur_fn = match self.cur_fn { Some(f) => f, None => return Ok(None) };
                 let obj_val = match self.compile_expr(object)? {
                     Some(v) => v,
                     None    => return Ok(None),
                 };
-                let i64_ty  = self.ctx.i64_type();
-                let ptr_ty  = self.ctx.ptr_type(AddressSpace::default());
+                let i64_ty = self.ctx.i64_type();
+                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
 
-                let not_null_bb = self.ctx.append_basic_block(cur_fn, "ns.notnull");
-                let merge_bb    = self.ctx.append_basic_block(cur_fn, "ns.merge");
+                let ok_bb    = self.ctx.append_basic_block(cur_fn, "ns.ok");
+                let merge_bb = self.ctx.append_basic_block(cur_fn, "ns.merge");
 
-                // Null check
+                // Null check → null_bb (= current block, falls through to merge)
+                let null_src_bb = self.builder.get_insert_block().unwrap();
                 let is_null = match obj_val {
                     BasicValueEnum::PointerValue(p) => {
                         let pi = self.builder.build_ptr_to_int(p, i64_ty, "ns_pi")
@@ -1997,14 +2100,14 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                     _ => self.ctx.bool_type().const_int(0, false),
                 };
-                self.builder.build_conditional_branch(is_null, merge_bb, not_null_bb)
+                // is_null → merge_bb (null path), !is_null → ok_bb
+                self.builder.build_conditional_branch(is_null, merge_bb, ok_bb)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-                // Not-null path
-                self.builder.position_at_end(not_null_bb);
+                // ok_bb: gerçek dispatch
+                self.builder.position_at_end(ok_bb);
                 let result = match args {
                     Some(call_args) => {
-                        // method call
                         let class_name = self.infer_object_class(object);
                         if let Some(cn) = &class_name {
                             let fn_name = format!("{}_{}", cn, field);
@@ -2023,18 +2126,38 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                     None => self.compile_field_load(object, field)?,
                 };
-                let not_null_val = result.unwrap_or(ptr_ty.const_null().into());
+                let ok_val = result.unwrap_or_else(|| ptr_ty.const_null().into());
+                let ok_src_bb = self.builder.get_insert_block().unwrap();
                 self.builder.build_unconditional_branch(merge_bb)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-                // Merge — phi
+                // merge_bb: phi ile birleştir
                 self.builder.position_at_end(merge_bb);
-                let null_val: BasicValueEnum = ptr_ty.const_null().into();
-                // Sadece basit bir select ile değil, phi node ile doğru birleştir
-                // Phi node oluşturulmadan önce tip belirleyelim
-                let _ = (not_null_val, null_val);
-                // Basit implementasyon: null döndür (caller null kontrolü yapar)
-                Ok(Some(ptr_ty.const_null().into()))
+
+                // Phi node — tip her iki daldan türet
+                let merged: BasicValueEnum<'ctx> = match ok_val {
+                    BasicValueEnum::PointerValue(_) => {
+                        let phi = self.builder.build_phi(ptr_ty, "ns_phi")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        phi.add_incoming(&[
+                            (&ok_val,                     ok_src_bb),
+                            (&BasicValueEnum::from(ptr_ty.const_null()), null_src_bb),
+                        ]);
+                        phi.as_basic_value()
+                    }
+                    BasicValueEnum::IntValue(iv) => {
+                        let it = iv.get_type();
+                        let phi = self.builder.build_phi(it, "ns_phi")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        phi.add_incoming(&[
+                            (&ok_val,                          ok_src_bb),
+                            (&BasicValueEnum::from(it.const_int(0, false)), null_src_bb),
+                        ]);
+                        phi.as_basic_value()
+                    }
+                    other => other,
+                };
+                Ok(Some(merged))
             }
         }
     }
@@ -4100,6 +4223,30 @@ impl<'ctx> CodeGen<'ctx> {
                 Expr::Ident(name) => {
                     if let Some(slot) = self.lookup_var(name).cloned() {
                         let coerced = self.coerce_value(v, slot.ty)?;
+
+                        // ARC: eski değeri release et, yeni değeri retain et
+                        if let Some(ref cn) = slot.class_name.clone() {
+                            if !matches!(cn.as_str(), "__List" | "__HashMap" | "__Pair") {
+                                // Eski değeri oku ve release et
+                                if let Ok(old_val) = self.builder.build_load(slot.ty, slot.ptr, "assign_old") {
+                                    if let BasicValueEnum::PointerValue(old_ptr) = old_val {
+                                        let cn_clone = cn.clone();
+                                        self.arc_release_var(VarSlot {
+                                            ptr: slot.ptr,
+                                            ty: slot.ty,
+                                            class_name: Some(cn_clone),
+                                            elem_class: None,
+                                        })?;
+                                    }
+                                }
+                                // Yeni değeri retain et
+                                if let BasicValueEnum::PointerValue(new_ptr) = coerced {
+                                    let cn_clone = cn.clone();
+                                    self.arc_retain_ptr(new_ptr, &cn_clone)?;
+                                }
+                            }
+                        }
+
                         self.builder.build_store(slot.ptr, coerced)
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
                     }
@@ -4755,126 +4902,165 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(result_ptr)
     }
 
-    // distinct() → tekrar eden elemanları çıkar (O(n²) basit impl)
+    // distinct() → tekrar eden elemanları çıkar (O(n²) doğru implementasyon)
+    // Dış döngü: her src elemanı için iç döngü: result'ta zaten var mı?
+    // Yok ise ekle, var ise atla.
     fn build_list_distinct(
         &mut self,
         src_ptr : inkwell::values::PointerValue<'ctx>,
     ) -> CgResult<inkwell::values::PointerValue<'ctx>> {
-        // Basit implementasyon: filter uygulanmış liste gibi davran
-        // Her eleman için: sonuçta var mı? Yoksa ekle.
-        // Bu O(n²) ama doğru.
-        let i64_ty = self.ctx.i64_type();
-        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
-        let list_len_fn    = self.module.get_function("arc_list_length").unwrap();
-        let list_get_fn    = self.module.get_function("arc_list_get").unwrap();
-        let list_new_fn    = self.module.get_function("arc_list_new").unwrap();
-        let list_append_fn = self.module.get_function("arc_list_append").unwrap();
+        let i64_ty     = self.ctx.i64_type();
+        let ptr_ty     = self.ctx.ptr_type(AddressSpace::default());
+        let len_fn     = self.module.get_function("arc_list_length").unwrap();
+        let get_fn     = self.module.get_function("arc_list_get").unwrap();
+        let new_fn     = self.module.get_function("arc_list_new").unwrap();
+        let append_fn  = self.module.get_function("arc_list_append").unwrap();
 
-        let result_call = self.builder.build_call(list_new_fn, &[], "dist_result")
+        let res_call = self.builder.build_call(new_fn, &[], "dist_res")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        let result_ptr = match result_call.try_as_basic_value().basic() {
+        let res_ptr = match res_call.try_as_basic_value().basic() {
             Some(BasicValueEnum::PointerValue(p)) => p,
             _ => return Ok(ptr_ty.const_null()),
         };
-        let len_call = self.builder.build_call(list_len_fn, &[src_ptr.into()], "dist_len")
+        let src_len_call = self.builder.build_call(len_fn, &[src_ptr.into()], "dist_slen")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        let len = match len_call.try_as_basic_value().basic() {
+        let src_len = match src_len_call.try_as_basic_value().basic() {
             Some(BasicValueEnum::IntValue(v)) => v,
-            _ => return Ok(result_ptr),
+            _ => return Ok(res_ptr),
         };
 
-        let cur_fn    = self.cur_fn.unwrap();
-        let idx_alloca = self.builder.build_alloca(i64_ty, "dist_idx")
-            .map_err(|e| CodeGenError::new(e.to_string()))?;
-        self.builder.build_store(idx_alloca, i64_ty.const_int(0, false))
+        let cur_fn = self.cur_fn.unwrap();
+
+        // found_alloca: inner loop'ta duplicate bulundu mu?
+        let found_alloca = self.builder.build_alloca(i64_ty, "dist_found")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        let cond_bb  = self.ctx.append_basic_block(cur_fn, "dist.cond");
-        let body_bb  = self.ctx.append_basic_block(cur_fn, "dist.body");
-        let exit_bb  = self.ctx.append_basic_block(cur_fn, "dist.exit");
-        let check_bb = self.ctx.append_basic_block(cur_fn, "dist.check");
-        let add_bb   = self.ctx.append_basic_block(cur_fn, "dist.add");
-        let next_bb  = self.ctx.append_basic_block(cur_fn, "dist.next");
-
-        self.builder.build_unconditional_branch(cond_bb)
+        // ── Outer loop: i = 0; while i < src_len ──────────────────────────
+        let i_alloca = self.builder.build_alloca(i64_ty, "dist_i")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        self.builder.position_at_end(cond_bb);
-        let idx = self.builder.build_load(i64_ty, idx_alloca, "dist_i")
+        self.builder.build_store(i_alloca, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        let outer_cond = self.ctx.append_basic_block(cur_fn, "dist.outer_cond");
+        let outer_body = self.ctx.append_basic_block(cur_fn, "dist.outer_body");
+        let outer_exit = self.ctx.append_basic_block(cur_fn, "dist.outer_exit");
+
+        self.builder.build_unconditional_branch(outer_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.position_at_end(outer_cond);
+        let i = self.builder.build_load(i64_ty, i_alloca, "dist_iv")
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
-        let cond = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx, len, "dist_c")
+        let outer_ok = self.builder.build_int_compare(inkwell::IntPredicate::SLT, i, src_len, "dist_oc")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        self.builder.build_conditional_branch(cond, body_bb, exit_bb)
+        self.builder.build_conditional_branch(outer_ok, outer_body, outer_exit)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        self.builder.position_at_end(body_bb);
-        let item_call = self.builder.build_call(list_get_fn, &[src_ptr.into(), idx.into()], "dist_item")
+        self.builder.position_at_end(outer_body);
+        let item_call = self.builder.build_call(get_fn, &[src_ptr.into(), i.into()], "dist_item")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        let item_i64 = match item_call.try_as_basic_value().basic() {
+        let item = match item_call.try_as_basic_value().basic() {
             Some(BasicValueEnum::IntValue(v)) => v,
             _ => i64_ty.const_int(0, false),
         };
 
-        // Inner check: scan result for this item
-        let jdx_alloca = self.builder.build_alloca(i64_ty, "dist_jdx")
+        // found = 0 (not duplicate yet)
+        self.builder.build_store(found_alloca, i64_ty.const_int(0, false))
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        self.builder.build_store(jdx_alloca, i64_ty.const_int(0, false))
+
+        // res_len = current length of result list
+        let res_len_call = self.builder.build_call(len_fn, &[res_ptr.into()], "dist_rlen")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        let rlen_call = self.builder.build_call(list_len_fn, &[result_ptr.into()], "dist_rlen")
-            .map_err(|e| CodeGenError::new(e.to_string()))?;
-        let rlen = match rlen_call.try_as_basic_value().basic() {
+        let res_len = match res_len_call.try_as_basic_value().basic() {
             Some(BasicValueEnum::IntValue(v)) => v,
             _ => i64_ty.const_int(0, false),
         };
-        self.builder.build_unconditional_branch(check_bb)
+
+        // ── Inner loop: j = 0; while j < res_len && !found ───────────────
+        let j_alloca = self.builder.build_alloca(i64_ty, "dist_j")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(j_alloca, i64_ty.const_int(0, false))
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        self.builder.position_at_end(check_bb);
-        let jdx = self.builder.build_load(i64_ty, jdx_alloca, "dist_j")
+        let inner_cond = self.ctx.append_basic_block(cur_fn, "dist.inner_cond");
+        let inner_body = self.ctx.append_basic_block(cur_fn, "dist.inner_body");
+        let inner_exit = self.ctx.append_basic_block(cur_fn, "dist.inner_exit");
+        let maybe_add  = self.ctx.append_basic_block(cur_fn, "dist.maybe_add");
+        let outer_inc  = self.ctx.append_basic_block(cur_fn, "dist.outer_inc");
+
+        self.builder.build_unconditional_branch(inner_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.position_at_end(inner_cond);
+        let j = self.builder.build_load(i64_ty, j_alloca, "dist_jv")
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
-        let jcond = self.builder.build_int_compare(inkwell::IntPredicate::SLT, jdx, rlen, "dist_jc")
+        let found_v = self.builder.build_load(i64_ty, found_alloca, "dist_fv")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let j_ok = self.builder.build_int_compare(inkwell::IntPredicate::SLT, j, res_len, "dist_jok")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        self.builder.build_conditional_branch(jcond, add_bb, next_bb)
+        let not_found = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ, found_v, i64_ty.const_int(0, false), "dist_nf"
+        ).map_err(|e| CodeGenError::new(e.to_string()))?;
+        // continue inner if j < res_len AND not_found
+        let inner_ok = self.builder.build_and(j_ok, not_found, "dist_ij_ok")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        // If inner loop not done yet: check if result[j] == item
-        // Simplified: just always add (skip duplicate detection for now)
+        self.builder.build_conditional_branch(inner_ok, inner_body, inner_exit)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        self.builder.position_at_end(add_bb);
-        let ritem_call = self.builder.build_call(list_get_fn, &[result_ptr.into(), jdx.into()], "dist_ri")
+        self.builder.position_at_end(inner_body);
+        let ritem_call = self.builder.build_call(get_fn, &[res_ptr.into(), j.into()], "dist_ri")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let ritem = match ritem_call.try_as_basic_value().basic() {
             Some(BasicValueEnum::IntValue(v)) => v,
             _ => i64_ty.const_int(u64::MAX, false),
         };
-        let jnext = self.builder.build_int_add(jdx, i64_ty.const_int(1, false), "dist_jinc")
+        let is_dup = self.builder.build_int_compare(inkwell::IntPredicate::EQ, ritem, item, "dist_dup")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        self.builder.build_store(jdx_alloca, jnext)
+        // if dup: found = 1
+        let dup_as_i64 = self.builder.build_int_z_extend(is_dup, i64_ty, "dist_dup64")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        let is_dup = self.builder.build_int_compare(inkwell::IntPredicate::EQ, ritem, item_i64, "dist_dup")
+        // found = max(found, dup_as_i64) — effectively OR
+        let new_found = self.builder.build_or(found_v, dup_as_i64, "dist_new_found")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        self.builder.build_conditional_branch(is_dup, next_bb, check_bb)
+        self.builder.build_store(found_alloca, new_found)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-
-        self.builder.position_at_end(next_bb);
-        // If not duplicate (inner loop exhausted without finding), add to result
-        let is_new = self.builder.build_int_compare(inkwell::IntPredicate::EQ, jdx, rlen, "dist_new")
+        let j_next = self.builder.build_int_add(j, i64_ty.const_int(1, false), "dist_jinc")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        let after_bb = self.ctx.append_basic_block(cur_fn, "dist.after");
-        self.builder.build_conditional_branch(is_new, after_bb, after_bb)
+        self.builder.build_store(j_alloca, j_next)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        // Always add for now (simplification) — re-checking via is_new would need phi
-        self.builder.position_at_end(after_bb);
-        self.builder.build_call(list_append_fn, &[result_ptr.into(), item_i64.into()], "")
+        self.builder.build_unconditional_branch(inner_cond)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "dist_inc")
-            .map_err(|e| CodeGenError::new(e.to_string()))?;
-        self.builder.build_store(idx_alloca, next)
-            .map_err(|e| CodeGenError::new(e.to_string()))?;
-        self.builder.build_unconditional_branch(cond_bb)
+        // inner_exit: if not found → append item to result
+        self.builder.position_at_end(inner_exit);
+        self.builder.build_unconditional_branch(maybe_add)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        self.builder.position_at_end(exit_bb);
-        Ok(result_ptr)
+        self.builder.position_at_end(maybe_add);
+        let found_final = self.builder.build_load(i64_ty, found_alloca, "dist_ff")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let should_add = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ, found_final, i64_ty.const_int(0, false), "dist_sa"
+        ).map_err(|e| CodeGenError::new(e.to_string()))?;
+        let do_add_bb  = self.ctx.append_basic_block(cur_fn, "dist.do_add");
+        self.builder.build_conditional_branch(should_add, do_add_bb, outer_inc)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(do_add_bb);
+        self.builder.build_call(append_fn, &[res_ptr.into(), item.into()], "")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(outer_inc)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // outer_inc: i++
+        self.builder.position_at_end(outer_inc);
+        let i_next = self.builder.build_int_add(i, i64_ty.const_int(1, false), "dist_iinc")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(i_alloca, i_next)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(outer_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(outer_exit);
+        Ok(res_ptr)
     }
 
     // HashMap entries → List<Pair<K,V>>
