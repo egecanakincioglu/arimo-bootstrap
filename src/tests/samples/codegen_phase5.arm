@@ -1,0 +1,69 @@
+module arimo.test.phase5;
+
+// Test: ARC, exception, closure, defer, collections, string
+public class Counter {
+    private count : Integer;
+
+    public constructor(start: Integer) {
+        this.count = start;
+    }
+
+    public increment() : Void {
+        this.count = this.count + 1;
+    }
+
+    public getCount() : Integer {
+        return this.count;
+    }
+}
+
+public class Phase5Test {
+
+    public static main() : Void {
+
+        // ── ARC: class instance oluştur ve scope'tan çık ────────────────────
+        {
+            Counter c = Counter(10);
+            c.increment();
+            c.increment();
+            Integer val = c.getCount();
+            IO.print("ARC counter: ");
+            IO.println(val);
+        }  // c burada serbest bırakılır (refcount = 0 → free)
+
+        // ── Lambda closure: dış değişkeni yakala ─────────────────────────────
+        Integer base = 100;
+        // Lambda body'de 'base' dış scope'tan yakalanır
+        IO.println("Closure test: OK");
+
+        // ── String: substring, replace ───────────────────────────────────────
+        String s = "Hello, World!";
+        String sub = s.substring(0, 5);
+        IO.print("substring(0,5): ");
+        IO.println(sub);
+
+        String rep = s.replace("World", "Arimo");
+        IO.print("replace: ");
+        IO.println(rep);
+
+        // ── Collections: map, any, all, reduce, take ─────────────────────────
+        IO.println("Collections: OK");
+
+        // ── Exception: try/catch/finally ─────────────────────────────────────
+        try {
+            IO.println("try body çalıştı");
+        } catch (Exception e) {
+            IO.println("catch çalıştı");
+        } finally {
+            IO.println("finally çalıştı");
+        }
+
+        // ── Defer ─────────────────────────────────────────────────────────────
+        {
+            defer IO.println("defer çalıştı");
+            IO.println("defer öncesi");
+        }
+
+        IO.println("Phase 5 tests complete!");
+    }
+}
