@@ -25,9 +25,11 @@ pub enum Token {
     Str(String),        // string parçası — interpolation için bölünür
     Ident(String),
 
-    // ── Module & Import ───────────────────────────────────────────────────
-    Module,
+    // ── Package & Import ──────────────────────────────────────────────────
+    Package,   // dosya seviyesi: package arimo.io;
+    Module,    // üst düzey gruplama: module arimo.base { exports ...; }
     Import,
+    Exports,   // module tanımlayıcısında: exports arimo.lang;
 
     // ── Access modifiers ─────────────────────────────────────────────────
     Public,
@@ -328,7 +330,9 @@ impl<'a> Lexer<'a> {
             else { break; }
         }
         match word.as_str() {
+            "package"     => Token::Package,
             "module"      => Token::Module,
+            "exports"     => Token::Exports,
             "import"      => Token::Import,
             "public"      => Token::Public,
             "private"     => Token::Private,

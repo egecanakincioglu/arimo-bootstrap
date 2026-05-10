@@ -178,8 +178,14 @@ impl Parser {
         Ok(Module { path, nostd, imports, items })
     }
 
+    // package arimo.io;   ← yeni sözdizimi
+    // module arimo.io;    ← geriye dönük uyumlu
     fn parse_module_decl(&mut self) -> ParseResult<String> {
-        self.expect(&Token::Module)?;
+        if self.check(&Token::Package) {
+            self.advance(); // package
+        } else {
+            self.expect(&Token::Module)?; // eski sözdizimi
+        }
         let path = self.parse_dotted_path()?;
         self.expect(&Token::Semicolon)?;
         Ok(path)
@@ -188,6 +194,12 @@ impl Parser {
     fn parse_dotted_path(&mut self) -> ParseResult<String> {
         let mut path = self.expect_ident()?;
         while self.eat(&Token::Dot) {
+            // Wildcard import: import arimo.util.*; → son '*' bileşeni
+            if self.check(&Token::Star) {
+                self.advance();
+                path.push_str(".*");
+                break;
+            }
             let part = self.expect_ident()?;
             path.push('.');
             path.push_str(&part);

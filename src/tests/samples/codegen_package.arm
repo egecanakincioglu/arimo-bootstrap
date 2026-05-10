@@ -1,0 +1,10 @@
+package arimo.test.pkg;
+
+import arimo.test.other.*;
+
+public class PackageTest {
+    public static main() : Void {
+        IO.println("package keyword: OK");
+        IO.println("wildcard import parsed: OK");
+    }
+}
