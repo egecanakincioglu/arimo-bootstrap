@@ -1,0 +1,30 @@
+@Freestanding
+module kernel.boot;
+
+@Packed
+public struct PacketHeader {
+    magic   : u16;
+    version : u8;
+    flags   : u8;
+}
+
+@Align(16)
+public struct SimdVec {
+    data : Array<Float, 4>;
+}
+
+@ManualMemory
+public class Syscall {
+    @Section(".init")
+    @InterruptHandler
+    public static handler() : Void { ... }
+
+    @ForceInline
+    public static fast() : Void { ... }
+
+    @CDecl
+    public static callC() : Void { ... }
+}
+
+if @Likely (x > 0) { ... }
+if @Unlikely (err != null) { ... }
