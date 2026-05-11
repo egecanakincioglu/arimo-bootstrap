@@ -23,3 +23,6 @@ Thumbs.db
 
 # Tüm dökümanlar sadece local
 documents/
+.env
+orchestrator/venv/
+orchestrator/
