@@ -20,6 +20,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+.claudeignore
 
 # Tüm dökümanlar sadece local
 documents/

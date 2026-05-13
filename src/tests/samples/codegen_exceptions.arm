@@ -1,0 +1,81 @@
+module arimo.exceptions_test;
+
+public class RuntimeException extends Exception {
+    private message : String;
+
+    public constructor(msg: String) {
+        this.message = msg;
+    }
+
+    public getMessage() : String {
+        return this.message;
+    }
+}
+
+public class IOException extends Exception {
+    private message : String;
+
+    public constructor(msg: String) {
+        this.message = msg;
+    }
+
+    public getMessage() : String {
+        return this.message;
+    }
+}
+
+public class Program {
+    public static testBasicCatch() : Void {
+        try {
+            IO.println("try block calisiyor");
+            throw RuntimeException("test hatasi");
+            IO.println("bu satir calismamalı");
+        } catch (RuntimeException e) {
+            IO.println("RuntimeException yakalandi");
+        }
+    }
+
+    public static testFinally() : Void {
+        try {
+            IO.println("try with finally");
+            throw RuntimeException("finally test");
+        } catch (RuntimeException e) {
+            IO.println("catch blogu");
+        } finally {
+            IO.println("finally blogu her zaman calisir");
+        }
+    }
+
+    public static testNoCatch() : Void {
+        try {
+            IO.println("try body - exception yok");
+        } catch (RuntimeException e) {
+            IO.println("bu calismamalı");
+        } finally {
+            IO.println("finally - exception olmadan");
+        }
+        IO.println("try sonrasi devam");
+    }
+
+    public static testTypedCatch() : Void {
+        try {
+            throw IOException("dosya bulunamadi");
+        } catch (RuntimeException e) {
+            IO.println("RuntimeException: bu calismamalı");
+        } catch (IOException e) {
+            IO.println("IOException yakalandi: dogru!");
+        }
+    }
+
+    public static main() : Void {
+        IO.println("=== Exception Handling Testi ===");
+        Program.testBasicCatch();
+        IO.println("---");
+        Program.testFinally();
+        IO.println("---");
+        Program.testNoCatch();
+        IO.println("---");
+        Program.testTypedCatch();
+        IO.println("=== Tum testler gecti ===");
+    }
+}

@@ -115,6 +115,9 @@ pub struct CodeGen<'ctx> {
     finally_defers       : Vec<Vec<Stmt>>,
     // Defer: scope çıkışında (LIFO) çalıştırılacak expression'lar
     defer_stack          : Vec<Vec<Expr>>,
+    // EH: her try bloğunda kaydedilen eski @__arimo_ex_top alloca'ları
+    // [0] = bu fonksiyondaki ilk try'dan önceki top (return sırasında kullanılır)
+    try_saved_tops       : Vec<inkwell::values::PointerValue<'ctx>>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
@@ -141,6 +144,7 @@ impl<'ctx> CodeGen<'ctx> {
             manual_memory_classes : std::collections::HashSet::new(),
             finally_defers        : Vec::new(),
             defer_stack           : Vec::new(),
+            try_saved_tops        : Vec::new(),
         }
     }
 
@@ -530,6 +534,106 @@ impl<'ctx> CodeGen<'ctx> {
         let i64_ty = self.ctx.i64_type();
         let malloc_ty = ptr_ty.fn_type(&[i64_ty.into()], false);
         self.module.add_function("malloc", malloc_ty, None);
+    }
+
+    // ── EH runtime tanımları (setjmp/longjmp tabanlı) ────────────────────────
+
+    fn declare_setjmp(&mut self) {
+        // Windows UCRT: _setjmp(jmp_buf, void* frame) — 2 args
+        // Linux/macOS:  setjmp(jmp_buf) — 1 arg
+        #[cfg(target_os = "windows")]
+        let fn_name = "_setjmp";
+        #[cfg(not(target_os = "windows"))]
+        let fn_name = "setjmp";
+
+        if self.module.get_function(fn_name).is_some() { return; }
+        let i32_ty = self.ctx.i32_type();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        #[cfg(target_os = "windows")]
+        let ft = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        #[cfg(not(target_os = "windows"))]
+        let ft = i32_ty.fn_type(&[ptr_ty.into()], false);
+        let f = self.module.add_function(fn_name, ft, None);
+        let kind_id = inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice");
+        if kind_id != 0 {
+            let attr = self.ctx.create_enum_attribute(kind_id, 0);
+            f.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+        }
+    }
+
+    fn setjmp_fn_name(&self) -> &'static str {
+        #[cfg(target_os = "windows")] { "_setjmp" }
+        #[cfg(not(target_os = "windows"))] { "setjmp" }
+    }
+
+    fn declare_longjmp(&mut self) {
+        if self.module.get_function("longjmp").is_some() { return; }
+        let void_ty = self.ctx.void_type();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let i32_ty = self.ctx.i32_type();
+        let ft = void_ty.fn_type(&[ptr_ty.into(), i32_ty.into()], false);
+        let f = self.module.add_function("longjmp", ft, None);
+        let kind_id = inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn");
+        if kind_id != 0 {
+            let attr = self.ctx.create_enum_attribute(kind_id, 0);
+            f.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+        }
+    }
+
+    fn declare_strcmp(&mut self) {
+        if self.module.get_function("strcmp").is_some() { return; }
+        let i32_ty = self.ctx.i32_type();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let ft = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        self.module.add_function("strcmp", ft, None);
+    }
+
+    // EH global'ı al ya da oluştur (@__arimo_ex_top, @__arimo_ex_type, @__arimo_ex_msg)
+    fn get_or_create_eh_global(&mut self, name: &str) -> inkwell::values::GlobalValue<'ctx> {
+        if let Some(g) = self.module.get_global(name) { return g; }
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let g = self.module.add_global(ptr_ty, None, name);
+        g.set_initializer(&ptr_ty.const_null());
+        g.set_linkage(inkwell::module::Linkage::Internal);
+        g
+    }
+
+    // EH: global jmpbuf dizisi ve derinlik sayacı
+    // Stack alloca yerine global kullanmak alignment sorununu çözer
+    // [32 x [32 x i64]] = 32 iç içe try seviyesi, her biri 256 byte
+    fn get_or_create_eh_jmpbufs(&mut self) -> inkwell::values::GlobalValue<'ctx> {
+        if let Some(g) = self.module.get_global("__arimo_ex_jmpbufs") { return g; }
+        let i64_ty = self.ctx.i64_type();
+        let jmpbuf_ty = i64_ty.array_type(32);   // [32 x i64] = 256 bytes per slot
+        let arr_ty = jmpbuf_ty.array_type(32);    // [32 x [32 x i64]] = 32 nesting levels
+        let g = self.module.add_global(arr_ty, None, "__arimo_ex_jmpbufs");
+        g.set_initializer(&arr_ty.const_zero());
+        g.set_linkage(inkwell::module::Linkage::Internal);
+        g.set_alignment(32);  // 32-byte aligned for XMM registers (UCRT requirement)
+        g
+    }
+
+    fn get_or_create_eh_depth(&mut self) -> inkwell::values::GlobalValue<'ctx> {
+        if let Some(g) = self.module.get_global("__arimo_ex_depth") { return g; }
+        let i32_ty = self.ctx.i32_type();
+        let g = self.module.add_global(i32_ty, None, "__arimo_ex_depth");
+        g.set_initializer(&i32_ty.const_int(0, false));
+        g.set_linkage(inkwell::module::Linkage::Internal);
+        g
+    }
+
+    // slot indeksinden jmpbuf pointer'ı üret
+    fn get_jmpbuf_ptr(&mut self, slot: inkwell::values::IntValue<'ctx>) -> CgResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.ctx.i64_type();
+        let jmpbuf_slot_ty = i64_ty.array_type(32);  // [32 x i64]
+        let arr_ty = jmpbuf_slot_ty.array_type(32);  // [32 x [32 x i64]]
+        let jmpbufs_gv = self.get_or_create_eh_jmpbufs();
+        let i32_ty = self.ctx.i32_type();
+        let zero = i32_ty.const_int(0, false);
+        let ptr = unsafe {
+            self.builder.build_gep(arr_ty, jmpbufs_gv.as_pointer_value(), &[zero, slot], "jmpbuf_slot")
+        }.map_err(|e| CodeGenError::new(e.to_string()))?;
+        Ok(ptr)
     }
 
     // ── Class struct tipi kayıt ──────────────────────────────────────────────
@@ -1052,6 +1156,7 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.position_at_end(entry_block);
 
         self.cur_fn = Some(fn_val);
+        self.try_saved_tops.clear();
         self.push_scope();
 
         // Instance metod: this pointer'ı kapsama ekle
@@ -1146,6 +1251,16 @@ impl<'ctx> CodeGen<'ctx> {
                     self.push_scope();
                     for s in fin_body { if self.compile_stmt(s)? { break; } }
                     self.pop_scope();
+                }
+
+                // ── Adım 2b: EH depth'i temizle (try içinde return varsa) ──────
+                if !self.try_saved_tops.is_empty() && !self.current_block_terminated() {
+                    let i32_ty = self.ctx.i32_type();
+                    let depth_gv = self.get_or_create_eh_depth();
+                    let outermost_depth_alloca = self.try_saved_tops[0];
+                    if let Ok(saved) = self.builder.build_load(i32_ty, outermost_depth_alloca, "ret_eh_depth") {
+                        let _ = self.builder.build_store(depth_gv.as_pointer_value(), saved);
+                    }
                 }
 
                 // ── Adım 3: ARC cleanup — döndürülen değişkeni atla ─────────
@@ -1279,93 +1394,325 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             Stmt::TryCatch { try_body, catches, finally_body } => {
-                // Finally gövdesini deferred stack'e ekle (return içinde çalışsın diye)
+                self.declare_setjmp();
+                self.declare_longjmp();
+                self.declare_strcmp();
+
+                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                let i32_ty = self.ctx.i32_type();
+                let cur_fn = self.cur_fn.unwrap();
+
+                // ── 1. Mevcut derinliği oku (saved_depth = try öncesi derinlik) ──
+                let depth_gv = self.get_or_create_eh_depth();
+                let saved_depth = self.builder.build_load(i32_ty, depth_gv.as_pointer_value(), "saved_depth")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?
+                    .into_int_value();
+
+                // saved_depth'i bir alloca'ya kaydet (returns_twice sonrası erişim için)
+                let saved_depth_alloca = self.builder.build_alloca(i32_ty, "saved_depth_slot")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(saved_depth_alloca, saved_depth)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.try_saved_tops.push(saved_depth_alloca
+                    .as_instruction_value().map(|_| saved_depth_alloca)
+                    .unwrap_or(saved_depth_alloca));
+
+                // ── 2. Derinliği artır ──────────────────────────────────────────
+                let new_depth = self.builder.build_int_add(saved_depth, i32_ty.const_int(1, false), "new_depth")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(depth_gv.as_pointer_value(), new_depth)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                // ── 3. Bu try için jmpbuf pointer'ı al ─────────────────────────
+                let jmpbuf_ptr = self.get_jmpbuf_ptr(saved_depth)?;
+
+                // ── 4. setjmp/longjmp çağrısı ──────────────────────────────────
+                let sj_name = self.setjmp_fn_name();
+                let setjmp_fn = self.module.get_function(sj_name).unwrap();
+                #[cfg(target_os = "windows")]
+                let setjmp_args: &[inkwell::values::BasicMetadataValueEnum] = &[
+                    jmpbuf_ptr.into(),
+                    self.ctx.ptr_type(inkwell::AddressSpace::default()).const_null().into(),
+                ];
+                #[cfg(not(target_os = "windows"))]
+                let setjmp_args: &[inkwell::values::BasicMetadataValueEnum] = &[jmpbuf_ptr.into()];
+                let setjmp_r = self.builder.build_call(setjmp_fn, setjmp_args, "setjmp_r")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?
+                    .try_as_basic_value().basic().unwrap().into_int_value();
+
+                // ── 5. Branch: 0 → try body, nonzero → catch dispatch ───────────
+                let try_body_bb   = self.ctx.append_basic_block(cur_fn, "try.body");
+                let catch_disp_bb = self.ctx.append_basic_block(cur_fn, "catch.dispatch");
+                let finally_bb    = self.ctx.append_basic_block(cur_fn, "try.finally");
+                let after_bb      = self.ctx.append_basic_block(cur_fn, "try.after");
+
+                let is_ex = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE, setjmp_r, i32_ty.const_int(0, false), "is_ex")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_conditional_branch(is_ex, catch_disp_bb, try_body_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                // ── Try body ────────────────────────────────────────────────────
+                self.builder.position_at_end(try_body_bb);
+
                 if let Some(fin) = finally_body {
                     self.finally_defers.push(fin.clone());
                 }
 
-                // Try body
-                let mut ret = false;
+                let mut try_returned = false;
                 self.push_scope();
                 for s in try_body {
-                    if self.compile_stmt(s)? { ret = true; break; }
+                    if self.compile_stmt(s)? { try_returned = true; break; }
                 }
                 self.pop_scope();
 
-                // Catch body'lerini derle (şimdilik try'dan sonra doğrudan, gelecekte setjmp ile)
-                // Catch'e ancak exception fırlatıldığında ulaşılır — abort() ile sonlandığı için
-                // şu an catch body'leri sadece type-check amacıyla derleniyor.
-                for catch in catches {
-                    if !self.current_block_terminated() {
-                        // Exception yoksa catch'e girmeyiz — ama IR geçerli olsun diye derliyoruz
-                        let cur_fn = self.cur_fn.unwrap();
-                        let catch_bb = self.ctx.append_basic_block(cur_fn, "catch.dead");
-                        let after_bb = self.ctx.append_basic_block(cur_fn, "catch.after");
-                        // Hiç branch etme catch_bb'ye (dead code)
-                        self.builder.build_unconditional_branch(after_bb)
+                if finally_body.is_some() { self.finally_defers.pop(); }
+
+                // Normal çıkış: derinliği geri yükle → finally
+                if !try_returned && !self.current_block_terminated() {
+                    let sd = self.builder.build_load(i32_ty, saved_depth_alloca, "sd_restore")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_store(depth_gv.as_pointer_value(), sd)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_unconditional_branch(finally_bb)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                }
+
+                // ── Catch dispatch ───────────────────────────────────────────────
+                self.builder.position_at_end(catch_disp_bb);
+
+                // Exception type ve message'ı yükle
+                let ex_type_gv = self.get_or_create_eh_global("__arimo_ex_type");
+                let ex_msg_gv  = self.get_or_create_eh_global("__arimo_ex_msg");
+                let ex_type_val = self.builder.build_load(ptr_ty, ex_type_gv.as_pointer_value(), "ex_type")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let ex_msg_val = self.builder.build_load(ptr_ty, ex_msg_gv.as_pointer_value(), "ex_msg")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                let rethrow_bb = self.ctx.append_basic_block(cur_fn, "catch.rethrow");
+                let strcmp_fn  = self.module.get_function("strcmp").unwrap();
+
+                for (i, catch) in catches.iter().enumerate() {
+                    let catch_body_bb = self.ctx.append_basic_block(cur_fn, &format!("catch.{}.body", i));
+                    let next_bb = if i + 1 < catches.len() {
+                        self.ctx.append_basic_block(cur_fn, &format!("catch.{}.check", i + 1))
+                    } else {
+                        rethrow_bb
+                    };
+
+                    let catch_type = match &catch.exception_type {
+                        crate::ast::Type::Named(n) => n.clone(),
+                        _ => "Exception".to_string(),
+                    };
+
+                    if catch_type == "Exception" {
+                        self.builder.build_unconditional_branch(catch_body_bb)
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
-                        self.builder.position_at_end(catch_bb);
-                        self.push_scope();
-                        // exception variable'ı bind et (şimdilik null ptr)
-                        if !catch.name.is_empty() {
-                            let ptr_ty: BasicTypeEnum<'ctx> = self.ctx.ptr_type(AddressSpace::default()).into();
-                            let alloca = self.builder.build_alloca(ptr_ty, &catch.name)
+                    } else {
+                        let catch_type_ptr = self.build_global_string(&catch_type)?;
+                        let cmp = self.builder.build_call(
+                            strcmp_fn, &[ex_type_val.into(), catch_type_ptr.into()], "type_cmp")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?
+                            .try_as_basic_value().basic().unwrap().into_int_value();
+                        let matched = self.builder.build_int_compare(
+                            inkwell::IntPredicate::EQ, cmp, i32_ty.const_int(0, false), "type_match")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        self.builder.build_conditional_branch(matched, catch_body_bb, next_bb)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    }
+
+                    self.builder.position_at_end(catch_body_bb);
+                    self.push_scope();
+
+                    if !catch.name.is_empty() {
+                        let alloca = self.builder.build_alloca(ptr_ty, &catch.name)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        if ex_msg_val.is_pointer_value() {
+                            self.builder.build_store(alloca, ex_msg_val.into_pointer_value())
                                 .map_err(|e| CodeGenError::new(e.to_string()))?;
-                            self.define_var(&catch.name, alloca, ptr_ty);
                         }
-                        for s in &catch.body { if self.compile_stmt(s)? { break; } }
-                        self.pop_scope();
-                        if !self.current_block_terminated() {
-                            self.builder.build_unconditional_branch(after_bb)
-                                .map_err(|e| CodeGenError::new(e.to_string()))?;
-                        }
-                        self.builder.position_at_end(after_bb);
+                        self.define_var(&catch.name, alloca, ptr_ty.into());
+                    }
+
+                    let mut catch_ret = false;
+                    for s in &catch.body {
+                        if self.compile_stmt(s)? { catch_ret = true; break; }
+                    }
+                    self.pop_scope();
+
+                    if !catch_ret && !self.current_block_terminated() {
+                        // Catch çıkışı: derinliği geri yükle → finally
+                        let sd = self.builder.build_load(i32_ty, saved_depth_alloca, "sd_catch")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        self.builder.build_store(depth_gv.as_pointer_value(), sd)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        self.builder.build_unconditional_branch(finally_bb)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    }
+
+                    if i + 1 < catches.len() {
+                        self.builder.position_at_end(next_bb);
                     }
                 }
 
-                // Finally'yi deferred stack'ten çıkar ve doğal yolda çalıştır
-                if finally_body.is_some() {
-                    let fin = self.finally_defers.pop().unwrap_or_default();
-                    if !ret && !self.current_block_terminated() {
-                        self.push_scope();
-                        for s in &fin { if self.compile_stmt(s)? { break; } }
-                        self.pop_scope();
-                    }
+                // Hiçbir catch uymadı → rethrow
+                self.builder.position_at_end(rethrow_bb);
+                {
+                    // Derinliği saved_depth'e geri yükle
+                    let sd = self.builder.build_load(i32_ty, saved_depth_alloca, "sd_rethrow")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                        .into_int_value();
+                    self.builder.build_store(depth_gv.as_pointer_value(), sd)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                    // Parent slot = saved_depth - 1
+                    let rethrow_null_bb    = self.ctx.append_basic_block(cur_fn, "rethrow.uncaught");
+                    let rethrow_longjmp_bb = self.ctx.append_basic_block(cur_fn, "rethrow.longjmp");
+
+                    let has_parent = self.builder.build_int_compare(
+                        inkwell::IntPredicate::SGT, sd, i32_ty.const_int(0, false), "has_parent")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_conditional_branch(has_parent, rethrow_longjmp_bb, rethrow_null_bb)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                    self.builder.position_at_end(rethrow_null_bb);
+                    self.declare_printf();
+                    let fmt = self.build_global_string("Uncaught exception: %s\n")?;
+                    let printf = self.module.get_function("printf").unwrap();
+                    let ex_type2 = self.builder.build_load(ptr_ty, ex_type_gv.as_pointer_value(), "ex_t2")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_call(printf, &[fmt.into(), ex_type2.into()], "")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let abort_fn = self.module.get_function("abort").unwrap_or_else(|| {
+                        let ft = self.ctx.void_type().fn_type(&[], false);
+                        self.module.add_function("abort", ft, None)
+                    });
+                    self.builder.build_call(abort_fn, &[], "")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_unreachable()
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                    self.builder.position_at_end(rethrow_longjmp_bb);
+                    let parent_slot = self.builder.build_int_sub(sd, i32_ty.const_int(1, false), "parent_slot")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let parent_jmpbuf = self.get_jmpbuf_ptr(parent_slot)?;
+                    let longjmp_fn = self.module.get_function("longjmp").unwrap();
+                    let one = i32_ty.const_int(1, false);
+                    self.builder.build_call(longjmp_fn, &[parent_jmpbuf.into(), one.into()], "")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_unreachable()
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
                 }
 
-                Ok(ret)
+                // ── Finally bloğu ────────────────────────────────────────────────
+                self.builder.position_at_end(finally_bb);
+                if let Some(fin) = finally_body {
+                    self.push_scope();
+                    for s in fin { if self.compile_stmt(s)? { break; } }
+                    self.pop_scope();
+                }
+                if !self.current_block_terminated() {
+                    self.builder.build_unconditional_branch(after_bb)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                }
+
+                self.builder.position_at_end(after_bb);
+                self.try_saved_tops.pop();
+
+                Ok(false)
             }
 
             Stmt::Throw(expr) => {
-                // stderr'e exception mesajı yaz, sonra abort()
+                self.declare_setjmp();
+                self.declare_longjmp();
                 self.declare_printf();
-                let stderr_fmt = if let Expr::ConstructorCall { args, .. } = expr {
-                    if let Some(first) = args.first() {
-                        if let Some(val) = self.compile_expr(first)? {
-                            // Exception mesajını stderr'e yaz
-                            let fmt = self.build_global_string("Exception: %s\n")?;
-                            let printf = self.module.get_function("printf").unwrap();
-                            let _ = self.builder.build_call(printf, &[fmt.into(), val.into()], "");
-                        }
+
+                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                let i32_ty = self.ctx.i32_type();
+
+                // Exception type adını ve mesaj değerini çıkart
+                let (type_name_str, msg_opt) = match expr {
+                    Expr::ConstructorCall { class, args, .. } => {
+                        let name = class.clone();
+                        let msg = if let Some(first) = args.first() {
+                            self.compile_expr(first)?
+                        } else {
+                            None
+                        };
+                        (name, msg)
                     }
-                    true
-                } else {
-                    false
+                    _ => ("Exception".to_string(), None),
                 };
-                if !stderr_fmt {
-                    let fmt = self.build_global_string("Exception thrown\n")?;
-                    let printf = self.module.get_function("printf").unwrap();
-                    let _ = self.builder.build_call(printf, &[fmt.into()], "");
+
+                // @__arimo_ex_type'a type name yaz
+                let type_name_ptr = self.build_global_string(&type_name_str)?;
+                let ex_type_gv = self.get_or_create_eh_global("__arimo_ex_type");
+                self.builder.build_store(ex_type_gv.as_pointer_value(), type_name_ptr)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                // @__arimo_ex_msg'a mesajı yaz
+                let ex_msg_gv = self.get_or_create_eh_global("__arimo_ex_msg");
+                if let Some(msg_val) = msg_opt {
+                    if msg_val.is_pointer_value() {
+                        self.builder.build_store(ex_msg_gv.as_pointer_value(), msg_val.into_pointer_value())
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    }
+                } else {
+                    let empty = self.build_global_string("")?;
+                    self.builder.build_store(ex_msg_gv.as_pointer_value(), empty)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
                 }
-                // abort() çağır
-                let abort_fn = self.module.get_function("abort").unwrap_or_else(|| {
-                    let ft = self.ctx.void_type().fn_type(&[], false);
-                    self.module.add_function("abort", ft, None)
-                });
-                self.builder.build_call(abort_fn, &[], "")
+
+                // Derinliği yükle — 0 ise uncaught, >0 ise longjmp
+                let depth_gv = self.get_or_create_eh_depth();
+                let depth_val = self.builder.build_load(i32_ty, depth_gv.as_pointer_value(), "throw_depth")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?
+                    .into_int_value();
+
+                let cur_fn = self.cur_fn.unwrap();
+                let do_longjmp_bb = self.ctx.append_basic_block(cur_fn, "throw.longjmp");
+                let do_abort_bb   = self.ctx.append_basic_block(cur_fn, "throw.uncaught");
+
+                let has_frame = self.builder.build_int_compare(
+                    inkwell::IntPredicate::SGT, depth_val, i32_ty.const_int(0, false), "has_frame")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
-                self.builder.build_unreachable()
+                self.builder.build_conditional_branch(has_frame, do_longjmp_bb, do_abort_bb)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                // ── Uncaught: mesajı yaz + abort ─────────────────────────────
+                self.builder.position_at_end(do_abort_bb);
+                {
+                    let fmt = self.build_global_string("Uncaught exception %s: %s\n")?;
+                    let printf = self.module.get_function("printf").unwrap();
+                    let msg_reload = self.builder.build_load(ptr_ty, ex_msg_gv.as_pointer_value(), "msg_r")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_call(printf, &[fmt.into(), type_name_ptr.into(), msg_reload.into()], "")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let abort_fn = self.module.get_function("abort").unwrap_or_else(|| {
+                        let ft = self.ctx.void_type().fn_type(&[], false);
+                        self.module.add_function("abort", ft, None)
+                    });
+                    self.builder.build_call(abort_fn, &[], "")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_unreachable()
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                }
+
+                // ── longjmp: en içteki try frame'e zıpla ────────────────────
+                self.builder.position_at_end(do_longjmp_bb);
+                {
+                    // slot = depth - 1 (0-indexed, innermost active slot)
+                    let slot = self.builder.build_int_sub(depth_val, i32_ty.const_int(1, false), "throw_slot")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let jmpbuf_ptr = self.get_jmpbuf_ptr(slot)?;
+                    let longjmp_fn = self.module.get_function("longjmp").unwrap();
+                    let one = i32_ty.const_int(1, false);
+                    self.builder.build_call(longjmp_fn, &[jmpbuf_ptr.into(), one.into()], "")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_unreachable()
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                }
+
                 Ok(true)
             }
 
@@ -2433,14 +2780,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.gen_arc_pair_second();
 
         if let Some(bb) = prev { self.builder.position_at_end(bb); }
-    }
-
-    fn declare_strcmp(&mut self) {
-        if self.module.get_function("strcmp").is_some() { return; }
-        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
-        let i32_ty = self.ctx.i32_type();
-        let ft = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
-        self.module.add_function("strcmp", ft, None);
     }
 
     fn declare_string_fns(&mut self) {
