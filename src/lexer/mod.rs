@@ -1,16 +1,33 @@
-﻿
+﻿/*
+Arimo Lang - A modern programming language and compiler
+Copyright (C) 2026 Egecan Akıncıoğlu
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Str(String),        // string parçası — interpolation için bölünür
+    Str(String),
     Ident(String),
 
-    Package,   // dosya seviyesi: package arimo.io;
-    Module,    // üst düzey gruplama: module arimo.base { exports ...; }
+    Package,
+    Module,
     Import,
-    Exports,   // module tanımlayıcısında: exports arimo.lang;
+    Exports,
 
     Public,
     Private,
@@ -18,13 +35,13 @@ pub enum Token {
     Internal,
 
     Class,
-    Struct,      // struct — value type, stack-allocated
+    Struct,
     Abstract,
     Interface,
     Enum,
     Extends,
     Implements,
-    Operator,    // operator — metod seviyesinde operator overloading
+    Operator,
 
     Static,
     Readonly,
@@ -44,10 +61,10 @@ pub enum Token {
     TypeHashMap,
     TypeTreeMap,
     TypePair,
-    TypeException,    // Exception — built-in base exception
-    TypeRawPtr,       // RawPtr<T> — @manual sınıflarda ham bellek erişimi
-    TypeArray,        // Array<T, N> — fixed-size stack array
-    TypeSlice,        // Slice<T> — fat pointer (ptr + len), non-owning view
+    TypeException,
+    TypeRawPtr,
+    TypeArray,
+    TypeSlice,
 
     TypeU8,
     TypeU16,
@@ -58,10 +75,10 @@ pub enum Token {
     TypeI32,
     TypeI64,
 
-    StdIO,            // IO.print() IO.read()
-    StdMath,          // Math.sqrt() Math.PI
-    StdTime,          // Time.now() Time.generateId()
-    StdMemory,        // Memory.alloc() Memory.free() Memory.copy()
+    StdIO,
+    StdMath,
+    StdTime,
+    StdMemory,
 
     If,
     Else,
@@ -72,7 +89,7 @@ pub enum Token {
     Continue,
     Switch,
     Case,
-    Match,       // match — pattern matching
+    Match,
     Throw,
     Try,
     Catch,
@@ -80,71 +97,70 @@ pub enum Token {
 
     Null,
 
-    As,        // as  — type cast
-    KwType,    // type — type alias declaration
+    As,
+    KwType,
 
-    Volatile,       // volatile
-    Union,          // union
-    Extern,         // extern
-    Asm,            // asm
-    Defer,          // defer
+    Volatile,
+    Union,
+    Extern,
+    Asm,
+    Defer,
 
-    Async,          // async — asenkron metod modifier
-    Await,          // await — asenkron bekleme operatörü
-    Default,        // default — interface default method
+    Async,
+    Await,
+    Default,
 
-    TypeNoReturn,   // noreturn
+    TypeNoReturn,
 
-    Ellipsis,       // ...
+    Ellipsis,
 
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
-    Eq,          // =
-    EqEq,        // ==
-    Bang,        // !
-    BangEq,      // !=
-    Lt,          // <
-    LtEq,        // <=
-    Gt,          // >
-    GtEq,        // >=
-    AndAnd,      // &&
-    PipePipe,    // ||
-    PlusPlus,    // ++
-    MinusMinus,  // --
-    PlusEq,      // +=
-    MinusEq,     // -=
-    StarEq,      // *=
-    SlashEq,     // /=
-    Arrow,       // ->  lambda
-    FatArrow,    // =>  match arm
-    Question,    // ?   nullable + ternary (parser bağlama göre ayırt eder)
-    QuestionDot, // ?.  null-safe erişim
+    Eq,       
+    EqEq,      
+    Bang,     
+    BangEq,    
+    Lt,       
+    LtEq,      
+    Gt,       
+    GtEq,      
+    AndAnd,    
+    PipePipe,  
+    PlusPlus,  
+    MinusMinus,
+    PlusEq,    
+    MinusEq,   
+    StarEq,    
+    SlashEq,   
+    Arrow,
+    FatArrow,
+    Question,
+    QuestionDot,
 
-    Amp,         // &   bitwise AND
-    Pipe,        // |   bitwise OR
-    Caret,       // ^   bitwise XOR
-    Tilde,       // ~   bitwise NOT (prefix unary)
-    LtLt,        // <<  left shift
-    GtGt,        // >>  right shift
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    LtLt,
+    GtGt,
 
-    LParen,       // (
-    RParen,       // )
-    LBrace,       // {
-    RBrace,       // }
-    LBracket,     // [
-    RBracket,     // ]
-    Comma,        // ,
-    Semicolon,    // ;
-    Colon,        // :
-    Dot,          // .
-    DollarLBrace, // ${  string interpolation başlangıcı
-    InterpolEnd,  // }   string interpolation bitişi (string içinde)
+    LParen,   
+    RParen,   
+    LBrace,   
+    RBrace,   
+    LBracket, 
+    RBracket, 
+    Comma,    
+    Semicolon,
+    Colon,    
+    Dot,      
+    DollarLBrace,
+    InterpolEnd,
 
-    At,             // @  annotation işareti
-
+    At,
     Eof,
     Unknown(char),
 }

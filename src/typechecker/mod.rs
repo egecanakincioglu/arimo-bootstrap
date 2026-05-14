@@ -1,4 +1,21 @@
-﻿
+﻿/*
+Arimo Lang - A modern programming language and compiler
+Copyright (C) 2026 Egecan Akıncıoğlu
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 use std::collections::HashMap;
 use crate::ast::*;
 
@@ -45,21 +62,21 @@ pub enum ClassKind {
     Interface,
     Enum,
     Exception,
-    Struct,     // value type — copy semantics, stack-allocated
+    Struct,
     Union,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClassInfo {
     pub kind         : ClassKind,
-    pub generics     : Vec<String>,           // parametre isimleri: ["T", "E"]
-    pub generic_bounds: HashMap<String, Vec<String>>,  // "T" → ["Drawable"]
+    pub generics     : Vec<String>,
+    pub generic_bounds: HashMap<String, Vec<String>>,
     pub extends      : Option<String>,
     pub implements   : Vec<String>,
     pub fields       : HashMap<String, FieldInfo>,
     pub methods      : HashMap<String, Vec<MethodInfo>>,
     pub constructor  : Option<ConstructorInfo>,
-    pub variant_data : HashMap<String, Vec<Type>>,  // enum varyant → veri tipleri
+    pub variant_data : HashMap<String, Vec<Type>>,
     pub sealed       : bool,
     pub deprecated   : Option<String>,
     pub experimental : bool,
@@ -122,7 +139,7 @@ pub struct TypeChecker {
     classes            : HashMap<String, ClassInfo>,
     type_aliases       : HashMap<String, Type>,
     pub errors         : Vec<TypeError>,
-    pub warnings       : Vec<String>,   // @Deprecated / @Experimental uyarıları
+    pub warnings       : Vec<String>,
     current_class      : Option<String>,
     current_return_ty  : Option<Option<Type>>,
     scopes             : Vec<Scope>,
@@ -302,7 +319,7 @@ impl TypeChecker {
                 params    : m.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
                 return_ty : m.return_ty.clone(),
                 static_   : false,
-                abstract_ : !m.default_,   // default metodlar abstract değil
+                abstract_ : !m.default_,
                 vis       : Visibility::Public,
             };
             info.methods.entry(m.name.clone()).or_default().push(mi);
@@ -1595,7 +1612,7 @@ impl TypeChecker {
                     }
                 }
             }
-            Expr::Index { .. } => {} // Array/Slice index assignment — her zaman izinli
+            Expr::Index { .. } => {}
             Expr::FieldAccess { object, field } => {
                 let obj_ty = self.infer_expr(object);
                 let class_name = match &obj_ty {
@@ -1720,7 +1737,7 @@ impl TypeChecker {
 
         let class_name = match ty {
             Type::Named(n)       => n.clone(),
-            Type::Generic(n, _)  => n.clone(),  // Result<T,E> → "Result"
+            Type::Generic(n, _)  => n.clone(),
             Type::List(_)        => "List".to_string(),
             Type::Map(_, _)      => "Map".to_string(),
             Type::HashMap(_, _)  => "HashMap".to_string(),
@@ -1917,7 +1934,7 @@ impl TypeChecker {
             ("IO", "error")   => Some(Type::Void),
             ("IO", "read")    => Some(Type::Str),
             ("IO", "readInt") => Some(Type::Integer),
-            ("IO", _)         => Some(Type::Void),  // diğer IO metodları
+            ("IO", _)         => Some(Type::Void),
 
             ("Math", "sqrt") => Some(Type::Float),
             ("Math", "abs")  => Some(Type::Float),

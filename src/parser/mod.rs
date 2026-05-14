@@ -1,4 +1,21 @@
-﻿
+﻿/*
+Arimo Lang - A modern programming language and compiler
+Copyright (C) 2026 Egecan Akıncıoğlu
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 use crate::lexer::{Token, SpannedToken};
 use crate::ast::*;
 
@@ -20,7 +37,7 @@ type ParseResult<T> = Result<T, ParseError>;
 pub struct Parser {
     tokens           : Vec<SpannedToken>,
     pos              : usize,
-    pending_close_gt : bool,   // >> token'ının ikinci > 'si bekliyor
+    pending_close_gt : bool,
 }
 
 impl Parser {
@@ -153,9 +170,9 @@ impl Parser {
 
     fn parse_module_decl(&mut self) -> ParseResult<String> {
         if self.check(&Token::Package) {
-            self.advance(); // package
+            self.advance();
         } else {
-            self.expect(&Token::Module)?; // eski sözdizimi
+            self.expect(&Token::Module)?;
         }
         let path = self.parse_dotted_path()?;
         self.expect(&Token::Semicolon)?;
@@ -697,7 +714,7 @@ impl Parser {
             let vis       = self.parse_visibility()?;
             let static_   = self.eat(&Token::Static);
             let async_    = async_ || self.eat(&Token::Async);
-            let _readonly = self.eat(&Token::Readonly); // struct fields are value-copied, readonly is on field
+            let _readonly = self.eat(&Token::Readonly);
             let override_ = self.eat(&Token::Override);
 
             if self.check(&Token::Operator) {
@@ -1896,7 +1913,7 @@ impl Parser {
             self.expect(&Token::FatArrow)?;
             let body = self.parse_expr(0)?;
             arms.push(MatchArm { pattern, body: Box::new(body) });
-            self.eat(&Token::Comma); // opsiyonel virgül
+            self.eat(&Token::Comma);
         }
 
         self.expect(&Token::RBrace)?;

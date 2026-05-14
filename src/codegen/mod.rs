@@ -1,4 +1,21 @@
-﻿
+﻿/*
+Arimo Lang - A modern programming language and compiler
+Copyright (C) 2026 Egecan Akıncıoğlu
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -41,8 +58,8 @@ type CgResult<T> = Result<T, CodeGenError>;
 struct VarSlot<'ctx> {
     ptr        : PointerValue<'ctx>,
     ty         : BasicTypeEnum<'ctx>,
-    class_name : Option<String>,   // class instance veya "__List"/"__HashMap"/"__Pair"
-    elem_class : Option<String>,   // List<T> için T'nin class adı
+    class_name : Option<String>,
+    elem_class : Option<String>,
 }
 
 pub struct CodeGen<'ctx> {
@@ -419,10 +436,10 @@ impl<'ctx> CodeGen<'ctx> {
             fn_ty,
             asm_code,
             String::new(),
-            true,  // has_side_effects
-            false, // is_align_stack
-            None,  // dialect (None = AT&T)
-            false, // can_throw
+            true,
+            false,
+            None,
+            false,
         );
         self.builder.build_indirect_call(fn_ty, inline_asm, &[], "asm_call")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -497,12 +514,12 @@ impl<'ctx> CodeGen<'ctx> {
     fn get_or_create_eh_jmpbufs(&mut self) -> inkwell::values::GlobalValue<'ctx> {
         if let Some(g) = self.module.get_global("__arimo_ex_jmpbufs") { return g; }
         let i64_ty = self.ctx.i64_type();
-        let jmpbuf_ty = i64_ty.array_type(32);   // [32 x i64] = 256 bytes per slot
-        let arr_ty = jmpbuf_ty.array_type(32);    // [32 x [32 x i64]] = 32 nesting levels
+        let jmpbuf_ty = i64_ty.array_type(32);
+        let arr_ty = jmpbuf_ty.array_type(32);
         let g = self.module.add_global(arr_ty, None, "__arimo_ex_jmpbufs");
         g.set_initializer(&arr_ty.const_zero());
         g.set_linkage(inkwell::module::Linkage::Internal);
-        g.set_alignment(32);  // 32-byte aligned for XMM registers (UCRT requirement)
+        g.set_alignment(32);
         g
     }
 
@@ -517,8 +534,8 @@ impl<'ctx> CodeGen<'ctx> {
 
     fn get_jmpbuf_ptr(&mut self, slot: inkwell::values::IntValue<'ctx>) -> CgResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.ctx.i64_type();
-        let jmpbuf_slot_ty = i64_ty.array_type(32);  // [32 x i64]
-        let arr_ty = jmpbuf_slot_ty.array_type(32);  // [32 x [32 x i64]]
+        let jmpbuf_slot_ty = i64_ty.array_type(32);
+        let arr_ty = jmpbuf_slot_ty.array_type(32);
         let jmpbufs_gv = self.get_or_create_eh_jmpbufs();
         let i32_ty = self.ctx.i32_type();
         let zero = i32_ty.const_int(0, false);
@@ -570,7 +587,7 @@ impl<'ctx> CodeGen<'ctx> {
         };
         self.refcount_indices.insert(c.name.clone(), rc_idx);
 
-        let struct_ty = self.ctx.struct_type(&all_field_types, false); // ClassDecl: never packed
+        let struct_ty = self.ctx.struct_type(&all_field_types, false);
         self.struct_types.insert(c.name.clone(), struct_ty);
         self.field_indices.insert(c.name.clone(), idx_map);
 
@@ -982,8 +999,8 @@ impl<'ctx> CodeGen<'ctx> {
         if let Some(cc) = &m.calling_conv {
             let llvm_cc = match cc {
                 CallingConv::Cdecl    => inkwell::llvm_sys::LLVMCallConv::LLVMCCallConv as u32,
-                CallingConv::Stdcall  => 64u32, // stdcall = 64
-                CallingConv::Interrupt => 86u32, // x86_intr = 86
+                CallingConv::Stdcall  => 64u32,
+                CallingConv::Interrupt => 86u32,
             };
             fn_val.set_call_conventions(llvm_cc);
         }
@@ -1044,7 +1061,7 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        self.pop_scope_no_arc(); // block sonlandı, ARC zaten yapıldı
+        self.pop_scope_no_arc();
         self.cur_fn = None;
 
         if fn_val.verify(true) {
@@ -1788,7 +1805,7 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                     self.builder.build_unconditional_branch(merge_bb)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
-                    break; // Wildcard her zaman son arm olmalı
+                    break;
                 }
 
                 MatchPattern::Variant { enum_name, variant, bindings } => {
@@ -5155,7 +5172,7 @@ impl<'ctx> CodeGen<'ctx> {
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 self.builder.build_unconditional_branch(o_cond)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
-                return Ok(result_ptr); // unreachable
+                return Ok(result_ptr);
             }
         };
         let inner_ptr = self.builder.build_int_to_ptr(inner_i64, ptr_ty, "fm_iptr")
@@ -6038,7 +6055,7 @@ impl<'ctx> CodeGen<'ctx> {
                              else { ptr_ty.const_null() })
                         .unwrap_or(ptr_ty.const_null())
                 } else { ptr_ty.const_null() };
-                let def = i64_ty.const_int(u64::MAX, false); // sentinel: "not found"
+                let def = i64_ty.const_int(u64::MAX, false);
                 let f = self.module.get_function("arc_map_get_or_default").unwrap();
                 let r = self.builder.build_call(f, &[list_ptr.into(), key.into(), def.into()], "ck_val")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;

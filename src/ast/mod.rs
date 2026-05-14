@@ -1,4 +1,21 @@
-﻿
+﻿/*
+Arimo Lang - A modern programming language and compiler
+Copyright (C) 2026 Egecan Akıncıoğlu
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 #[derive(Debug, Clone)]
 pub struct Span {
     pub line : usize,
@@ -163,13 +180,13 @@ pub enum BinOp {
 
 #[derive(Debug, Clone)]
 pub enum UnaryOp {
-    Neg,        // -x
-    Not,        // !x
-    BitNot,     // ~x
-    PreInc,     // ++x
-    PreDec,     // --x
-    PostInc,    // x++
-    PostDec,    // x--
+    Neg,
+    Not,
+    BitNot,
+    PreInc,
+    PreDec,
+    PostInc,
+    PostDec,
 }
 
 #[derive(Debug, Clone)]
@@ -263,7 +280,7 @@ pub enum CallingConv {
 #[derive(Debug, Clone)]
 pub struct GenericParam {
     pub name   : String,
-    pub bounds : Vec<String>,  // interface isimleri
+    pub bounds : Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -291,11 +308,11 @@ pub struct Method {
     pub override_    : bool,
     pub inline_      : bool,
     pub async_       : bool,
-    pub pure_        : bool,            // @Pure — yan etki yok
-    pub deprecated   : Option<String>, // @Deprecated("mesaj")
-    pub experimental : bool,           // @Experimental
-    pub throws       : Vec<String>,    // @Throws(ExType1, ...)
-    pub suppress     : Vec<String>,    // @SuppressWarnings("tip")
+    pub pure_        : bool,
+    pub deprecated   : Option<String>,
+    pub experimental : bool,
+    pub throws       : Vec<String>,
+    pub suppress     : Vec<String>,
     pub calling_conv : Option<CallingConv>,
     pub section      : Option<String>,
     pub name         : String,
@@ -316,10 +333,10 @@ pub struct ClassDecl {
     pub visibility   : Visibility,
     pub abstract_    : bool,
     pub manual       : bool,
-    pub sealed       : bool,           // @Sealed — sadece aynı modülden extend
-    pub immutable    : bool,           // @Immutable — tüm field'lar readonly zorunlu
-    pub deprecated   : Option<String>, // @Deprecated("mesaj")
-    pub experimental : bool,           // @Experimental
+    pub sealed       : bool,
+    pub immutable    : bool,
+    pub deprecated   : Option<String>,
+    pub experimental : bool,
     pub name         : String,
     pub generics     : Vec<GenericParam>,
     pub extends      : Option<String>,
@@ -333,10 +350,10 @@ pub struct ClassDecl {
 pub struct InterfaceDecl {
     pub name         : String,
     pub generics     : Vec<GenericParam>,
-    pub functional   : bool,           // @FunctionalInterface — tam 1 abstract method
-    pub sealed       : bool,           // @Sealed
-    pub deprecated   : Option<String>, // @Deprecated("mesaj")
-    pub experimental : bool,           // @Experimental
+    pub functional   : bool,
+    pub sealed       : bool,
+    pub deprecated   : Option<String>,
+    pub experimental : bool,
     pub methods      : Vec<Method>,
 }
 

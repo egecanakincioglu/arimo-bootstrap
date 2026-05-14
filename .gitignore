@@ -27,3 +27,4 @@ documents/
 .env
 orchestrator/venv/
 orchestrator/
+brain/
