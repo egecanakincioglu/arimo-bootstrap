@@ -1,0 +1,38 @@
+module arimo.test.closure;
+
+// Test: 4.19-B Lambda Closure Capture
+public class ClosureTest {
+
+    public static main() : Void {
+
+        // Test 1: Basit closure — dış scope'tan Integer capture
+        Integer x = 10;
+        (Integer) -> Integer addX = (n) -> n + x;
+        Integer result1 = addX(5);
+        IO.print("closure+capture: ");
+        IO.println(result1);  // 15
+
+        // Test 2: Lambda without capture (closure_ptr = null)
+        (Integer) -> Integer identity = (n) -> n;
+        Integer result2 = identity(42);
+        IO.print("no-capture: ");
+        IO.println(result2);  // 42
+
+        // Test 3: Birden fazla free variable
+        Integer a = 3;
+        Integer b = 7;
+        (Integer) -> Integer sumAB = (n) -> n + a + b;
+        Integer result3 = sumAB(0);
+        IO.print("multi-capture: ");
+        IO.println(result3);  // 10
+
+        // Test 4: Closure capture + multiplication
+        Integer multiplier = 4;
+        (Integer) -> Integer times = (n) -> n * multiplier;
+        Integer result4 = times(6);
+        IO.print("multiply-capture: ");
+        IO.println(result4);  // 24
+
+        IO.println("Closure tests complete!");
+    }
+}

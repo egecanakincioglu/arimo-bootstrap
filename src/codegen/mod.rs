@@ -428,17 +428,9 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Named(n) if n == "Vec4i" => Some(self.ctx.i32_type().vec_type(4).into()),
             Type::Named(n) if n == "Vec8i" => Some(self.ctx.i32_type().vec_type(8).into()),
             Type::Named(_) => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
-            Type::FnPtr(params, ret) => {
-                let ret_llvm = self.llvm_type(ret.as_ref());
-                let params_llvm: Vec<inkwell::types::BasicMetadataTypeEnum> = params.iter()
-                    .filter_map(|p| self.llvm_type(p))
-                    .map(|t| t.into())
-                    .collect();
-                let fn_ty = match ret_llvm {
-                    Some(r) => r.fn_type(&params_llvm, false),
-                    None    => self.ctx.void_type().fn_type(&params_llvm, false),
-                };
-                Some(fn_ty.ptr_type(AddressSpace::default()).into())
+            Type::FnPtr(_, _) => {
+                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                Some(self.ctx.struct_type(&[ptr_ty.into(), ptr_ty.into()], false).into())
             }
             _ => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
         }
@@ -2246,8 +2238,11 @@ impl<'ctx> CodeGen<'ctx> {
                 if let Some((fn_ptr_ptr, fn_ptr_ty)) = fn_ptr_info {
                     let fn_ptr_val = self.builder.build_load(fn_ptr_ty, fn_ptr_ptr, "fnptr")
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
-                    if let BasicValueEnum::PointerValue(fn_ptr) = fn_ptr_val {
+                    let is_fat  = matches!(fn_ptr_val, BasicValueEnum::StructValue(_));
+                    let is_bare = matches!(fn_ptr_val, BasicValueEnum::PointerValue(_));
+                    if is_fat || is_bare {
                         let i64_ty = self.ctx.i64_type();
+                        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
                         let mut compiled_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                         for a in args {
                             if let Some(v) = self.compile_expr(a)? {
@@ -2262,12 +2257,23 @@ impl<'ctx> CodeGen<'ctx> {
                                 compiled_args.push(promoted);
                             }
                         }
+                        let (fn_p, cl_ptr) = self.extract_fn_closure(fn_ptr_val)?;
                         let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                             compiled_args.iter().map(|_| i64_ty.into()).collect();
-                        let fn_type = i64_ty.fn_type(&param_types, false);
-                        let call = self.builder.build_indirect_call(fn_type, fn_ptr, &compiled_args, "lambda_call")
-                            .map_err(|e| CodeGenError::new(e.to_string()))?;
-                        return Ok(call.try_as_basic_value().basic());
+                        if is_fat {
+                            compiled_args.push(cl_ptr.into());
+                            let mut fp_types = param_types;
+                            fp_types.push(ptr_ty.into());
+                            let fn_type = i64_ty.fn_type(&fp_types, false);
+                            let call = self.builder.build_indirect_call(fn_type, fn_p, &compiled_args, "lambda_call")
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            return Ok(call.try_as_basic_value().basic());
+                        } else {
+                            let fn_type = i64_ty.fn_type(&param_types, false);
+                            let call = self.builder.build_indirect_call(fn_type, fn_p, &compiled_args, "lambda_call")
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            return Ok(call.try_as_basic_value().basic());
+                        }
                     }
                 }
 
@@ -5000,7 +5006,13 @@ impl<'ctx> CodeGen<'ctx> {
     ) -> CgResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.ctx.i64_type();
         let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
-        let fn_type = i64_ty.fn_type(&[i64_ty.into()], false);
+        let is_fat = matches!(fn_ptr, BasicValueEnum::StructValue(_));
+        let (fn_p, cl_ptr) = self.extract_fn_closure(fn_ptr)?;
+        let fn_type = if is_fat {
+            i64_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false)
+        } else {
+            i64_ty.fn_type(&[i64_ty.into()], false)
+        };
 
         let list_len_fn    = self.module.get_function("arc_list_length").unwrap();
         let list_get_fn    = self.module.get_function("arc_list_get").unwrap();
@@ -5047,14 +5059,17 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap_or(i64_ty.const_int(0, false).into());
         let item_i64 = self.value_to_i64(item)?;
 
-        if let BasicValueEnum::PointerValue(fn_p) = fn_ptr {
-            let mapped = self.builder.build_indirect_call(fn_type, fn_p, &[item_i64.into()], "map_call")
+        let map_call_args: Vec<inkwell::values::BasicMetadataValueEnum> = if is_fat {
+            vec![item_i64.into(), cl_ptr.into()]
+        } else {
+            vec![item_i64.into()]
+        };
+        let mapped = self.builder.build_indirect_call(fn_type, fn_p, &map_call_args, "map_call")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        if let Some(mapped_val) = mapped.try_as_basic_value().basic() {
+            let mapped_i64 = self.value_to_i64(mapped_val)?;
+            self.builder.build_call(list_append_fn, &[result_ptr.into(), mapped_i64.into()], "")
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
-            if let Some(mapped_val) = mapped.try_as_basic_value().basic() {
-                let mapped_i64 = self.value_to_i64(mapped_val)?;
-                self.builder.build_call(list_append_fn, &[result_ptr.into(), mapped_i64.into()], "")
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-            }
         }
 
         let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "map_inc")
@@ -5076,7 +5091,14 @@ impl<'ctx> CodeGen<'ctx> {
     ) -> CgResult<inkwell::values::IntValue<'ctx>> {
         let i64_ty = self.ctx.i64_type();
         let i1_ty  = self.ctx.bool_type();
-        let fn_type = i64_ty.fn_type(&[i64_ty.into()], false);
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let is_fat_aa = matches!(fn_ptr, BasicValueEnum::StructValue(_));
+        let (fn_p_aa, cl_ptr_aa) = self.extract_fn_closure(fn_ptr)?;
+        let fn_type = if is_fat_aa {
+            i64_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false)
+        } else {
+            i64_ty.fn_type(&[i64_ty.into()], false)
+        };
         let list_len_fn = self.module.get_function("arc_list_length").unwrap();
         let list_get_fn = self.module.get_function("arc_list_get").unwrap();
 
@@ -5119,12 +5141,17 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap_or(i64_ty.const_int(0, false).into());
         let item_i64 = self.value_to_i64(item)?;
 
-        let pred_result = if let BasicValueEnum::PointerValue(fn_p) = fn_ptr {
-            let r = self.builder.build_indirect_call(fn_type, fn_p, &[item_i64.into()], "aa_pred")
+        let aa_call_args: Vec<inkwell::values::BasicMetadataValueEnum> = if is_fat_aa {
+            vec![item_i64.into(), cl_ptr_aa.into()]
+        } else {
+            vec![item_i64.into()]
+        };
+        let pred_result = {
+            let r = self.builder.build_indirect_call(fn_type, fn_p_aa, &aa_call_args, "aa_pred")
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
             r.try_as_basic_value().basic()
                 .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
-        } else { None };
+        };
 
         if let Some(pred_i64) = pred_result {
             let is_nonzero = self.builder.build_int_compare(
@@ -5168,7 +5195,14 @@ impl<'ctx> CodeGen<'ctx> {
         fn_ptr   : BasicValueEnum<'ctx>,
     ) -> CgResult<inkwell::values::IntValue<'ctx>> {
         let i64_ty  = self.ctx.i64_type();
-        let fn_type = i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
+        let ptr_ty  = self.ctx.ptr_type(AddressSpace::default());
+        let is_fat_red = matches!(fn_ptr, BasicValueEnum::StructValue(_));
+        let (fn_p_red, cl_ptr_red) = self.extract_fn_closure(fn_ptr)?;
+        let fn_type = if is_fat_red {
+            i64_ty.fn_type(&[i64_ty.into(), i64_ty.into(), ptr_ty.into()], false)
+        } else {
+            i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false)
+        };
         let list_len_fn = self.module.get_function("arc_list_length").unwrap();
         let list_get_fn = self.module.get_function("arc_list_get").unwrap();
 
@@ -5212,13 +5246,16 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap_or(i64_ty.const_int(0, false).into());
         let item_i64 = self.value_to_i64(item)?;
 
-        if let BasicValueEnum::PointerValue(fn_p) = fn_ptr {
-            let new_acc = self.builder.build_indirect_call(fn_type, fn_p, &[acc.into(), item_i64.into()], "red_call")
+        let red_call_args: Vec<inkwell::values::BasicMetadataValueEnum> = if is_fat_red {
+            vec![acc.into(), item_i64.into(), cl_ptr_red.into()]
+        } else {
+            vec![acc.into(), item_i64.into()]
+        };
+        let new_acc = self.builder.build_indirect_call(fn_type, fn_p_red, &red_call_args, "red_call")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        if let Some(BasicValueEnum::IntValue(na)) = new_acc.try_as_basic_value().basic() {
+            self.builder.build_store(acc_alloca, na)
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
-            if let Some(BasicValueEnum::IntValue(na)) = new_acc.try_as_basic_value().basic() {
-                self.builder.build_store(acc_alloca, na)
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-            }
         }
 
         let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "red_inc")
@@ -6053,8 +6090,9 @@ impl<'ctx> CodeGen<'ctx> {
         free
     }
 
-    // ── Genel Lambda → LLVM function pointer (closure desteğiyle) ────────────
-    // Parametreler i64, dönüş i64. Dış scope değişkenleri LLVM global'lara capture edilir.
+    // ── Genel Lambda → fat pointer { fn_ptr, closure_ptr } ──────────────────
+    // Lambda her zaman (params..., ptr %closure) → i64 imzasına sahiptir.
+    // Free var yoksa closure_ptr = null. Dönen değer { ptr, ptr } struct'ı.
 
     fn compile_general_lambda(
         &mut self,
@@ -6062,32 +6100,23 @@ impl<'ctx> CodeGen<'ctx> {
         body   : &Expr,
     ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
         let i64_ty = self.ctx.i64_type();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
 
-        // Benzersiz fonksiyon adı
         self.lambda_counter += 1;
         let counter = self.lambda_counter;
         let fn_name = format!("arc_lambda_{}", counter);
 
-        // 1. Closure: dış scope'dan kullanılan değişkenleri bul
+        // 1. Free variable analizi
         let free_vars = self.find_free_vars(body, params);
 
-        // 2. Her free var için bir LLVM global oluştur (capture by value)
-        let mut capture_globals: Vec<(String, inkwell::values::GlobalValue<'ctx>)> = Vec::new();
-        for var_name in &free_vars {
-            let g_name = format!("arc_cap_{}_{}", counter, var_name);
-            let global = self.module.add_global(i64_ty, None, &g_name);
-            global.set_initializer(&i64_ty.const_int(0, false));
-            global.set_linkage(inkwell::module::Linkage::Internal);
-            capture_globals.push((var_name.clone(), global));
-        }
-
-        // Parametreler: hepsi i64
-        let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+        // 2. Fonksiyon imzası: (params..., ptr %closure) → i64
+        let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
             params.iter().map(|_| i64_ty.into()).collect();
-        let fn_ty = i64_ty.fn_type(&param_types, false);
+        param_types.push(ptr_ty.into());
+        let fn_ty  = i64_ty.fn_type(&param_types, false);
         let fn_val = self.module.add_function(&fn_name, fn_ty, None);
 
-        // Mevcut builder konumunu kaydet
+        // Builder durumunu kaydet
         let prev_block = self.builder.get_insert_block();
         let prev_fn    = self.cur_fn;
         let prev_class = self.cur_class.clone();
@@ -6097,11 +6126,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.cur_fn = Some(fn_val);
         self.push_scope();
 
-        // Parametreleri scope'a ekle
-        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        // 3. Parametreleri scope'a ekle
         for (i, param_name) in params.iter().enumerate() {
             if let Some(pv) = fn_val.get_nth_param(i as u32) {
-                // i64 parametreyi alloca'ya yaz
                 let alloca = self.builder.build_alloca(i64_ty, param_name)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 self.builder.build_store(alloca, pv)
@@ -6110,29 +6137,36 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // 3. Closure: global'lardan capture edilmiş değerleri scope'a ekle
-        for (var_name, global) in &capture_globals {
-            let alloca = self.builder.build_alloca(i64_ty, var_name)
-                .map_err(|e| CodeGenError::new(e.to_string()))?;
-            let cap_val = self.builder.build_load(i64_ty, global.as_pointer_value(), "cap_load")
-                .map_err(|e| CodeGenError::new(e.to_string()))?;
-            self.builder.build_store(alloca, cap_val)
-                .map_err(|e| CodeGenError::new(e.to_string()))?;
-            self.define_var(var_name, alloca, i64_ty.into());
+        // 4. Free var'ları closure struct'tan yükle
+        if !free_vars.is_empty() {
+            let closure_param_idx = params.len() as u32;
+            if let Some(closure_param) = fn_val.get_nth_param(closure_param_idx) {
+                let closure_ptr = closure_param.into_pointer_value();
+                let field_types: Vec<BasicTypeEnum<'ctx>> =
+                    free_vars.iter().map(|_| i64_ty.as_basic_type_enum()).collect();
+                let cty = self.ctx.struct_type(&field_types, false);
+                for (i, var_name) in free_vars.iter().enumerate() {
+                    let gep = self.builder.build_struct_gep(cty, closure_ptr, i as u32, "cap_gep")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let cap_val = self.builder.build_load(i64_ty, gep, var_name)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let alloca = self.builder.build_alloca(i64_ty, var_name)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_store(alloca, cap_val)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.define_var(var_name, alloca, i64_ty.into());
+                }
+            }
         }
 
-        // Body derle
-        let result = self.compile_expr(body)?;
-
-        // Sonucu i64'e dönüştür
+        // 5. Body derle ve i64'e çevir
+        let result  = self.compile_expr(body)?;
         let ret_val = match result {
             Some(BasicValueEnum::IntValue(v)) => {
                 if v.get_type().get_bit_width() < 64 {
                     self.builder.build_int_z_extend(v, i64_ty, "lz")
                         .map_err(|e| CodeGenError::new(e.to_string()))?
-                } else {
-                    v
-                }
+                } else { v }
             }
             Some(BasicValueEnum::FloatValue(f)) => {
                 self.builder.build_float_to_signed_int(f, i64_ty, "f2i")
@@ -6144,33 +6178,87 @@ impl<'ctx> CodeGen<'ctx> {
             }
             _ => i64_ty.const_int(0, false),
         };
-
         self.builder.build_return(Some(&ret_val))
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        self.pop_scope_no_arc(); // lambda scope — block terminatör sonrası
+        self.pop_scope_no_arc();
         self.cur_fn    = prev_fn;
         self.cur_class = prev_class;
-        let _ = ptr_ty;
 
         if let Some(bb) = prev_block {
             self.builder.position_at_end(bb);
         }
 
-        // 4. Capture global'larını oluşturma anındaki değerlerle doldur
-        for (var_name, global) in &capture_globals {
-            if let Some(slot) = self.lookup_var(var_name) {
-                let slot = slot.clone();
-                let val = self.builder.build_load(slot.ty, slot.ptr, "cap_store")
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-                let val_i64 = self.value_to_i64(val)?;
-                self.builder.build_store(global.as_pointer_value(), val_i64)
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+        // 6. Closure struct'ı heap'te oluştur ve doldur
+        let closure_ptr = if !free_vars.is_empty() {
+            let field_types: Vec<BasicTypeEnum<'ctx>> =
+                free_vars.iter().map(|_| i64_ty.as_basic_type_enum()).collect();
+            let cty     = self.ctx.struct_type(&field_types, false);
+            self.declare_malloc();
+            let malloc  = self.module.get_function("malloc").unwrap();
+            let size    = i64_ty.const_int((free_vars.len() as u64) * 8, false);
+            let alloc_call = self.builder.build_call(malloc, &[size.into()], "closure_alloc")
+                .map_err(|e| CodeGenError::new(e.to_string()))?;
+            let alloc_ptr = match alloc_call.try_as_basic_value().basic() {
+                Some(BasicValueEnum::PointerValue(p)) => p,
+                _ => return Err(CodeGenError::new("closure malloc void")),
+            };
+            for (i, var_name) in free_vars.iter().enumerate() {
+                if let Some(slot) = self.lookup_var(var_name) {
+                    let slot = slot.clone();
+                    let val = self.builder.build_load(slot.ty, slot.ptr, "cap_v")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let val_i64 = self.value_to_i64(val)?;
+                    let gep = self.builder.build_struct_gep(cty, alloc_ptr, i as u32, "cap_gep")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_store(gep, val_i64)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                }
             }
-        }
+            alloc_ptr
+        } else {
+            ptr_ty.const_null()
+        };
+
+        // 7. Fat pointer { fn_ptr, closure_ptr } döndür
+        let fat_ty = self.ctx.struct_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let fat_alloca = self.builder.build_alloca(fat_ty, "fat_ptr")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let gep0 = self.builder.build_struct_gep(fat_ty, fat_alloca, 0, "fat_fn")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(gep0, fn_val.as_global_value().as_pointer_value())
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let gep1 = self.builder.build_struct_gep(fat_ty, fat_alloca, 1, "fat_cl")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(gep1, closure_ptr)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let fat = self.builder.build_load(fat_ty, fat_alloca, "fat")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
 
         fn_val.verify(true);
-        Ok(Some(fn_val.as_global_value().as_pointer_value().into()))
+        Ok(Some(fat))
+    }
+
+    // ── Fat pointer veya bare fn ptr → (fn_ptr, closure_ptr) ─────────────────
+
+    fn extract_fn_closure(
+        &mut self,
+        val : BasicValueEnum<'ctx>,
+    ) -> CgResult<(PointerValue<'ctx>, PointerValue<'ctx>)> {
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        match val {
+            BasicValueEnum::PointerValue(p) => Ok((p, ptr_ty.const_null())),
+            BasicValueEnum::StructValue(s)  => {
+                let fn_p = self.builder.build_extract_value(s, 0, "fat_fn")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?
+                    .into_pointer_value();
+                let cl_p = self.builder.build_extract_value(s, 1, "fat_cl")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?
+                    .into_pointer_value();
+                Ok((fn_p, cl_p))
+            }
+            _ => Err(CodeGenError::new("expected fn ptr or fat ptr")),
+        }
     }
 
     // ── ForEach döngüsü: List üzerinde ───────────────────────────────────────
