@@ -1,26 +1,4 @@
-﻿/*
-Arimo Lang - A modern programming language and compiler
-Copyright (C) 2026 Egecan Akıncıoğlu
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Arimo Lang — AST (Abstract Syntax Tree)
-// ─────────────────────────────────────────────────────────────────────────────
-
+﻿
 #[derive(Debug, Clone)]
 pub struct Span {
     pub line : usize,
@@ -35,10 +13,8 @@ pub enum Visibility {
     Internal,
 }
 
-// ── Tip sistemi ───────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub enum Type {
-    // Primitifler
     Integer,
     Float,
     Boolean,
@@ -46,135 +22,107 @@ pub enum Type {
     Void,
     NoReturn,
 
-    // Fixed-size integer types
     U8, U16, U32, U64,
     I8, I16, I32, I64,
 
-    // Koleksiyonlar
     List(Box<Type>),
     Map(Box<Type>, Box<Type>),
     HashMap(Box<Type>, Box<Type>),
     TreeMap(Box<Type>, Box<Type>),
     Pair(Box<Type>, Box<Type>),
 
-    // Kullanıcı tanımlı
     Named(String),
 
-    // Nullable — String?
     Nullable(Box<Type>),
 
-    // Generics — Pair<First, Second>
     Generic(String, Vec<Type>),
 
-    // Ham pointer — sadece @manual sınıflarda
     RawPtr(Box<Type>),
 
-    // Fixed-size array — Array<Float, 16>
-    // N=0 "unknown size" wildcard (Array.zeroed() gibi literal'lar için)
     Array(Box<Type>, usize),
 
-    // Slice — fat pointer (ptr + len), non-owning view — Slice<u8>
     Slice(Box<Type>),
 
-    // Function pointer — (Integer, String) -> Boolean
     FnPtr(Vec<Type>, Box<Type>),
 }
 
-// ── Expression ────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub enum Expr {
-    // Literaller
     IntLit(i64),
     FloatLit(f64),
     BoolLit(bool),
     StrLit(String),
     NullLit,
 
-    // String interpolation
     StrInterp(Vec<StringPart>),
 
-    // Değişken / isim
     Ident(String),
 
-    // this / super
     This,
     Super,
 
-    // Alan erişimi
     FieldAccess {
         object : Box<Expr>,
         field  : String,
     },
 
-    // Null-safe erişim/çağrı
     NullSafeAccess {
         object : Box<Expr>,
         field  : String,
         args   : Option<Vec<Expr>>,
     },
 
-    // Metod çağrısı
     MethodCall {
         object : Box<Expr>,
         method : String,
         args   : Vec<Expr>,
     },
 
-    // Statik metod çağrısı
     StaticCall {
         class  : String,
         method : String,
         args   : Vec<Expr>,
     },
 
-    // Constructor çağrısı
     ConstructorCall {
         class : String,
         args  : Vec<Expr>,
     },
 
-    // Binary operatörler
     BinOp {
         op    : BinOp,
         left  : Box<Expr>,
         right : Box<Expr>,
     },
 
-    // Unary operatörler
     UnaryOp {
         op   : UnaryOp,
         expr : Box<Expr>,
     },
 
-    // Type cast — expr as Type
     Cast {
         expr : Box<Expr>,
         ty   : Type,
     },
 
-    // Ternary
     Ternary {
         cond  : Box<Expr>,
         then  : Box<Expr>,
         else_ : Box<Expr>,
     },
 
-    // Lambda
     Lambda {
         params : Vec<String>,
         body   : Box<Expr>,
     },
 
-    // Array/List index
     Index {
         object : Box<Expr>,
         index  : Box<Expr>,
     },
 
-    // await expr — async bekleme
     Await(Box<Expr>),
 
-    // Pattern matching — match expr { Enum.Variant(a, b) => expr, _ => expr }
     Match {
         expr : Box<Expr>,
         arms : Vec<MatchArm>,
@@ -189,13 +137,11 @@ pub struct MatchArm {
 
 #[derive(Debug, Clone)]
 pub enum MatchPattern {
-    // Enum.Variant veya Enum.Variant(a, b, ...)
     Variant {
         enum_name : String,
         variant   : String,
         bindings  : Vec<String>,
     },
-    // _ wildcard
     Wildcard,
 }
 
@@ -210,9 +156,7 @@ pub enum BinOp {
     Add, Sub, Mul, Div, Mod,
     Eq, Ne, Lt, Le, Gt, Ge,
     And, Or,
-    // Bitwise
     BitAnd, BitOr, BitXor, Shl, Shr,
-    // Assignments
     Assign,
     AddAssign, SubAssign, MulAssign, DivAssign,
 }
@@ -228,7 +172,6 @@ pub enum UnaryOp {
     PostDec,    // x--
 }
 
-// ── Statement ─────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub enum Stmt {
     VarDecl {
@@ -317,17 +260,11 @@ pub enum CallingConv {
     Interrupt,
 }
 
-// ── Generic parametre — bound opsiyonel ──────────────────────────────────────
-// <T>         → GenericParam { name: "T", bounds: [] }
-// <T: Drawable> → GenericParam { name: "T", bounds: ["Drawable"] }
-
 #[derive(Debug, Clone)]
 pub struct GenericParam {
     pub name   : String,
     pub bounds : Vec<String>,  // interface isimleri
 }
-
-// ── Üye tanımları ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Field {
@@ -374,8 +311,6 @@ pub struct Constructor {
     pub body       : Vec<Stmt>,
 }
 
-// ── Üst düzey tanımlar ────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct ClassDecl {
     pub visibility   : Visibility,
@@ -405,9 +340,6 @@ pub struct InterfaceDecl {
     pub methods      : Vec<Method>,
 }
 
-// Enum variant — veri taşıyabilir veya saf olabilir
-// Circle(Float) → EnumVariant { name: "Circle", data: [Float] }
-// Low           → EnumVariant { name: "Low",    data: []      }
 #[derive(Debug, Clone)]
 pub struct EnumVariant {
     pub name : String,
@@ -468,8 +400,6 @@ pub struct ExternBlock {
     pub decls : Vec<ExternDecl>,
 }
 
-// ── Struct (value type, stack-allocated) ──────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct StructDecl {
     pub visibility   : Visibility,
@@ -484,8 +414,6 @@ pub struct StructDecl {
     pub constructor  : Option<Constructor>,
     pub methods      : Vec<Method>,
 }
-
-// ── Program (kök node) ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Module {

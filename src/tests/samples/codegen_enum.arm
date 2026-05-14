@@ -32,7 +32,6 @@ public class Application {
         Direction d = Direction.North;
         Priority  p = Priority.High;
 
-        // switch üzerinde enum
         switch (d) {
             case Direction.North: IO.print("Kuzey'e gidiliyor");
             case Direction.South: IO.print("Guney'e gidiliyor");
@@ -40,7 +39,6 @@ public class Application {
             case Direction.West:  IO.print("Bati'ya gidiliyor");
         }
 
-        // enum karşılaştırma
         if (p == Priority.High) {
             IO.print("Yuksek oncelik");
         }

@@ -2,7 +2,6 @@ module arimo.codegenbasic;
 
 public class Application {
     public static main() : Void {
-        // Değişkenler ve aritmetik
         Integer a = 10;
         Integer b = 3;
         Integer sum  = a + b;
@@ -12,21 +11,18 @@ public class Application {
 
         IO.print("a + b = 13? test");
 
-        // if / else
         if (a > b) {
             IO.print("a buyuk");
         } else {
             IO.print("b buyuk");
         }
 
-        // while döngüsü
         Integer count = 3;
         while (count > 0) {
             IO.print("sayiyor...");
             count = count - 1;
         }
 
-        // klasik for
         for (Integer i = 0; i < 3; i++) {
             IO.print("for dongusu");
         }

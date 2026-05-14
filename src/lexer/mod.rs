@@ -1,43 +1,22 @@
-﻿/*
-Arimo Lang - A modern programming language and compiler
-Copyright (C) 2026 Egecan Akıncıoğlu
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
+﻿
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // ── Literals ─────────────────────────────────────────────────────────
     Int(i64),
     Float(f64),
     Bool(bool),
     Str(String),        // string parçası — interpolation için bölünür
     Ident(String),
 
-    // ── Package & Import ──────────────────────────────────────────────────
     Package,   // dosya seviyesi: package arimo.io;
     Module,    // üst düzey gruplama: module arimo.base { exports ...; }
     Import,
     Exports,   // module tanımlayıcısında: exports arimo.lang;
 
-    // ── Access modifiers ─────────────────────────────────────────────────
     Public,
     Private,
     Protected,
     Internal,
 
-    // ── Class keywords ───────────────────────────────────────────────────
     Class,
     Struct,      // struct — value type, stack-allocated
     Abstract,
@@ -47,17 +26,14 @@ pub enum Token {
     Implements,
     Operator,    // operator — metod seviyesinde operator overloading
 
-    // ── Member modifiers ─────────────────────────────────────────────────
     Static,
     Readonly,
     Override,
 
-    // ── Special members ──────────────────────────────────────────────────
     Constructor,
     Super,
     This,
 
-    // ── Built-in types ───────────────────────────────────────────────────
     TypeInteger,
     TypeFloat,
     TypeBoolean,
@@ -73,7 +49,6 @@ pub enum Token {
     TypeArray,        // Array<T, N> — fixed-size stack array
     TypeSlice,        // Slice<T> — fat pointer (ptr + len), non-owning view
 
-    // ── Fixed-size integer types ──────────────────────────────────────────
     TypeU8,
     TypeU16,
     TypeU32,
@@ -83,13 +58,11 @@ pub enum Token {
     TypeI32,
     TypeI64,
 
-    // ── Standard library ─────────────────────────────────────────────────
     StdIO,            // IO.print() IO.read()
     StdMath,          // Math.sqrt() Math.PI
     StdTime,          // Time.now() Time.generateId()
     StdMemory,        // Memory.alloc() Memory.free() Memory.copy()
 
-    // ── Control flow ─────────────────────────────────────────────────────
     If,
     Else,
     While,
@@ -105,32 +78,25 @@ pub enum Token {
     Catch,
     Finally,
 
-    // ── Null safety ──────────────────────────────────────────────────────
     Null,
 
-    // ── Additional keywords ───────────────────────────────────────────────
     As,        // as  — type cast
     KwType,    // type — type alias declaration
 
-    // ── Systems & Performance keywords ───────────────────────────────────────
     Volatile,       // volatile
     Union,          // union
     Extern,         // extern
     Asm,            // asm
     Defer,          // defer
 
-    // ── Async / Default keywords ─────────────────────────────────────────────
     Async,          // async — asenkron metod modifier
     Await,          // await — asenkron bekleme operatörü
     Default,        // default — interface default method
 
-    // ── Additional type keywords ─────────────────────────────────────────────
     TypeNoReturn,   // noreturn
 
-    // ── Variadic ─────────────────────────────────────────────────────────────
     Ellipsis,       // ...
 
-    // ── Operators ────────────────────────────────────────────────────────
     Plus,
     Minus,
     Star,
@@ -157,7 +123,6 @@ pub enum Token {
     Question,    // ?   nullable + ternary (parser bağlama göre ayırt eder)
     QuestionDot, // ?.  null-safe erişim
 
-    // ── Bitwise operators ─────────────────────────────────────────────────
     Amp,         // &   bitwise AND
     Pipe,        // |   bitwise OR
     Caret,       // ^   bitwise XOR
@@ -165,7 +130,6 @@ pub enum Token {
     LtLt,        // <<  left shift
     GtGt,        // >>  right shift
 
-    // ── Delimiters ───────────────────────────────────────────────────────
     LParen,       // (
     RParen,       // )
     LBrace,       // {
@@ -179,10 +143,8 @@ pub enum Token {
     DollarLBrace, // ${  string interpolation başlangıcı
     InterpolEnd,  // }   string interpolation bitişi (string içinde)
 
-    // ── Annotations ──────────────────────────────────────────────────────
     At,             // @  annotation işareti
 
-    // ── Special ──────────────────────────────────────────────────────────
     Eof,
     Unknown(char),
 }
@@ -272,7 +234,6 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_number(&mut self, first: char) -> Token {
-        // Hex literal: 0x... veya 0X...
         if first == '0' {
             match self.peek() {
                 Some('x') | Some('X') => {
@@ -353,7 +314,6 @@ impl<'a> Lexer<'a> {
             "super"       => Token::Super,
             "this"        => Token::This,
 
-            // Built-in types
             "Integer"     => Token::TypeInteger,
             "Float"       => Token::TypeFloat,
             "Boolean"     => Token::TypeBoolean,
@@ -369,7 +329,6 @@ impl<'a> Lexer<'a> {
             "Array"       => Token::TypeArray,
             "Slice"       => Token::TypeSlice,
 
-            // Fixed-size integer types
             "u8"          => Token::TypeU8,
             "u16"         => Token::TypeU16,
             "u32"         => Token::TypeU32,
@@ -379,13 +338,11 @@ impl<'a> Lexer<'a> {
             "i32"         => Token::TypeI32,
             "i64"         => Token::TypeI64,
 
-            // Standard library
             "IO"          => Token::StdIO,
             "Math"        => Token::StdMath,
             "Time"        => Token::StdTime,
             "Memory"      => Token::StdMemory,
 
-            // Control flow
             "if"          => Token::If,
             "else"        => Token::Else,
             "while"       => Token::While,
@@ -401,18 +358,14 @@ impl<'a> Lexer<'a> {
             "catch"       => Token::Catch,
             "finally"     => Token::Finally,
 
-            // Null
             "null"        => Token::Null,
 
-            // Booleans
             "true"        => Token::Bool(true),
             "false"       => Token::Bool(false),
 
-            // Cast & type alias
             "as"          => Token::As,
             "type"        => Token::KwType,
 
-            // Systems & Performance
             "volatile"  => Token::Volatile,
             "union"     => Token::Union,
             "extern"    => Token::Extern,

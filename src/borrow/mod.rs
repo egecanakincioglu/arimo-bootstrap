@@ -1,27 +1,6 @@
-/*
-Arimo Lang - A modern programming language and compiler
-Copyright (C) 2026 Egecan Akıncıoğlu
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
+﻿
 use std::collections::{HashMap, HashSet};
 use crate::ast::*;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Hata yapısı
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BorrowErrorKind {
@@ -53,19 +32,11 @@ impl std::fmt::Display for BorrowError {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Drop schedule
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct DropEntry {
     pub name : String,
     pub ty   : Type,
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Değişken sahiplik durumu
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 enum MoveState {
@@ -80,10 +51,6 @@ struct VarState {
     is_copy    : bool,
     decl_order : usize,
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Scope
-// ─────────────────────────────────────────────────────────────────────────────
 
 struct BorrowScope {
     vars     : HashMap<String, VarState>,
@@ -107,10 +74,6 @@ impl BorrowScope {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BorrowChecker
-// ─────────────────────────────────────────────────────────────────────────────
-
 pub struct BorrowChecker {
     scopes        : Vec<BorrowScope>,
     pub errors    : Vec<BorrowError>,
@@ -133,7 +96,6 @@ impl BorrowChecker {
     }
 
     pub fn check(&mut self, module: &Module) -> &[BorrowError] {
-        // Struct isimlerini topla — bunlar copy type
         for item in &module.items {
             if let Item::Struct(s) = item {
                 self.struct_names.insert(s.name.clone());
@@ -154,26 +116,19 @@ impl BorrowChecker {
         &self.errors
     }
 
-    // ── Tip yardımcıları ─────────────────────────────────────────────────────
-
     fn is_copy(&self, ty: &Type) -> bool {
         match ty {
             Type::Integer | Type::Float | Type::Boolean |
             Type::U8 | Type::U16 | Type::U32 | Type::U64 |
             Type::I8 | Type::I16 | Type::I32 | Type::I64 => true,
-            // Array<T, N> — value type, tümü kopyalanır (borrow checker katmanında)
             Type::Array(_, _) => true,
-            // Slice<T> — fat pointer (ptr + len), shallow copy
             Type::Slice(_)    => true,
-            // Function pointer — sadece adres, copy
             Type::FnPtr(_, _) => true,
-            // Struct tipler copy semantiği
             Type::Named(n) => self.struct_names.contains(n.as_str()),
             _ => false,
         }
     }
 
-    // Mutasyon yapan koleksiyon metodları
     fn is_mutating_method(method: &str) -> bool {
         matches!(method,
             "append" | "set" | "remove" | "clear" | "insert"
@@ -190,8 +145,6 @@ impl BorrowChecker {
             _ => None,
         }
     }
-
-    // ── Class / Struct / Enum / Exception giriş ──────────────────────────────
 
     fn check_class(&mut self, c: &ClassDecl) {
         if c.manual { return; }
@@ -264,8 +217,6 @@ impl BorrowChecker {
         self.pop_scope_with_drops();
     }
 
-    // ── Statement kontrolü ───────────────────────────────────────────────────
-
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::VarDecl { ty, name, value, .. } => {
@@ -318,7 +269,6 @@ impl BorrowChecker {
             }
 
             Stmt::ForEach { name, ty, iter, body } => {
-                // iter borrow ediliyor — for süresi boyunca taşınamaz
                 let borrow_key = match iter {
                     Expr::Ident(n) => Some(n.clone()),
                     Expr::FieldAccess { object, field }
@@ -393,8 +343,6 @@ impl BorrowChecker {
             Stmt::Break | Stmt::Continue => {}
         }
     }
-
-    // ── Expression operand kontrolü ──────────────────────────────────────────
 
     fn check_expr_operand(&mut self, expr: &Expr, do_move: bool) {
         match expr {
@@ -506,12 +454,10 @@ impl BorrowChecker {
             Expr::Match { expr, arms } => {
                 self.check_expr_operand(expr, false);
                 for arm in arms {
-                    // Pattern binding'ler: copy type olarak ekle (Unknown type)
                     self.push_scope();
                     match &arm.pattern {
                         MatchPattern::Variant { bindings, .. } => {
                             for b in bindings {
-                                // Binding tipini bilmiyoruz — Unknown → copy olarak ekle
                                 self.declare_var(b, Type::Named("Unknown".to_string()), true);
                             }
                         }
@@ -549,8 +495,6 @@ impl BorrowChecker {
         }
     }
 
-    // ── Scope / variable yönetimi ─────────────────────────────────────────────
-
     fn push_scope(&mut self) {
         self.scopes.push(BorrowScope::new());
     }
@@ -562,7 +506,6 @@ impl BorrowChecker {
                 .map(|v| DropEntry { name: String::new(), ty: v.ty })
                 .collect();
             entries.sort_by(|a, b| {
-                // LIFO: ters sırada drop — decl_order yok ama entries az, sıralama opsiyonel
                 let _ = (a, b);
                 std::cmp::Ordering::Equal
             });

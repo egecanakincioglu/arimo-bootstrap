@@ -1,11 +1,9 @@
-module arimo.test.phase4;
+module arimo.test.strings;
 
-// Test: 4.12 Lambda, 4.13 String, break/continue, match
-public class Phase4Test {
+public class StringsTest {
 
     public static main() : Void {
 
-        // ── String metodları (4.13) ───────────────────────────────────────────
         String s = "Hello, World!";
         Integer len = s.length();
         IO.print("length: ");
@@ -31,14 +29,12 @@ public class Phase4Test {
         IO.print("toLower: ");
         IO.println(lo);
 
-        // String concat
         String a = "Hello, ";
         String b = "Arimo!";
         String combined = a + b;
         IO.print("concat: ");
         IO.println(combined);
 
-        // ── Break/Continue (4.12) ─────────────────────────────────────────────
         Integer count = 0;
         for (Integer i = 0; i < 10; i++) {
             if (i == 5) {
@@ -59,12 +55,6 @@ public class Phase4Test {
         IO.print("evens 0-9: ");
         IO.println(evens);
 
-        // ── Lambda değişkene atama ve çağırma (4.12) ─────────────────────────
-        // Lambda bir değişkende saklı
-        // Not: lambda çağrısı için ConstructorCall semantics kullanılıyor
-        IO.println("Lambda test: OK");
-
-        // ── match expression (4.1f) ───────────────────────────────────────────
-        IO.println("Phase 4 tests complete!");
+        IO.println("Strings tests complete!");
     }
 }

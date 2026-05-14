@@ -1,9 +1,5 @@
-module arimo.test.phase1a;
+module arimo.test.fixed_ints;
 
-// ── Phase 1a: Fixed-size integers, bitwise ops, as cast ───────────────────────
-// ── Phase 1b: type alias ──────────────────────────────────────────────────────
-
-// Module-level type alias
 type NodeId   = u32;
 type ByteFlag = u8;
 
@@ -13,8 +9,8 @@ public class BitwiseDemo {
     private flags : u32;
     private data  : RawPtr<u8>;
 
-    public static readonly MAX_SIZE : u32 = 1024;
-    public static readonly PAGE_BITS : u8 = 12;
+    public static readonly MAX_SIZE  : u32 = 1024;
+    public static readonly PAGE_BITS : u8  = 12;
 
     public constructor(initial: u32) {
         this.flags = initial;

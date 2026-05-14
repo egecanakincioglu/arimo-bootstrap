@@ -1,9 +1,4 @@
-module arimo.test.phase1ef;
-
-// ── Phase 1e: Generic bounds ──────────────────────────────────────────────────
-// ── Phase 1f: Enum with data, match, Result<T,E> ─────────────────────────────
-
-// ── 1. Enum with data ─────────────────────────────────────────────────────────
+module arimo.test.generics;
 
 public enum Shape {
     Circle(Float),
@@ -22,15 +17,13 @@ public enum Shape {
 
     public name() : String {
         return match this {
-            Shape.Circle(r)       => "circle",
-            Shape.Rectangle(w, h) => "rectangle",
-            Shape.Triangle(a, b, c) => "triangle",
-            Shape.Point           => "point",
+            Shape.Circle(r)           => "circle",
+            Shape.Rectangle(w, h)     => "rectangle",
+            Shape.Triangle(a, b, c)   => "triangle",
+            Shape.Point               => "point",
         };
     }
 }
-
-// ── 2. match expression ───────────────────────────────────────────────────────
 
 public enum Color {
     Red,
@@ -45,8 +38,6 @@ public enum Color {
         }
     }
 }
-
-// ── 3. Result<T, E> built-in ─────────────────────────────────────────────────
 
 public class FileSystem {
 
@@ -78,8 +69,6 @@ public class FileSystem {
     }
 }
 
-// ── 4. Generic bounds ─────────────────────────────────────────────────────────
-
 interface Printable {
     print() : Void;
 }
@@ -88,7 +77,6 @@ interface Comparable {
     compareTo(other: String) : Integer;
 }
 
-// Generic class with bound: T: Printable
 public class Printer<T: Printable> {
 
     private item : T;
@@ -102,24 +90,18 @@ public class Printer<T: Printable> {
     }
 }
 
-// ── 5. Entry point ────────────────────────────────────────────────────────────
-
 public class TestApp {
 
     public static main() : Void {
-        // Enum with data
         Shape circle = Shape.Circle(5.0);
         Float area   = circle.area();
         IO.print("Area: ${area}");
 
-        // match as expression result (inside return/assignment via method)
-        Shape rect = Shape.Rectangle(4.0, 3.0);
+        Shape rect  = Shape.Rectangle(4.0, 3.0);
         Float rArea = rect.area();
 
-        // Result
         FileSystem.demo();
 
-        // Pure enum still works
         Color c = Color.Red;
         IO.print(c.label());
     }

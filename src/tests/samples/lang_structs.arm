@@ -1,8 +1,5 @@
-module arimo.test.phase1c;
+module arimo.test.structs;
 
-// ── Phase 1c: struct, operator overloading, @inline ───────────────────────────
-
-// Matematiksel vektör — game engine kullanımı
 public struct Vec3 {
     x : Float;
     y : Float;
@@ -37,7 +34,6 @@ public struct Vec3 {
     }
 }
 
-// Renk — value type semantiği
 public struct Color {
     r : u8;
     g : u8;
@@ -60,7 +56,6 @@ public struct Color {
     }
 }
 
-// type alias ile birlikte
 type Vec2 = Vec3;
 
 public class PhysicsWorld {
@@ -69,22 +64,12 @@ public class PhysicsWorld {
         Vec3 pos = Vec3(0.0, 0.0, 0.0);
         Vec3 vel = Vec3(1.0, 2.0, 0.0);
 
-        // Operator overloading — pos + vel
-        Vec3 newPos = pos + vel;
-
-        // copy semantics — pos hâlâ geçerli
+        Vec3 newPos   = pos + vel;
         Vec3 savedPos = pos;
+        Vec3 scaled   = vel * 2.0;
+        Float d       = pos.dot(vel);
+        Boolean same  = pos == savedPos;
 
-        // scalar multiply
-        Vec3 scaled = vel * 2.0;
-
-        // dot product
-        Float d = pos.dot(vel);
-
-        // equality
-        Boolean same = pos == savedPos;
-
-        // Color operations
         Color red    = Color(255, 0, 0, 255);
         Color faded  = red.withAlpha(128);
         u32   packed = red.toU32();

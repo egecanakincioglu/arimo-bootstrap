@@ -1,21 +1,4 @@
-/*
-Arimo Lang - A modern programming language and compiler
-Copyright (C) 2026 Egecan Akıncıoğlu
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
+﻿
 mod lexer;
 mod ast;
 mod parser;
@@ -56,13 +39,11 @@ fn main() {
         process::exit(1);
     });
 
-    // Lexer
     let mut lexer  = Lexer::new(&source);
     let tokens     = lexer.tokenize();
 
     println!("arc: parsing '{}'", path);
 
-    // Parser
     let mut parser = Parser::new(tokens);
     let module = match parser.parse() {
         Ok(m) => {
@@ -126,7 +107,6 @@ fn main() {
         }
     };
 
-    // Type Checker
     println!("");
     let mut tc      = TypeChecker::new();
     tc.check(&module);
@@ -144,7 +124,6 @@ fn main() {
         process::exit(1);
     }
 
-    // Borrow Checker
     let mut bc       = BorrowChecker::new();
     let borrow_errors = bc.check(&module);
 
@@ -158,7 +137,6 @@ fn main() {
         process::exit(1);
     }
 
-    // CodeGen
     println!("");
     let stem   = Path::new(path).file_stem()
         .and_then(|s| s.to_str())
@@ -166,7 +144,6 @@ fn main() {
     let obj_path = format!("{}.o", stem);
     let exe_path = format!("{}.exe", stem);
 
-    // --emit-ir: sadece LLVM IR göster, binary üretme
     if emit_ir {
         let ir = codegen::emit_ir_only(&module, stem);
         match ir {
@@ -176,7 +153,6 @@ fn main() {
         return;
     }
 
-    // -c: sadece .o üret (linker çalıştırma)
     let obj_out = if only_obj {
         format!("{}.o", stem)
     } else {
@@ -197,12 +173,10 @@ fn main() {
 
             print!(" linking ...");
 
-            // Linker: gcc ile native binary üret
             let linker_status = std::process::Command::new("gcc")
                 .args([&obj_out, "-o", &exe_path, "-lm"])
                 .status();
 
-            // Geçici .o dosyasını sil
             let _ = fs::remove_file(&obj_out);
 
             match linker_status {

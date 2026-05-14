@@ -1,27 +1,6 @@
-/*
-Arimo Lang - A modern programming language and compiler
-Copyright (C) 2026 Egecan Akıncıoğlu
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
+﻿
 use std::collections::HashMap;
 use crate::ast::*;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Hata Yapısı
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Span {
@@ -58,10 +37,6 @@ impl std::fmt::Display for TypeError {
         Ok(())
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Sembol Tablosu
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClassKind {
@@ -113,10 +88,6 @@ pub struct ConstructorInfo {
     pub vis    : Visibility,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Scope
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 struct VarInfo {
     ty            : Type,
@@ -147,10 +118,6 @@ impl Scope {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TypeChecker
-// ─────────────────────────────────────────────────────────────────────────────
-
 pub struct TypeChecker {
     classes            : HashMap<String, ClassInfo>,
     type_aliases       : HashMap<String, Type>,
@@ -178,8 +145,6 @@ impl TypeChecker {
         tc
     }
 
-    // ── Giriş noktası ────────────────────────────────────────────────────────
-
     pub fn check(&mut self, module: &Module) -> &[TypeError] {
         self.collect_symbols(module);
         for item in &module.items {
@@ -196,8 +161,6 @@ impl TypeChecker {
         }
         &self.errors
     }
-
-    // ── Geçiş 1: sembol toplama ───────────────────────────────────────────────
 
     fn collect_symbols(&mut self, module: &Module) {
         for item in &module.items {
@@ -250,14 +213,12 @@ impl TypeChecker {
             };
             info.methods.entry(m.name.clone()).or_default().push(mi);
         }
-        // Auto-constructor from fields if no explicit constructor
         if let Some(con) = &s.constructor {
             info.constructor = Some(ConstructorInfo {
                 params : con.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
                 vis    : con.visibility.clone(),
             });
         } else if !s.fields.is_empty() {
-            // Generate positional constructor: StructName(field1, field2, ...)
             let params: Vec<(String, Type)> = s.fields.iter()
                 .filter(|f| !f.static_)
                 .map(|f| (f.name.clone(), f.ty.clone()))
@@ -365,7 +326,6 @@ impl TypeChecker {
             experimental  : false,
         };
         for v in &e.variants {
-            // Her variant hem fields'ta (Priority.High erişimi için) hem variant_data'da
             info.fields.insert(v.name.clone(), FieldInfo {
                 ty       : Type::Named(e.name.clone()),
                 readonly : true,
@@ -486,12 +446,9 @@ impl TypeChecker {
         }
     }
 
-    // ── Geçiş 2: detaylı kontrol ──────────────────────────────────────────────
-
     fn check_class(&mut self, c: &ClassDecl) {
         self.current_class = Some(c.name.clone());
 
-        // @Immutable — tüm instance field'lar readonly olmalı
         if c.immutable {
             for field in &c.fields {
                 if !field.static_ && !field.readonly {
@@ -502,9 +459,6 @@ impl TypeChecker {
                 }
             }
         }
-
-        // @Deprecated uyarısı (class tanımlandığında değil, kullanıldığında)
-        // Burada sadece class'ın kendisini kayıt ediyoruz, uyarı infer_expr'de
 
         if let Some(parent) = &c.extends {
             if !self.classes.contains_key(parent.as_str()) {
@@ -518,9 +472,6 @@ impl TypeChecker {
                         c.name, parent
                     ));
                 }
-                // @Sealed kontrolü — sealed class sadece aynı modülden extend edilebilir
-                // (aynı compilation unit = izin verilir, farklı unit = hata)
-                // Şimdilik: sealed flag'i ClassInfo'ya taşındığında enforce edilecek
             }
         }
 
@@ -619,7 +570,6 @@ impl TypeChecker {
         }
 
         for m in &s.methods.clone() {
-            // operator methods are validated the same as regular methods
             self.check_method(m, &s.name.clone());
         }
 
@@ -627,7 +577,6 @@ impl TypeChecker {
     }
 
     fn check_interface(&mut self, i: &InterfaceDecl) {
-        // @FunctionalInterface — tam 1 abstract method olmalı
         if i.functional {
             let abstract_count = i.methods.iter().filter(|m| m.abstract_).count();
             if abstract_count != 1 {
@@ -756,8 +705,6 @@ impl TypeChecker {
 
         self.pop_scope();
     }
-
-    // ── Statement kontrolü ────────────────────────────────────────────────────
 
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
@@ -1012,8 +959,6 @@ impl TypeChecker {
         }
     }
 
-    // ── Expression tip çıkarımı ───────────────────────────────────────────────
-
     pub fn infer_expr(&mut self, expr: &Expr) -> Type {
         match expr {
             Expr::IntLit(_)   => Type::Integer,
@@ -1050,7 +995,6 @@ impl TypeChecker {
                 if self.classes.contains_key(name.as_str()) {
                     return Type::Named(name.clone());
                 }
-                // Stdlib isimleri expression context'te Ident olarak gelebilir (Math.PI gibi)
                 if matches!(name.as_str(), "IO" | "Math" | "Time" | "Memory") {
                     return Type::Named(name.clone());
                 }
@@ -1136,7 +1080,6 @@ impl TypeChecker {
                     }
                     return Type::Void;
                 }
-                // Enum variant constructor: Shape.Circle(1.5) veya Result.Ok("hello")
                 if let Some(result_ty) = self.try_enum_variant_constructor(class, method, &arg_types) {
                     return result_ty;
                 }
@@ -1151,7 +1094,6 @@ impl TypeChecker {
             }
 
             Expr::ConstructorCall { class, args } => {
-                // Function pointer çağrısı: pred(42) → class = "pred", local var of FnPtr type
                 if let Some(var) = self.lookup_var(class) {
                     let var_ty = var.ty.clone();
                     if let Type::FnPtr(param_tys, ret_ty) = var_ty {
@@ -1170,7 +1112,6 @@ impl TypeChecker {
                     }
                 }
 
-                // @Deprecated / @Experimental uyarısı
                 if let Some(info) = self.classes.get(class.as_str()).cloned() {
                     if let Some(msg) = &info.deprecated {
                         self.warnings.push(format!(
@@ -1223,7 +1164,6 @@ impl TypeChecker {
                         } else if info.kind == ClassKind::Abstract {
                             self.error(format!("cannot instantiate abstract class '{}'", class));
                         }
-                        // Struct: copy type — oluşturma normaldir
                         if let Some(con) = info.constructor.clone() {
                             if con.params.len() != arg_types.len() {
                                 self.error(format!(
@@ -1389,13 +1329,10 @@ impl TypeChecker {
             }
 
             Expr::Await(inner) => {
-                // await expr — inner type'ı döndür (CodeGen'de coroutine suspension point)
                 self.infer_expr(inner)
             }
         }
     }
-
-    // ── Binary operatör ───────────────────────────────────────────────────────
 
     fn is_unknown(ty: &Type) -> bool {
         matches!(ty, Type::Named(n) if n == "Unknown")
@@ -1409,7 +1346,6 @@ impl TypeChecker {
         left_expr  : &Expr,
         _right_expr: &Expr,
     ) -> Type {
-        // Lambda parametresi (Unknown) içeren ifadeler — sessizce geç
         if Self::is_unknown(left) || Self::is_unknown(right) {
             return match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le |
@@ -1422,7 +1358,6 @@ impl TypeChecker {
 
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                // String concat: Str + Str → Str
                 if matches!(op, BinOp::Add)
                     && matches!(left, Type::Str)
                     && matches!(right, Type::Str)
@@ -1430,7 +1365,6 @@ impl TypeChecker {
                     return Type::Str;
                 }
                 if !self.is_numeric(left) || !self.is_numeric(right) {
-                    // operator overload denemesi
                     let op_sym = match op {
                         BinOp::Add => "+", BinOp::Sub => "-",
                         BinOp::Mul => "*", BinOp::Div => "/", BinOp::Mod => "%",
@@ -1445,18 +1379,14 @@ impl TypeChecker {
                     ));
                     return Type::Integer;
                 }
-                // Float beats everything
                 if matches!(left, Type::Float) || matches!(right, Type::Float) {
                     return Type::Float;
                 }
-                // Same type → same type
                 if self.types_equal(left, right) {
                     return left.clone();
                 }
-                // Integer literal (untyped) + sized type → sized type
                 if matches!(left, Type::Integer) { return right.clone(); }
                 if matches!(right, Type::Integer) { return left.clone(); }
-                // Mixed sized types → error, require explicit cast
                 self.error(format!(
                     "arithmetic on mixed integer types {:?} and {:?} — use 'as' to cast",
                     left, right
@@ -1537,8 +1467,6 @@ impl TypeChecker {
         }
     }
 
-    // ── Generic substitution & variant binding ────────────────────────────────
-
     fn substitute_generics(&self, ty: &Type, params: &[String], args: &[Type]) -> Type {
         match ty {
             Type::Named(n) => {
@@ -1572,7 +1500,6 @@ impl TypeChecker {
             Some(d) => d.clone(),
             None    => return Vec::new(),
         };
-        // Generic parametre substitution
         let type_args: Vec<Type> = match scrutinee_ty {
             Type::Generic(_, args) => args.clone(),
             _ => Vec::new(),
@@ -1586,7 +1513,6 @@ impl TypeChecker {
         }
     }
 
-    // Enum variant constructor çağrısı: Shape.Circle(1.5) veya Result.Ok("hello")
     fn try_enum_variant_constructor(
         &mut self,
         class    : &str,
@@ -1605,7 +1531,6 @@ impl TypeChecker {
             return Some(Type::Named(class.to_string()));
         }
 
-        // Generic enum: Result.Ok("hello") → Result<String, Unknown>
         if !info.generics.is_empty() {
             let mut type_args: Vec<Type> = info.generics.iter()
                 .map(|_| Type::Named("Unknown".to_string()))
@@ -1624,7 +1549,6 @@ impl TypeChecker {
             return Some(Type::Generic(class.to_string(), type_args));
         }
 
-        // Non-generic enum: validate arg types
         for (i, (data_ty, arg_ty)) in data_types.iter().zip(arg_types.iter()).enumerate() {
             self.check_assignable(data_ty, arg_ty, &format!(
                 "{}::{} arg {}", class, variant, i + 1
@@ -1632,8 +1556,6 @@ impl TypeChecker {
         }
         Some(Type::Named(class.to_string()))
     }
-
-    // ── Operator overload resolution ──────────────────────────────────────────
 
     fn try_operator_overload(&mut self, left: &Type, op: &str, _right: &Type) -> Option<Type> {
         let class_name = match left {
@@ -1651,22 +1573,13 @@ impl TypeChecker {
         None
     }
 
-    // ── Cast validation ───────────────────────────────────────────────────────
-
     fn is_valid_cast(&self, from: &Type, to: &Type) -> bool {
-        // integer → integer (including Integer ↔ sized types)
         if self.is_integer_type(from) && self.is_integer_type(to) { return true; }
-        // integer → float
         if self.is_integer_type(from) && matches!(to, Type::Float) { return true; }
-        // float → integer
         if matches!(from, Type::Float) && self.is_integer_type(to) { return true; }
-        // float → float (no-op)
         if matches!(from, Type::Float) && matches!(to, Type::Float) { return true; }
-        // RawPtr → RawPtr (pointer cast)
         if matches!(from, Type::RawPtr(_)) && matches!(to, Type::RawPtr(_)) { return true; }
-        // integer → RawPtr (address-as-pointer in @manual code)
         if self.is_integer_type(from) && matches!(to, Type::RawPtr(_)) { return true; }
-        // same type (no-op)
         if self.types_equal(from, to) { return true; }
         false
     }
@@ -1708,8 +1621,6 @@ impl TypeChecker {
             _ => {}
         }
     }
-
-    // ── Field erişim çözümleme ────────────────────────────────────────────────
 
     fn resolve_field_access(&mut self, ty: &Type, field: &str, _object_expr: &Expr) -> Type {
         if let Type::Nullable(_) = ty {
@@ -1769,8 +1680,6 @@ impl TypeChecker {
         }
     }
 
-    // ── String metod dönüş tipleri ───────────────────────────────────────────
-
     fn resolve_string_method(&mut self, method: &str, _args: &[Type]) -> Type {
         match method {
             "length"     => Type::Integer,
@@ -1793,8 +1702,6 @@ impl TypeChecker {
             }
         }
     }
-
-    // ── Metod çözümleme ───────────────────────────────────────────────────────
 
     fn resolve_method_call(
         &mut self,
@@ -1830,7 +1737,6 @@ impl TypeChecker {
             Type::I16 => "i16".to_string(),
             Type::I32 => "i32".to_string(),
             Type::I64 => "i64".to_string(),
-            // String metodları — Str üzerinde method çağrısına izin ver
             Type::Str => {
                 return self.resolve_string_method(method, args);
             }
@@ -1846,13 +1752,9 @@ impl TypeChecker {
             return Type::Named("Unknown".to_string());
         }
 
-        // Generic bound kontrolü: eğer class_name bir generic parametre ise
-        // (örn: T, E) ve mevcut sınıfın generic_bounds'unda kayıtlı ise,
-        // method'un o bound'ların birinde tanımlı olup olmadığını kontrol et
         if let Some(current_class) = self.current_class.clone() {
             if let Some(current_info) = self.classes.get(&current_class).cloned() {
                 if current_info.generics.contains(&class_name) {
-                    // T bir generic param — bound'lardan çözümle
                     if let Some(bounds) = current_info.generic_bounds.get(&class_name).cloned() {
                         for bound in &bounds {
                             let bound_ty = Type::Named(bound.clone());
@@ -1862,7 +1764,6 @@ impl TypeChecker {
                             }
                         }
                     }
-                    // Bound yok ya da çözümlenmedi — Unknown döndür
                     return Type::Named("Unknown".to_string());
                 }
             }
@@ -1938,8 +1839,6 @@ impl TypeChecker {
             }
         }
     }
-
-    // ── Built-in metod/üye çözümleme ─────────────────────────────────────────
 
     fn resolve_builtin_method(
         &self,
@@ -2052,7 +1951,6 @@ impl TypeChecker {
                 }
             }
 
-            // Array<T, N> metodları
             ("Array", "length")  => Some(Type::Integer),
             ("Array", "zeroed")  => Some(Type::Array(Box::new(Type::Named("Unknown".to_string())), 0)),
             ("Array", "get")     => {
@@ -2075,7 +1973,6 @@ impl TypeChecker {
                 }
             }
 
-            // Slice<T> metodları
             ("Slice", "length")  => Some(Type::Integer),
             ("Slice", "get")     => {
                 match ty {
@@ -2100,7 +1997,6 @@ impl TypeChecker {
             ("RawPtr", "write")  => Some(Type::Void),
             ("RawPtr", "offset") => Some(ty.clone()),
 
-            // sizeOf — tüm tipler için
             (_, "sizeOf") => Some(Type::Integer),
 
             ("Exception", "message") => Some(Type::Str),
@@ -2128,8 +2024,6 @@ impl TypeChecker {
             _ => None,
         }
     }
-
-    // ── Tip uyumluluk ─────────────────────────────────────────────────────────
 
     fn expand_alias(&self, ty: &Type) -> Type {
         if let Type::Named(n) = ty {
@@ -2161,7 +2055,6 @@ impl TypeChecker {
     }
 
     fn is_assignable(&self, target: &Type, source: &Type) -> bool {
-        // Expand type aliases before comparison
         let target_exp = self.expand_alias(target);
         let source_exp = self.expand_alias(source);
         let target = &target_exp;
@@ -2175,22 +2068,17 @@ impl TypeChecker {
             if n == "Error" { return true; }
         }
 
-        // Float accepts Integer (untyped literal)
         if matches!(target, Type::Float) && matches!(source, Type::Integer) {
             return true;
         }
 
-        // Integer literal → any sized integer type
         if self.is_sized_integer(target) && matches!(source, Type::Integer) {
             return true;
         }
 
-        // Sized integer → Integer (untyped bigint)
         if matches!(target, Type::Integer) && self.is_sized_integer(source) {
             return true;
         }
-
-        // No implicit widening between sized types (u8 ← u16 is error)
 
         if let (Type::List(te), Type::List(ts)) = (target, source) {
             if matches!(ts.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
@@ -2225,31 +2113,26 @@ impl TypeChecker {
             if matches!(s_inner.as_ref(), Type::Void | Type::Named(_)) { return true; }
         }
 
-        // Array: Unknown wildcard (Array.zeroed() sonucu) herhangi bir Array'e atanabilir
         if let (Type::Array(te, _tn), Type::Array(se, sn)) = (target, source) {
             if *sn == 0 || matches!(se.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
             return self.is_assignable(te, se);
         }
 
-        // Slice: Unknown wildcard herhangi bir Slice'a atanabilir
         if let (Type::Slice(te), Type::Slice(se)) = (target, source) {
             if matches!(se.as_ref(), Type::Named(n) if n == "Unknown") { return true; }
             return self.is_assignable(te, se);
         }
 
-        // FnPtr: Lambda herhangi bir function pointer'a atanabilir (tip uyumu ileriki aşamada)
         if matches!(target, Type::FnPtr(_, _)) {
             if matches!(source, Type::Named(n) if n == "Lambda") { return true; }
         }
 
-        // FnPtr ↔ FnPtr: tam eşleşme gerekir
         if let (Type::FnPtr(tp, tr), Type::FnPtr(sp, sr)) = (target, source) {
             if tp.len() != sp.len() { return false; }
             return self.is_assignable(tr, sr)
                 && tp.iter().zip(sp.iter()).all(|(t, s)| self.is_assignable(t, s));
         }
 
-        // Generic<T, E> ← Generic<T, Unknown> — Unknown wildcard
         if let (Type::Generic(tn, ta), Type::Generic(sn, sa)) = (target, source) {
             if tn != sn || ta.len() != sa.len() { return false; }
             return ta.iter().zip(sa.iter()).all(|(t, s)| {
@@ -2354,7 +2237,6 @@ impl TypeChecker {
         )
     }
 
-    // Sized integers only (not the generic Integer type)
     fn is_sized_integer(&self, ty: &Type) -> bool {
         matches!(ty,
             Type::U8 | Type::U16 | Type::U32 | Type::U64 |
@@ -2383,8 +2265,6 @@ impl TypeChecker {
         }
         false
     }
-
-    // ── Null / smart-cast ─────────────────────────────────────────────────────
 
     fn extract_null_checks(&self, cond: &Expr) -> Vec<String> {
         let mut names = Vec::new();
@@ -2448,8 +2328,6 @@ impl TypeChecker {
         }
     }
 
-    // ── Return path analizi ───────────────────────────────────────────────────
-
     fn all_paths_return(&self, stmts: &[Stmt]) -> bool {
         for stmt in stmts.iter().rev() {
             match stmt {
@@ -2487,13 +2365,10 @@ impl TypeChecker {
         false
     }
 
-    // ── Abstract metod implementasyon kontrolü ────────────────────────────────
-
     fn check_abstract_methods_implemented(&mut self, c: &ClassDecl) {
         let ifaces: Vec<String> = c.implements.clone();
         for iface_name in ifaces {
             if let Some(iface_info) = self.classes.get(&iface_name).cloned() {
-                // Sadece abstract (non-default) metodların implementasyonunu kontrol et
                 let abstract_methods: Vec<String> = iface_info.methods.iter()
                     .filter(|(_, mis)| mis.iter().any(|mi| mi.abstract_))
                     .map(|(name, _)| name.clone())
@@ -2542,12 +2417,9 @@ impl TypeChecker {
         false
     }
 
-    // ── Tip varlık kontrolü ───────────────────────────────────────────────────
-
     fn check_type_exists(&mut self, ty: &Type, context: &str) {
         match ty {
             Type::Named(name) => {
-                // Generic parametreler kendi class içinde geçerli tip
                 if let Some(cc) = &self.current_class.clone() {
                     if let Some(info) = self.classes.get(cc.as_str()) {
                         if info.generics.contains(name) { return; }
@@ -2604,8 +2476,6 @@ impl TypeChecker {
           || self.type_aliases.contains_key(name)
     }
 
-    // ── Scope yönetimi ────────────────────────────────────────────────────────
-
     fn push_scope(&mut self) {
         self.scopes.push(Scope::new());
     }
@@ -2629,8 +2499,6 @@ impl TypeChecker {
         None
     }
 
-    // ── Hata yardımcıları ─────────────────────────────────────────────────────
-
     fn error(&mut self, msg: String) {
         self.errors.push(TypeError::new(msg));
     }
@@ -2638,8 +2506,6 @@ impl TypeChecker {
     fn push_error(&mut self, err: TypeError) {
         self.errors.push(err);
     }
-
-    // ── Built-in tipler ───────────────────────────────────────────────────────
 
     fn register_builtins(&mut self) {
         let mut exception_methods = HashMap::new();
@@ -2691,9 +2557,6 @@ impl TypeChecker {
             experimental  : false,
         });
 
-        // ── Built-in Result<T, E> ─────────────────────────────────────────────
-        // Result.Ok(value)  → Result<T, Unknown>
-        // Result.Err(error) → Result<Unknown, E>
         let mut result_variant_data = HashMap::new();
         result_variant_data.insert("Ok".to_string(),  vec![Type::Named("T".to_string())]);
         result_variant_data.insert("Err".to_string(), vec![Type::Named("E".to_string())]);
@@ -2718,7 +2581,6 @@ impl TypeChecker {
             experimental  : false,
         });
 
-        // ── SIMD tipleri ──────────────────────────────────────────────────────
         for (type_name, elem_ty, arity) in &[
             ("Vec4f", Type::Float,   4usize),
             ("Vec8f", Type::Float,   8),

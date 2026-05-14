@@ -1,0 +1,77 @@
+module arimo.test.lowlevel;
+
+@Packed
+public struct PacketHeader {
+    magic   : u16;
+    version : u8;
+    flags   : u8;
+}
+
+@Align(16)
+public struct SimdVec {
+    data : Array<Float, 4>;
+}
+
+@ManualMemory
+public class HardwareDriver {
+    public static readStatus() : u32 {
+        volatile u32 status = 0;
+        return status;
+    }
+}
+
+public union Register {
+    full  : u32;
+    bytes : Array<u8, 4>;
+}
+
+extern "C" {
+    printf(fmt: RawPtr<u8>, ...) : i32;
+    malloc(size: u64)            : RawPtr<Void>;
+    free(ptr: RawPtr<Void>)      : Void;
+}
+
+@ManualMemory
+public class Syscall {
+    public static exit(code: i32) : noreturn {
+        asm {
+            mov rax, 60
+            syscall
+        }
+    }
+}
+
+public class KernelEntry {
+    @Section(".boot")
+    @CallingConvention("C")
+    public static start() : Void {
+        HardwareDriver.readStatus();
+    }
+
+    @CallingConvention("Interrupt")
+    public static onTimer() : Void {
+        Syscall.exit(0);
+    }
+}
+
+public class Panic {
+    public static halt(msg: String) : noreturn {
+        Syscall.exit(1);
+    }
+}
+
+public class FileHandler {
+    public static process(path: String) : Void {
+        Integer handle = 0;
+        defer Syscall.exit(0);
+        Panic.halt("test");
+    }
+}
+
+public class Application {
+    public static main() : Void {
+        PacketHeader header = PacketHeader(0xFF00, 1, 0);
+        SimdVec      vec    = SimdVec(Array.zeroed());
+        IO.print("lowlevel: OK");
+    }
+}

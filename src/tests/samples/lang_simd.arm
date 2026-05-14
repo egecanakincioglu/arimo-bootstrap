@@ -1,6 +1,4 @@
-module arimo.test.phase3;
-
-// ── 3.1 SIMD tipleri ─────────────────────────────────────────────────────────
+module arimo.test.simd;
 
 public class VectorMath {
     public static addVectors(a: Vec4f, b: Vec4f) : Vec4f {
@@ -16,17 +14,15 @@ public class VectorMath {
     }
 
     public static demo() : Void {
-        Vec4f a = Vec4f(1.0, 0.0, 0.0, 0.0);
-        Vec4f b = Vec4f(0.0, 1.0, 0.0, 0.0);
-        Vec4f c = a + b;
+        Vec4f a   = Vec4f(1.0, 0.0, 0.0, 0.0);
+        Vec4f b   = Vec4f(0.0, 1.0, 0.0, 0.0);
+        Vec4f c   = a + b;
         Vec8f big = Vec8f(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0);
         Vec4i iv  = Vec4i(1, 2, 3, 4);
         Float len = a.length();
         IO.print("vectors OK");
     }
 }
-
-// ── 3.2 @likely / @unlikely ──────────────────────────────────────────────────
 
 public class BranchTest {
     public static check(x: Integer) : String {
@@ -43,8 +39,6 @@ public class BranchTest {
         }
     }
 }
-
-// ── 3.3 interface default metodlar ───────────────────────────────────────────
 
 interface Updatable {
     update(dt: Float) : Void;
@@ -65,8 +59,6 @@ public class GameObject implements Updatable {
     }
 }
 
-// ── 3.4 async/await ──────────────────────────────────────────────────────────
-
 public class AsyncService {
     public async fetchData(id: Integer) : String {
         String result = await AsyncService.getData(id);
@@ -78,12 +70,10 @@ public class AsyncService {
     }
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
-
 public class Application {
     public static main() : Void {
         VectorMath.demo();
         String result = BranchTest.check(5);
-        IO.print("phase3: OK");
+        IO.print("simd: OK");
     }
 }

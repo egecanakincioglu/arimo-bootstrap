@@ -1,27 +1,4 @@
-/*
-Arimo Lang - A modern programming language and compiler
-Copyright (C) 2026 Egecan Akıncıoğlu
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Arimo Lang — CodeGen (LLVM / inkwell)
-// Hedef: .arm → LLVM IR → native binary
-// ─────────────────────────────────────────────────────────────────────────────
-
+﻿
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -40,10 +17,6 @@ use inkwell::targets::{
 use inkwell::OptimizationLevel;
 
 use crate::ast::*;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Hata tipi
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct CodeGenError {
@@ -64,10 +37,6 @@ impl std::fmt::Display for CodeGenError {
 
 type CgResult<T> = Result<T, CodeGenError>;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Değişken bilgisi (stack slot)
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 struct VarSlot<'ctx> {
     ptr        : PointerValue<'ctx>,
@@ -76,47 +45,26 @@ struct VarSlot<'ctx> {
     elem_class : Option<String>,   // List<T> için T'nin class adı
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CodeGen yapısı
-// ─────────────────────────────────────────────────────────────────────────────
-
 pub struct CodeGen<'ctx> {
     ctx     : &'ctx Context,
     module  : Module<'ctx>,
     builder : Builder<'ctx>,
-    // Yerel değişkenler: kapsam yığını
     scopes  : Vec<HashMap<String, VarSlot<'ctx>>>,
-    // Tanımlı fonksiyonlar
     fns     : HashMap<String, FunctionValue<'ctx>>,
-    // Geçerli fonksiyon
     cur_fn  : Option<FunctionValue<'ctx>>,
-    // Class struct tipleri: class adı → LLVM struct type
     struct_types  : HashMap<String, inkwell::types::StructType<'ctx>>,
-    // Field indeksleri: class adı → field adı → indeks
     field_indices : HashMap<String, HashMap<String, u32>>,
-    // Geçerli class (this erişimi için)
     cur_class : Option<String>,
-    // Enum variant değerleri: enum adı → variant adı → i32 değeri
     enum_variants : HashMap<String, HashMap<String, u32>>,
-    // Static field global'ları: "ClassName.fieldName" → global pointer
     static_fields : HashMap<String, inkwell::values::GlobalValue<'ctx>>,
-    // Field Arimo tipleri: class adı → field adı → tür adı (method dispatch için)
     field_arimo_types : HashMap<String, HashMap<String, String>>,
-    // Lambda fonksiyonları için benzersiz sayaç
     lambda_counter    : usize,
-    // Break/continue hedefleri (döngü yığını)
     loop_exit_bbs     : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
     loop_continue_bbs : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
-    // ARC: class adı → struct içinde refcount field indeksi
     refcount_indices     : HashMap<String, u32>,
-    // ARC: @ManualMemory class'ları (ARC skip edilir)
     manual_memory_classes: std::collections::HashSet<String>,
-    // Exception: finally garantisi — return öncesinde çalıştırılacak body'ler
     finally_defers       : Vec<Vec<Stmt>>,
-    // Defer: scope çıkışında (LIFO) çalıştırılacak expression'lar
     defer_stack          : Vec<Vec<Expr>>,
-    // EH: her try bloğunda kaydedilen eski @__arimo_ex_top alloca'ları
-    // [0] = bu fonksiyondaki ilk try'dan önceki top (return sırasında kullanılır)
     try_saved_tops       : Vec<inkwell::values::PointerValue<'ctx>>,
 }
 
@@ -148,14 +96,10 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── Kapsam yönetimi ──────────────────────────────────────────────────────
-
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.defer_stack.push(Vec::new());
     }
-
-    // ── ARC: retain (refcount++) ──────────────────────────────────────────────
 
     fn arc_retain_ptr(
         &mut self,
@@ -171,7 +115,6 @@ impl<'ctx> CodeGen<'ctx> {
         let inc_bb  = self.ctx.append_basic_block(cur_fn, "arc.inc");
         let cont_bb = self.ctx.append_basic_block(cur_fn, "arc.ri_cont");
 
-        // Null guard
         let pi      = self.builder.build_ptr_to_int(ptr, i64_ty, "arc_ri_pi")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let is_null = self.builder.build_int_compare(
@@ -198,7 +141,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // Expression'dan class adını çıkarmaya çalış (retain için)
     fn infer_expr_class_name(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::Ident(name) => self.lookup_var(name)
@@ -208,9 +150,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── ARC: retain/release + all-scopes helpers ──────────────────────────────
-
-    // Belirli bir değişken adı HARİÇ tüm scope'ları release et (Return için)
     fn arc_release_all_scopes_except(&mut self, skip_var: Option<&str>) -> CgResult<()> {
         for i in (0..self.scopes.len()).rev() {
             if self.current_block_terminated() { break; }
@@ -230,8 +169,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // ── ARC: tek değişken için inline release emit ────────────────────────────
-
     fn arc_release_var(&mut self, slot: VarSlot<'ctx>) -> CgResult<()> {
         let class_name = match &slot.class_name {
             Some(n) if !self.manual_memory_classes.contains(n.as_str())
@@ -241,7 +178,6 @@ impl<'ctx> CodeGen<'ctx> {
         if self.current_block_terminated() { return Ok(()); }
         let cur_fn = match self.cur_fn { Some(f) => f, None => return Ok(()) };
 
-        // Pointer'ı yükle
         let ptr_val = self.builder.build_load(slot.ty, slot.ptr, "arc_ptr")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let ptr = match ptr_val {
@@ -255,7 +191,6 @@ impl<'ctx> CodeGen<'ctx> {
         let free_bb = self.ctx.append_basic_block(cur_fn, "arc.free");
         let cont_bb = self.ctx.append_basic_block(cur_fn, "arc.cont");
 
-        // Null check: null ise atla
         let ptr_int  = self.builder.build_ptr_to_int(ptr, i64_ty, "arc_pi")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let is_null  = self.builder.build_int_compare(
@@ -264,7 +199,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_conditional_branch(is_null, cont_bb, dec_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // Decrement block
         self.builder.position_at_end(dec_bb);
         let rc_idx    = *self.refcount_indices.get(&class_name).unwrap();
         let struct_ty = *self.struct_types.get(&class_name).unwrap();
@@ -282,7 +216,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_conditional_branch(is_zero, free_bb, cont_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // Free block
         self.builder.position_at_end(free_bb);
         let free_fn = self.module.get_function("free").unwrap_or_else(|| {
             let ft = self.ctx.void_type().fn_type(&[ptr_ty.into()], false);
@@ -297,7 +230,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // Belirli bir scope indeksindeki class değişkenlerini serbest bırak
     fn arc_release_scope(&mut self, scope_idx: usize) -> CgResult<()> {
         let slots: Vec<VarSlot<'ctx>> = self.scopes[scope_idx]
             .values()
@@ -311,7 +243,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // Return öncesinde TÜM scope'lardaki class değişkenlerini serbest bırak
     fn arc_release_all_scopes(&mut self) -> CgResult<()> {
         for i in (0..self.scopes.len()).rev() {
             if self.current_block_terminated() { break; }
@@ -321,7 +252,6 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn pop_scope(&mut self) {
-        // Defer: scope çıkışında kayıtlı expression'ları LIFO çalıştır
         if !self.current_block_terminated() {
             let defers = self.defer_stack.last().cloned().unwrap_or_default();
             for expr in defers.iter().rev() {
@@ -331,7 +261,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
         self.defer_stack.pop();
 
-        // ARC: scope çıkışında class instance'ları serbest bırak
         if let Some(idx) = self.scopes.len().checked_sub(1) {
             if !self.current_block_terminated() {
                 let _ = self.arc_release_scope(idx);
@@ -399,8 +328,6 @@ impl<'ctx> CodeGen<'ctx> {
         None
     }
 
-    // ── Tip çevirisi: Arimo → LLVM ───────────────────────────────────────────
-
     fn llvm_type(&self, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
         match ty {
             Type::Integer         => Some(self.ctx.i64_type().into()),
@@ -414,15 +341,12 @@ impl<'ctx> CodeGen<'ctx> {
             Type::U32 | Type::I32 => Some(self.ctx.i32_type().into()),
             Type::U64 | Type::I64 => Some(self.ctx.i64_type().into()),
             Type::RawPtr(_)       => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
-            // Koleksiyon tipleri — opaque pointer
             Type::List(_) | Type::Map(..) | Type::HashMap(..) | Type::TreeMap(..)
             | Type::Pair(..) | Type::Slice(_) | Type::Array(..)
                 => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
             Type::Generic(_, _)   => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
             Type::Nullable(inner) => self.llvm_type(inner),
-            // Enum tipler → i32 integer
             Type::Named(n) if self.is_enum(n) => Some(self.ctx.i32_type().into()),
-            // SIMD vektör tipleri
             Type::Named(n) if n == "Vec4f" => Some(self.ctx.f32_type().vec_type(4).into()),
             Type::Named(n) if n == "Vec8f" => Some(self.ctx.f32_type().vec_type(8).into()),
             Type::Named(n) if n == "Vec4i" => Some(self.ctx.i32_type().vec_type(4).into()),
@@ -436,22 +360,17 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── Modülü işle ──────────────────────────────────────────────────────────
-
     pub fn compile_module(&mut self, module: &crate::ast::Module) -> CgResult<()> {
-        // Extern fonksiyonları kayıt et
         for item in &module.items {
             if let Item::Extern(ext) = item {
                 self.declare_extern_block(ext)?;
             }
         }
 
-        // printf + malloc + koleksiyon runtime her zaman lazım
         self.declare_printf();
         self.declare_malloc();
         self.declare_collection_runtime();
 
-        // Geçiş 0: @ManualMemory class'larını topla (ARC skip için)
         for item in &module.items {
             if let Item::Class(c) = item {
                 if c.manual {
@@ -460,13 +379,11 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // Geçiş 0b: enum variant'larını kayıt et
         for item in &module.items {
             if let Item::Enum(e) = item {
                 self.register_enum(e);
             }
         }
-        // Geçiş 1: struct/class tiplerini kayıt et (field layout)
         for item in &module.items {
             match item {
                 Item::Class(c) => self.register_class_struct(c),
@@ -474,19 +391,16 @@ impl<'ctx> CodeGen<'ctx> {
                 _ => {}
             }
         }
-        // Geçiş 2: tüm fonksiyon imzaları (static + instance)
         for item in &module.items {
             if let Item::Class(c) = item {
                 self.register_class_methods(c)?;
             }
         }
-        // Geçiş 2.5: static field başlangıç değerlerini ayarla
         for item in &module.items {
             if let Item::Class(c) = item {
                 self.init_static_fields(c)?;
             }
         }
-        // Geçiş 3: gövdeleri üret
         for item in &module.items {
             match item {
                 Item::Class(c) => self.compile_class(c)?,
@@ -497,12 +411,9 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // ── Inline asm ───────────────────────────────────────────────────────────
-    // LLVM inline asm: void asm sideeffect "...", ""()
     fn compile_asm(&mut self, code: &str) -> CgResult<()> {
         let void_ty = self.ctx.void_type();
         let fn_ty   = void_ty.fn_type(&[], false);
-        // sanitize: replace \n with actual newline for LLVM asm string
         let asm_code = code.replace("\\n", "\n").replace("\\t", "\t");
         let inline_asm = self.ctx.create_inline_asm(
             fn_ty,
@@ -518,8 +429,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // ── malloc extern tanımı ─────────────────────────────────────────────────
-
     fn declare_malloc(&mut self) {
         if self.module.get_function("malloc").is_some() { return; }
         let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
@@ -528,11 +437,7 @@ impl<'ctx> CodeGen<'ctx> {
         self.module.add_function("malloc", malloc_ty, None);
     }
 
-    // ── EH runtime tanımları (setjmp/longjmp tabanlı) ────────────────────────
-
     fn declare_setjmp(&mut self) {
-        // Windows UCRT: _setjmp(jmp_buf, void* frame) — 2 args
-        // Linux/macOS:  setjmp(jmp_buf) — 1 arg
         #[cfg(target_os = "windows")]
         let fn_name = "_setjmp";
         #[cfg(not(target_os = "windows"))]
@@ -580,7 +485,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.module.add_function("strcmp", ft, None);
     }
 
-    // EH global'ı al ya da oluştur (@__arimo_ex_top, @__arimo_ex_type, @__arimo_ex_msg)
     fn get_or_create_eh_global(&mut self, name: &str) -> inkwell::values::GlobalValue<'ctx> {
         if let Some(g) = self.module.get_global(name) { return g; }
         let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
@@ -590,9 +494,6 @@ impl<'ctx> CodeGen<'ctx> {
         g
     }
 
-    // EH: global jmpbuf dizisi ve derinlik sayacı
-    // Stack alloca yerine global kullanmak alignment sorununu çözer
-    // [32 x [32 x i64]] = 32 iç içe try seviyesi, her biri 256 byte
     fn get_or_create_eh_jmpbufs(&mut self) -> inkwell::values::GlobalValue<'ctx> {
         if let Some(g) = self.module.get_global("__arimo_ex_jmpbufs") { return g; }
         let i64_ty = self.ctx.i64_type();
@@ -614,7 +515,6 @@ impl<'ctx> CodeGen<'ctx> {
         g
     }
 
-    // slot indeksinden jmpbuf pointer'ı üret
     fn get_jmpbuf_ptr(&mut self, slot: inkwell::values::IntValue<'ctx>) -> CgResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.ctx.i64_type();
         let jmpbuf_slot_ty = i64_ty.array_type(32);  // [32 x i64]
@@ -628,15 +528,11 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(ptr)
     }
 
-    // ── Class struct tipi kayıt ──────────────────────────────────────────────
-
     fn register_class_struct(&mut self, c: &ClassDecl) {
-        // Inheritance: parent field'larını da struct'a ekle
         let mut all_field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
         let mut idx_map: HashMap<String, u32> = HashMap::new();
         let mut idx = 0u32;
 
-        // Parent struct field'ları önce gelir
         if let Some(parent_name) = &c.extends {
             if let Some(parent_fields) = self.field_indices.get(parent_name).cloned() {
                 if let Some(parent_struct) = self.struct_types.get(parent_name).copied() {
@@ -648,13 +544,11 @@ impl<'ctx> CodeGen<'ctx> {
                     for (fname, fidx) in &parent_fields {
                         idx_map.insert(fname.clone(), *fidx);
                     }
-                    // Child field'ları parent'ın TÜM field'larından (refcount dahil) sonra başlar
                     idx = parent_struct.count_fields() as u32;
                 }
             }
         }
 
-        // Kendi instance field'ları
         for f in c.fields.iter().filter(|f| !f.static_) {
             if let Some(ft) = self.llvm_type(&f.ty) {
                 all_field_types.push(ft);
@@ -663,16 +557,13 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // ARC: refcount field'ı ekle (kalıtımda parent'ın refcount'u yeniden kullanılır)
         let rc_idx = if let Some(parent) = &c.extends {
-            // Parent'ın refcount indeksini miras al
             self.refcount_indices.get(parent.as_str()).copied().unwrap_or_else(|| {
                 let i = all_field_types.len() as u32;
                 all_field_types.push(self.ctx.i64_type().into());
                 i
             })
         } else {
-            // Baz sınıf: sona refcount ekle
             let i = all_field_types.len() as u32;
             all_field_types.push(self.ctx.i64_type().into());
             i
@@ -683,9 +574,7 @@ impl<'ctx> CodeGen<'ctx> {
         self.struct_types.insert(c.name.clone(), struct_ty);
         self.field_indices.insert(c.name.clone(), idx_map);
 
-        // Arimo tip bilgisini kaydet (dispatch için)
         let mut arimo_types: HashMap<String, String> = HashMap::new();
-        // Önce parent'ın tiplerini kopyala
         if let Some(parent_name) = &c.extends {
             if let Some(parent_arimo) = self.field_arimo_types.get(parent_name).cloned() {
                 arimo_types.extend(parent_arimo);
@@ -704,7 +593,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
         self.field_arimo_types.insert(c.name.clone(), arimo_types);
 
-        // Static field'lar → LLVM global değişkenler
         for f in c.fields.iter().filter(|f| f.static_) {
             let global_name = format!("{}_{}", c.name, f.name);
             if self.module.get_global(&global_name).is_some() { continue; }
@@ -719,7 +607,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── StructDecl kayıt (@Packed, @Align desteğiyle) ────────────────────────
     fn register_struct_decl(&mut self, s: &StructDecl) {
         let mut field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
         let mut idx_map: HashMap<String, u32> = HashMap::new();
@@ -731,7 +618,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // @Packed → packed=true
         let struct_ty = self.ctx.struct_type(&field_types, s.packed);
         self.struct_types.insert(s.name.clone(), struct_ty);
         self.field_indices.insert(s.name.clone(), idx_map);
@@ -746,21 +632,16 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── Enum kayıt ───────────────────────────────────────────────────────────
-
-    // Static field başlangıç değerleri — compile zamanında sabit ise global'e yaz
     fn init_static_fields(&mut self, c: &ClassDecl) -> CgResult<()> {
         for f in c.fields.iter().filter(|f| f.static_) {
             let global_name = format!("{}_{}", c.name, f.name);
             if let Some(gv) = self.module.get_global(&global_name) {
                 if let Some(init_expr) = &f.value {
-                    // Sadece compile-time sabit değerleri direkt ata
                     let const_val: Option<inkwell::values::BasicValueEnum> = match init_expr {
                         Expr::IntLit(n)   => Some(self.ctx.i64_type().const_int(*n as u64, *n < 0).into()),
                         Expr::FloatLit(f) => Some(self.ctx.f64_type().const_float(*f).into()),
                         Expr::BoolLit(b)  => Some(self.ctx.bool_type().const_int(*b as u64, false).into()),
                         Expr::StrLit(s)   => {
-                            // String static field: global char array olarak sakla
                             let bytes = s.as_bytes();
                             let char_arr = self.ctx.const_string(bytes, true);
                             let str_global = self.module.add_global(
@@ -789,13 +670,11 @@ impl<'ctx> CodeGen<'ctx> {
         }
         self.enum_variants.insert(e.name.clone(), variants);
 
-        // Enum metodları kayıt et (i32 this parametreli)
         let i32_ty = self.ctx.i32_type();
         for m in &e.methods {
             let fn_name = format!("{}_{}", e.name, m.name);
             if self.module.get_function(&fn_name).is_some() { continue; }
 
-            // this = i32 (enum değeri)
             let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 vec![i32_ty.into()];
             for p in &m.params {
@@ -823,8 +702,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.enum_variants.get(enum_name)?.get(variant).copied()
     }
 
-    // ── printf extern tanımı ─────────────────────────────────────────────────
-
     fn declare_printf(&mut self) {
         if self.module.get_function("printf").is_some() { return; }
         let i8_ptr = self.ctx.ptr_type(AddressSpace::default());
@@ -832,8 +709,6 @@ impl<'ctx> CodeGen<'ctx> {
         let printf_ty = i32_ty.fn_type(&[i8_ptr.into()], true);
         self.module.add_function("printf", printf_ty, None);
     }
-
-    // ── Extern "C" blokları ──────────────────────────────────────────────────
 
     fn declare_extern_block(&mut self, block: &ExternBlock) -> CgResult<()> {
         for decl in &block.decls {
@@ -853,12 +728,9 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // ── Class metodlarını kayıt et (imza) ────────────────────────────────────
-
     fn register_class_methods(&mut self, c: &ClassDecl) -> CgResult<()> {
         let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
 
-        // Constructor: ClassName_new(fields...) → ptr
         if c.constructor.is_some() {
             let ctor_name = format!("{}_new", c.name);
             if self.module.get_function(&ctor_name).is_none() {
@@ -872,14 +744,12 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // Metodlar
         for m in &c.methods {
             let fn_name = format!("{}_{}", c.name, m.name);
             if self.module.get_function(&fn_name).is_some() { continue; }
 
             let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
             if !m.static_ {
-                // this pointer
                 param_types.push(ptr_ty.into());
             }
             for p in &m.params {
@@ -909,10 +779,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // ── Class gövdelerini derle ───────────────────────────────────────────────
-
-    // ── Enum gövdeleri ───────────────────────────────────────────────────────
-
     fn compile_enum(&mut self, e: &EnumDecl) -> CgResult<()> {
         self.cur_class = Some(e.name.clone());
         for m in &e.methods.clone() {
@@ -939,7 +805,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.cur_fn = Some(fn_val);
         self.push_scope();
 
-        // this = i32 (enum değeri), 0. parametre
         if let Some(this_val) = fn_val.get_nth_param(0) {
             let i32_ty = self.ctx.i32_type();
             let this_alloca = self.builder.build_alloca(i32_ty, "this")
@@ -949,7 +814,6 @@ impl<'ctx> CodeGen<'ctx> {
             self.define_var("this", this_alloca, i32_ty.into());
         }
 
-        // Diğer parametreler
         for (i, p) in m.params.iter().enumerate() {
             if let Some(llvm_ty) = self.llvm_type(&p.ty) {
                 if let Some(pv) = fn_val.get_nth_param((i + 1) as u32) {
@@ -981,12 +845,10 @@ impl<'ctx> CodeGen<'ctx> {
     fn compile_class(&mut self, c: &ClassDecl) -> CgResult<()> {
         self.cur_class = Some(c.name.clone());
 
-        // Constructor gövdesi
         if let Some(ctor) = &c.constructor.clone() {
             self.compile_constructor(c, ctor)?;
         }
 
-        // Metod gövdeleri
         for m in &c.methods.clone() {
             if m.body.is_none() { continue; }
             self.compile_method(c, m)?;
@@ -995,8 +857,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.cur_class = None;
         Ok(())
     }
-
-    // ── Constructor gövdesi ──────────────────────────────────────────────────
 
     fn compile_constructor(&mut self, c: &ClassDecl, ctor: &Constructor) -> CgResult<()> {
         let ctor_name = format!("{}_new", c.name);
@@ -1012,7 +872,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.cur_fn = Some(fn_val);
         self.push_scope();
 
-        // malloc ile bellek ayır
         let malloc = self.module.get_function("malloc")
             .ok_or_else(|| CodeGenError::new("malloc not declared"))?;
         let struct_ty = self.struct_types.get(&c.name).copied()
@@ -1026,7 +885,6 @@ impl<'ctx> CodeGen<'ctx> {
             .basic()
             .ok_or_else(|| CodeGenError::new("malloc returned void"))?;
 
-        // ARC: refcount = 1 başlat
         if !self.manual_memory_classes.contains(&c.name) {
             if let Some(&rc_idx) = self.refcount_indices.get(&c.name) {
                 if let BasicValueEnum::PointerValue(ptr) = obj_ptr {
@@ -1038,7 +896,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // 'this' alloca'sına kaydet
         let this_alloca = self.builder
             .build_alloca(self.ctx.ptr_type(AddressSpace::default()), "this")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -1047,7 +904,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.define_var("this", this_alloca,
             self.ctx.ptr_type(AddressSpace::default()).into());
 
-        // Parametre alloca'ları
         for (i, p) in ctor.params.iter().enumerate() {
             if let Some(llvm_ty) = self.llvm_type(&p.ty) {
                 if let Some(pv) = fn_val.get_nth_param(i as u32) {
@@ -1060,12 +916,10 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // Constructor body
         for stmt in &ctor.body.clone() {
             if self.compile_stmt(stmt)? { break; }
         }
 
-        // this pointer'ı döndür
         let ptr_ty: BasicTypeEnum<'ctx> = self.ctx.ptr_type(AddressSpace::default()).into();
         let this_ptr = self.builder
             .build_load(ptr_ty, this_alloca, "ret_this")
@@ -1080,16 +934,12 @@ impl<'ctx> CodeGen<'ctx> {
         else { Err(CodeGenError::new(format!("constructor verification failed: {}", c.name))) }
     }
 
-    // ── Metod gövdesi ─────────────────────────────────────────────────────────
-
     fn compile_method(&mut self, c: &ClassDecl, m: &Method) -> CgResult<()> {
         let fn_name = format!("{}_{}", c.name, m.name);
 
-        // main() → LLVM main fonksiyonu
         let is_entry = m.name == "main" && m.static_;
 
         let fn_val = if is_entry {
-            // main fonksiyonunu özel olarak tanımla: i32 main()
             let main_ty = self.ctx.i32_type().fn_type(&[], false);
             if let Some(existing) = self.module.get_function("main") {
                 existing
@@ -1105,8 +955,6 @@ impl<'ctx> CodeGen<'ctx> {
 
         let body = m.body.as_ref().unwrap();
 
-        // ── LLVM Attribute'ları uygula ────────────────────────────────────────
-        // noreturn → LLVM noreturn attribute
         if m.return_ty.as_ref().map(|t| matches!(t, Type::NoReturn)).unwrap_or(false) {
             let kind_id = inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn");
             if kind_id != 0 {
@@ -1114,7 +962,6 @@ impl<'ctx> CodeGen<'ctx> {
                 fn_val.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
             }
         }
-        // @ForceInline → alwaysinline
         if m.inline_ {
             let kind_id = inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline");
             if kind_id != 0 {
@@ -1122,7 +969,6 @@ impl<'ctx> CodeGen<'ctx> {
                 fn_val.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
             }
         }
-        // @Pure → readnone
         if m.pure_ {
             let kind_id = inkwell::attributes::Attribute::get_named_enum_kind_id("readnone");
             if kind_id != 0 {
@@ -1130,11 +976,9 @@ impl<'ctx> CodeGen<'ctx> {
                 fn_val.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
             }
         }
-        // @Section("name") → section attribute
         if let Some(section) = &m.section {
             fn_val.set_section(Some(section.as_str()));
         }
-        // @CallingConvention → LLVM calling conv
         if let Some(cc) = &m.calling_conv {
             let llvm_cc = match cc {
                 CallingConv::Cdecl    => inkwell::llvm_sys::LLVMCallConv::LLVMCCallConv as u32,
@@ -1151,7 +995,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.try_saved_tops.clear();
         self.push_scope();
 
-        // Instance metod: this pointer'ı kapsama ekle
         if !m.static_ {
             if let Some(this_val) = fn_val.get_nth_param(0) {
                 let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
@@ -1163,7 +1006,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // Parametreleri kapsama ekle
         let param_offset = if m.static_ { 0 } else { 1 };
         for (i, p) in m.params.iter().enumerate() {
             if let Some(llvm_ty) = self.llvm_type(&p.ty) {
@@ -1178,7 +1020,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // Statement'ları derle
         let mut returned = false;
         for stmt in body {
             if self.compile_stmt(stmt)? {
@@ -1187,7 +1028,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // Return yoksa otomatik ekle — önce ARC cleanup (function scope)
         if !returned {
             if !self.current_block_terminated() {
                 if let Some(idx) = self.scopes.len().checked_sub(1) {
@@ -1207,7 +1047,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.pop_scope_no_arc(); // block sonlandı, ARC zaten yapıldı
         self.cur_fn = None;
 
-        // LLVM doğrulaması
         if fn_val.verify(true) {
             Ok(())
         } else {
@@ -1215,18 +1054,12 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── Statement'lar → LLVM IR ───────────────────────────────────────────────
-    // Dönüş değeri: true = bu statement bir return içeriyor
-
     fn compile_stmt(&mut self, stmt: &Stmt) -> CgResult<bool> {
         match stmt {
             Stmt::Return(expr) => {
-                // ── Adım 1: Return değerini ÖNCE derle ──────────────────────
-                // (Cleanup'tan önce değerlendirmek use-after-free'yi önler)
                 let (ret_val, skip_var_name) = match expr {
                     None => (None, None),
                     Some(e) => {
-                        // Döndürülen değişken adını bul (ARC'da bu değişkeni skip edeceğiz)
                         let skip = match e {
                             Expr::Ident(n) => Some(n.clone()),
                             _ => None,
@@ -1236,7 +1069,6 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                 };
 
-                // ── Adım 2: Finally defers çalıştır ─────────────────────────
                 let defers = self.finally_defers.clone();
                 for fin_body in defers.iter().rev() {
                     if self.current_block_terminated() { break; }
@@ -1245,7 +1077,6 @@ impl<'ctx> CodeGen<'ctx> {
                     self.pop_scope();
                 }
 
-                // ── Adım 2b: EH depth'i temizle (try içinde return varsa) ──────
                 if !self.try_saved_tops.is_empty() && !self.current_block_terminated() {
                     let i32_ty = self.ctx.i32_type();
                     let depth_gv = self.get_or_create_eh_depth();
@@ -1255,11 +1086,8 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                 }
 
-                // ── Adım 3: ARC cleanup — döndürülen değişkeni atla ─────────
-                // (double-free'yi önler: döndürülen nesne caller'a transfer edilir)
                 self.arc_release_all_scopes_except(skip_var_name.as_deref())?;
 
-                // ── Adım 4: Return IR emit ───────────────────────────────────
                 match ret_val {
                     None => {
                         let cur = self.cur_fn.unwrap();
@@ -1282,7 +1110,6 @@ impl<'ctx> CodeGen<'ctx> {
 
             Stmt::VarDecl { ty, name, value, volatile, .. } => {
                 let is_volatile = *volatile;
-                // Koleksiyon tipi mi?
                 let (class_name, elem_class) = match ty {
                     Type::Named(n) if self.struct_types.contains_key(n.as_str()) => {
                         (Some(n.clone()), None)
@@ -1301,7 +1128,6 @@ impl<'ctx> CodeGen<'ctx> {
                     _ => (None, None),
                 };
 
-                // Enum tip → i32, class/collection instance → pointer, diğerleri → direkt tip
                 let llvm_ty = if class_name.is_some() {
                     Some(BasicTypeEnum::from(self.ctx.ptr_type(AddressSpace::default())))
                 } else if let Type::Named(n) = ty {
@@ -1324,11 +1150,6 @@ impl<'ctx> CodeGen<'ctx> {
                                 .map_err(|e| CodeGenError::new(e.to_string()))?;
                             if is_volatile { let _ = store.set_volatile(true); }
 
-                            // ARC retain:
-                            // - ConstructorCall → yapıcı zaten refcount=1 verir → retain YOK
-                            // - StaticCall/MethodCall → callee +1 döndürür → retain YOK
-                            // - Ident → mevcut nesneyi kopyalıyoruz → retain GEREKLİ
-                            // - Diğer (FieldAccess vs.) → retain yapılmaz (sınır: gelecekte eklenecek)
                             if let Some(cn) = &class_name {
                                 if !matches!(cn.as_str(), "__List" | "__HashMap" | "__Pair") {
                                     let needs_retain = matches!(init_expr, Expr::Ident(_));
@@ -1394,13 +1215,11 @@ impl<'ctx> CodeGen<'ctx> {
                 let i32_ty = self.ctx.i32_type();
                 let cur_fn = self.cur_fn.unwrap();
 
-                // ── 1. Mevcut derinliği oku (saved_depth = try öncesi derinlik) ──
                 let depth_gv = self.get_or_create_eh_depth();
                 let saved_depth = self.builder.build_load(i32_ty, depth_gv.as_pointer_value(), "saved_depth")
                     .map_err(|e| CodeGenError::new(e.to_string()))?
                     .into_int_value();
 
-                // saved_depth'i bir alloca'ya kaydet (returns_twice sonrası erişim için)
                 let saved_depth_alloca = self.builder.build_alloca(i32_ty, "saved_depth_slot")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 self.builder.build_store(saved_depth_alloca, saved_depth)
@@ -1409,16 +1228,13 @@ impl<'ctx> CodeGen<'ctx> {
                     .as_instruction_value().map(|_| saved_depth_alloca)
                     .unwrap_or(saved_depth_alloca));
 
-                // ── 2. Derinliği artır ──────────────────────────────────────────
                 let new_depth = self.builder.build_int_add(saved_depth, i32_ty.const_int(1, false), "new_depth")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 self.builder.build_store(depth_gv.as_pointer_value(), new_depth)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-                // ── 3. Bu try için jmpbuf pointer'ı al ─────────────────────────
                 let jmpbuf_ptr = self.get_jmpbuf_ptr(saved_depth)?;
 
-                // ── 4. setjmp/longjmp çağrısı ──────────────────────────────────
                 let sj_name = self.setjmp_fn_name();
                 let setjmp_fn = self.module.get_function(sj_name).unwrap();
                 #[cfg(target_os = "windows")]
@@ -1432,7 +1248,6 @@ impl<'ctx> CodeGen<'ctx> {
                     .map_err(|e| CodeGenError::new(e.to_string()))?
                     .try_as_basic_value().basic().unwrap().into_int_value();
 
-                // ── 5. Branch: 0 → try body, nonzero → catch dispatch ───────────
                 let try_body_bb   = self.ctx.append_basic_block(cur_fn, "try.body");
                 let catch_disp_bb = self.ctx.append_basic_block(cur_fn, "catch.dispatch");
                 let finally_bb    = self.ctx.append_basic_block(cur_fn, "try.finally");
@@ -1444,7 +1259,6 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_conditional_branch(is_ex, catch_disp_bb, try_body_bb)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-                // ── Try body ────────────────────────────────────────────────────
                 self.builder.position_at_end(try_body_bb);
 
                 if let Some(fin) = finally_body {
@@ -1460,7 +1274,6 @@ impl<'ctx> CodeGen<'ctx> {
 
                 if finally_body.is_some() { self.finally_defers.pop(); }
 
-                // Normal çıkış: derinliği geri yükle → finally
                 if !try_returned && !self.current_block_terminated() {
                     let sd = self.builder.build_load(i32_ty, saved_depth_alloca, "sd_restore")
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -1470,10 +1283,8 @@ impl<'ctx> CodeGen<'ctx> {
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                 }
 
-                // ── Catch dispatch ───────────────────────────────────────────────
                 self.builder.position_at_end(catch_disp_bb);
 
-                // Exception type ve message'ı yükle
                 let ex_type_gv = self.get_or_create_eh_global("__arimo_ex_type");
                 let ex_msg_gv  = self.get_or_create_eh_global("__arimo_ex_msg");
                 let ex_type_val = self.builder.build_load(ptr_ty, ex_type_gv.as_pointer_value(), "ex_type")
@@ -1533,7 +1344,6 @@ impl<'ctx> CodeGen<'ctx> {
                     self.pop_scope();
 
                     if !catch_ret && !self.current_block_terminated() {
-                        // Catch çıkışı: derinliği geri yükle → finally
                         let sd = self.builder.build_load(i32_ty, saved_depth_alloca, "sd_catch")
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
                         self.builder.build_store(depth_gv.as_pointer_value(), sd)
@@ -1547,17 +1357,14 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                 }
 
-                // Hiçbir catch uymadı → rethrow
                 self.builder.position_at_end(rethrow_bb);
                 {
-                    // Derinliği saved_depth'e geri yükle
                     let sd = self.builder.build_load(i32_ty, saved_depth_alloca, "sd_rethrow")
                         .map_err(|e| CodeGenError::new(e.to_string()))?
                         .into_int_value();
                     self.builder.build_store(depth_gv.as_pointer_value(), sd)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-                    // Parent slot = saved_depth - 1
                     let rethrow_null_bb    = self.ctx.append_basic_block(cur_fn, "rethrow.uncaught");
                     let rethrow_longjmp_bb = self.ctx.append_basic_block(cur_fn, "rethrow.longjmp");
 
@@ -1596,7 +1403,6 @@ impl<'ctx> CodeGen<'ctx> {
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                 }
 
-                // ── Finally bloğu ────────────────────────────────────────────────
                 self.builder.position_at_end(finally_bb);
                 if let Some(fin) = finally_body {
                     self.push_scope();
@@ -1622,7 +1428,6 @@ impl<'ctx> CodeGen<'ctx> {
                 let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
                 let i32_ty = self.ctx.i32_type();
 
-                // Exception type adını ve mesaj değerini çıkart
                 let (type_name_str, msg_opt) = match expr {
                     Expr::ConstructorCall { class, args, .. } => {
                         let name = class.clone();
@@ -1636,13 +1441,11 @@ impl<'ctx> CodeGen<'ctx> {
                     _ => ("Exception".to_string(), None),
                 };
 
-                // @__arimo_ex_type'a type name yaz
                 let type_name_ptr = self.build_global_string(&type_name_str)?;
                 let ex_type_gv = self.get_or_create_eh_global("__arimo_ex_type");
                 self.builder.build_store(ex_type_gv.as_pointer_value(), type_name_ptr)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-                // @__arimo_ex_msg'a mesajı yaz
                 let ex_msg_gv = self.get_or_create_eh_global("__arimo_ex_msg");
                 if let Some(msg_val) = msg_opt {
                     if msg_val.is_pointer_value() {
@@ -1655,7 +1458,6 @@ impl<'ctx> CodeGen<'ctx> {
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                 }
 
-                // Derinliği yükle — 0 ise uncaught, >0 ise longjmp
                 let depth_gv = self.get_or_create_eh_depth();
                 let depth_val = self.builder.build_load(i32_ty, depth_gv.as_pointer_value(), "throw_depth")
                     .map_err(|e| CodeGenError::new(e.to_string()))?
@@ -1671,7 +1473,6 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_conditional_branch(has_frame, do_longjmp_bb, do_abort_bb)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-                // ── Uncaught: mesajı yaz + abort ─────────────────────────────
                 self.builder.position_at_end(do_abort_bb);
                 {
                     let fmt = self.build_global_string("Uncaught exception %s: %s\n")?;
@@ -1690,10 +1491,8 @@ impl<'ctx> CodeGen<'ctx> {
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                 }
 
-                // ── longjmp: en içteki try frame'e zıpla ────────────────────
                 self.builder.position_at_end(do_longjmp_bb);
                 {
-                    // slot = depth - 1 (0-indexed, innermost active slot)
                     let slot = self.builder.build_int_sub(depth_val, i32_ty.const_int(1, false), "throw_slot")
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     let jmpbuf_ptr = self.get_jmpbuf_ptr(slot)?;
@@ -1718,8 +1517,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             Stmt::Defer(expr) => {
-                // defer: scope çıkışında LIFO sırasıyla çalıştırılır
-                // defer_stack'in son frame'ine ekle
                 if let Some(frame) = self.defer_stack.last_mut() {
                     frame.push(*expr.clone());
                 }
@@ -1728,7 +1525,6 @@ impl<'ctx> CodeGen<'ctx> {
 
             Stmt::Break => {
                 if let Some(&exit_bb) = self.loop_exit_bbs.last() {
-                    // ARC: döngü scope'undaki class instance'ları serbest bırak
                     self.arc_release_all_scopes()?;
                     self.builder.build_unconditional_branch(exit_bb)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -1740,7 +1536,6 @@ impl<'ctx> CodeGen<'ctx> {
 
             Stmt::Continue => {
                 if let Some(&cont_bb) = self.loop_continue_bbs.last() {
-                    // ARC: mevcut iterasyon scope'undaki class instance'ları serbest bırak
                     self.arc_release_all_scopes()?;
                     self.builder.build_unconditional_branch(cont_bb)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -1751,8 +1546,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
     }
-
-    // ── if / else ────────────────────────────────────────────────────────────
 
     fn compile_if(
         &mut self,
@@ -1778,7 +1571,6 @@ impl<'ctx> CodeGen<'ctx> {
         let branch = self.builder.build_conditional_branch(cond_bool, then_bb, else_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // @Likely/@Unlikely → LLVM branch_weights metadata
         if let Some(h) = hint {
             let i32_ty = self.ctx.i32_type();
             let (then_w, else_w) = match h {
@@ -1794,7 +1586,6 @@ impl<'ctx> CodeGen<'ctx> {
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
         }
 
-        // then bloğu
         self.builder.position_at_end(then_bb);
         self.push_scope();
         let mut then_returned = false;
@@ -1807,7 +1598,6 @@ impl<'ctx> CodeGen<'ctx> {
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
         }
 
-        // else / else-if bloğu
         let mut else_returned = false;
         if else_bb != merge_bb {
             self.builder.position_at_end(else_bb);
@@ -1823,12 +1613,10 @@ impl<'ctx> CodeGen<'ctx> {
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
             }
         } else {
-            // else bloğu yok → else_returned = false (merge'e düşüyor)
         }
 
         self.builder.position_at_end(merge_bb);
 
-        // Her iki dal da return yaptıysa merge block ulaşılamaz
         if then_returned && else_returned {
             self.builder.build_unreachable()
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -1837,8 +1625,6 @@ impl<'ctx> CodeGen<'ctx> {
 
         Ok(false)
     }
-
-    // ── while döngüsü ────────────────────────────────────────────────────────
 
     fn compile_while(&mut self, cond: &Expr, body: &[Stmt]) -> CgResult<bool> {
         let cur_fn  = self.cur_fn.unwrap();
@@ -1875,8 +1661,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.position_at_end(exit_bb);
         Ok(false)
     }
-
-    // ── for döngüsü ──────────────────────────────────────────────────────────
 
     fn compile_for(
         &mut self,
@@ -1928,10 +1712,7 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(false)
     }
 
-    // ── switch ───────────────────────────────────────────────────────────────
-
     fn compile_switch(&mut self, expr: &Expr, cases: &[SwitchCase]) -> CgResult<bool> {
-        // switch → if/else zinciri
         let val = self.compile_expr(expr)?;
         let cur_fn = self.cur_fn.unwrap();
         let exit_bb = self.ctx.append_basic_block(cur_fn, "switch.exit");
@@ -1962,12 +1743,10 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // "no case matched" path → exit_bb
         self.builder.build_unconditional_branch(exit_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.position_at_end(exit_bb);
 
-        // Tüm case'ler return yaptıysa exit_bb ulaşılamaz
         if all_cases_return && !cases.is_empty() {
             self.builder.build_unreachable()
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -1976,8 +1755,6 @@ impl<'ctx> CodeGen<'ctx> {
 
         Ok(false)
     }
-
-    // ── match expression → if/else zinciri ───────────────────────────────────
 
     fn compile_match(
         &mut self,
@@ -1990,7 +1767,6 @@ impl<'ctx> CodeGen<'ctx> {
             None    => return Ok(None),
         };
 
-        // Sonuç için alloca (i64 — en geniş tip)
         let i64_ty   = self.ctx.i64_type();
         let res_alloca = self.builder.build_alloca(i64_ty, "match_res")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -2002,7 +1778,6 @@ impl<'ctx> CodeGen<'ctx> {
         for arm in arms {
             match &arm.pattern {
                 MatchPattern::Wildcard => {
-                    // Her zaman match — body derle ve sonucu kaydet
                     self.push_scope();
                     let body_val = self.compile_expr(&arm.body)?;
                     self.pop_scope();
@@ -2017,16 +1792,13 @@ impl<'ctx> CodeGen<'ctx> {
                 }
 
                 MatchPattern::Variant { enum_name, variant, bindings } => {
-                    // Enum variant değerini al
                     let variant_val = self.enum_variant_value(enum_name, variant)
                         .map(|v| self.ctx.i32_type().const_int(v as u64, false));
 
                     let then_bb = self.ctx.append_basic_block(cur_fn, "match.arm");
                     let next_bb = self.ctx.append_basic_block(cur_fn, "match.next");
 
-                    // Karşılaştır
                     let cond = if let Some(vv) = variant_val {
-                        // match_val i32'ye truncate et
                         let match_i32 = match match_val {
                             BasicValueEnum::IntValue(iv) => {
                                 if iv.get_type().get_bit_width() > 32 {
@@ -2049,7 +1821,6 @@ impl<'ctx> CodeGen<'ctx> {
                     self.builder.position_at_end(then_bb);
                     self.push_scope();
 
-                    // Bindings: şimdilik i64 olarak sabit 0 bağla (enum data henüz yok)
                     let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
                     for b in bindings {
                         let alloca = self.builder.build_alloca(i64_ty, b)
@@ -2078,7 +1849,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // Hiç arm match etmediyse merge'e düş
         if !self.current_block_terminated() {
             self.builder.build_unconditional_branch(merge_bb)
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -2090,11 +1860,8 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(Some(res))
     }
 
-    // ── Expression → LLVM IR ─────────────────────────────────────────────────
-
     fn compile_expr(&mut self, expr: &Expr) -> CgResult<Option<BasicValueEnum<'ctx>>> {
         match expr {
-            // ── Literaller ────────────────────────────────────────────────────
             Expr::IntLit(n) => {
                 let v = self.ctx.i64_type().const_int(*n as u64, *n < 0);
                 Ok(Some(v.into()))
@@ -2119,7 +1886,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(v.into()))
             }
 
-            // ── Değişken okuma ────────────────────────────────────────────────
             Expr::Ident(name) => {
                 if let Some(slot) = self.lookup_var(name).cloned() {
                     let v = self.builder.build_load(slot.ty, slot.ptr, name)
@@ -2130,13 +1896,11 @@ impl<'ctx> CodeGen<'ctx> {
                 }
             }
 
-            // ── IO.print() / IO.println() ────────────────────────────────────
             Expr::StaticCall { class, method, args }
                 if class == "IO" && (method == "print" || method == "println") =>
             {
                 self.compile_io_print(args)?;
                 if method == "println" {
-                    // Newline ekle
                     let newline = self.build_global_string("\n")?;
                     let printf = self.module.get_function("printf").unwrap();
                     self.builder.build_call(printf, &[newline.into()], "")
@@ -2145,21 +1909,17 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(None)
             }
 
-            // ── Stdlib çağrıları ──────────────────────────────────────────────
             Expr::StaticCall { class, method, args } if
                 matches!(class.as_str(), "IO"|"Math"|"Time"|"Memory") =>
             {
                 self.compile_stdlib_call(class, method, args)
             }
 
-            // ── Diğer static çağrılar ─────────────────────────────────────────
             Expr::StaticCall { class, method, args } => {
                 self.compile_static_call(class, method, args)
             }
 
-            // ── Instance metod çağrısı ─────────────────────────────────────────
             Expr::MethodCall { object, method, args } => {
-                // Koleksiyon metod kontrolü
                 let obj_class = self.infer_object_class(object);
                 if let Some(cls) = obj_class.as_deref() {
                     if matches!(cls, "__List" | "__HashMap" | "__Pair") {
@@ -2167,9 +1927,7 @@ impl<'ctx> CodeGen<'ctx> {
                         return self.compile_collection_method(object, &cls_owned, method, args);
                     }
                 }
-                // IO.print gibi statik benzer çağrılar da buraya düşebilir
                 if let Expr::Ident(class_name) = object.as_ref() {
-                    // Statik metod gibi çağrı (nesne ismi ile)
                     let fn_name = format!("{}_{}", class_name, method);
                     if self.fns.contains_key(&fn_name)
                         || self.module.get_function(&fn_name).is_some()
@@ -2177,11 +1935,9 @@ impl<'ctx> CodeGen<'ctx> {
                         return self.compile_static_call(class_name, method, args);
                     }
                 }
-                // String metod kontrolü: nesne pointer ve metod adı tanınan string metodu
                 if Self::is_string_method(method) {
                     let str_val = self.compile_expr(object)?;
                     if let Some(v @ BasicValueEnum::PointerValue(_)) = str_val {
-                        // Sınıf adı bilinmiyorsa string metodu olarak dene
                         if obj_class.is_none() || obj_class.as_deref() == Some("String") {
                             let args_cloned = args.to_vec();
                             return self.compile_string_method(v, method, &args_cloned);
@@ -2191,9 +1947,7 @@ impl<'ctx> CodeGen<'ctx> {
                 self.compile_instance_method_call(object, method, args)
             }
 
-            // ── Constructor çağrısı ───────────────────────────────────────────
             Expr::ConstructorCall { class, args } => {
-                // Koleksiyon constructor'ları
                 match class.as_str() {
                     "List" | "List.of" | "List.empty" => {
                         let f = self.module.get_function("arc_list_new").unwrap();
@@ -2232,7 +1986,6 @@ impl<'ctx> CodeGen<'ctx> {
                     _ => {}
                 }
 
-                // Yerel değişkende kayıtlı lambda/fn pointer mı?
                 let fn_ptr_info = self.lookup_var(class.as_str())
                     .map(|s| (s.ptr, s.ty));
                 if let Some((fn_ptr_ptr, fn_ptr_ty)) = fn_ptr_info {
@@ -2295,17 +2048,14 @@ impl<'ctx> CodeGen<'ctx> {
                 }
             }
 
-            // ── Binary operatörler ────────────────────────────────────────────
             Expr::BinOp { op, left, right } => {
                 self.compile_binop(op, left, right)
             }
 
-            // ── Unary operatörler ─────────────────────────────────────────────
             Expr::UnaryOp { op, expr } => {
                 self.compile_unary(op, expr)
             }
 
-            // ── Type cast ─────────────────────────────────────────────────────
             Expr::Cast { expr, ty } => {
                 let val = self.compile_expr(expr)?;
                 if let (Some(v), Some(target_ty)) = (val, self.llvm_type(ty)) {
@@ -2316,7 +2066,6 @@ impl<'ctx> CodeGen<'ctx> {
                 }
             }
 
-            // ── Ternary ───────────────────────────────────────────────────────
             Expr::Ternary { cond, then, else_ } => {
                 let cur_fn   = self.cur_fn.unwrap();
                 let cond_val = self.compile_expr(cond)?
@@ -2348,12 +2097,10 @@ impl<'ctx> CodeGen<'ctx> {
                 }
             }
 
-            // ── Index ─────────────────────────────────────────────────────────
             Expr::Index { object, index } => {
                 let obj = self.compile_expr(object)?;
                 let idx = self.compile_expr(index)?;
                 if let (Some(o), Some(i)) = (obj, idx) {
-                    // Array element: unsafe GEP
                     let i64_idx = self.to_i64(i)?;
                     if let BasicValueEnum::PointerValue(ptr) = o {
                         let elem_ty = self.ctx.i64_type();
@@ -2369,7 +2116,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(None)
             }
 
-            // ── this ─────────────────────────────────────────────────────────
             Expr::This => {
                 if let Some(slot) = self.lookup_var("this").cloned() {
                     let v = self.builder.build_load(slot.ty, slot.ptr, "this_val")
@@ -2379,8 +2125,6 @@ impl<'ctx> CodeGen<'ctx> {
                     Ok(None)
                 }
             }
-            // Super → this pointer ile aynı, ama parent class context'inde
-            // Parent method/field erişimi için 'this' pointer'ını döndür
             Expr::Super => {
                 if let Some(slot) = self.lookup_var("this").cloned() {
                     let v = self.builder.build_load(slot.ty, slot.ptr, "super_val")
@@ -2391,28 +2135,22 @@ impl<'ctx> CodeGen<'ctx> {
                 }
             }
 
-            // ── await ─────────────────────────────────────────────────────────
             Expr::Await(inner) => self.compile_expr(inner),
 
-            // ── Match ─────────────────────────────────────────────────────────
             Expr::Match { expr, arms } => {
                 self.compile_match(expr, arms)
             }
 
-            // ── Lambda ───────────────────────────────────────────────────────
             Expr::Lambda { params, body } => {
                 self.compile_general_lambda(params, body)
             }
 
-            // ── FieldAccess ───────────────────────────────────────────────────
             Expr::FieldAccess { object, field } => {
                 if let Expr::Ident(class_or_enum) = object.as_ref() {
-                    // Enum.Variant → integer sabit
                     if let Some(val) = self.enum_variant_value(class_or_enum, field) {
                         let iv = self.ctx.i32_type().const_int(val as u64, false);
                         return Ok(Some(iv.into()));
                     }
-                    // ClassName.staticField → global değişken okuma
                     let global_name = format!("{}_{}", class_or_enum, field);
                     if let Some(gv) = self.module.get_global(&global_name) {
                         let ptr  = gv.as_pointer_value();
@@ -2426,11 +2164,6 @@ impl<'ctx> CodeGen<'ctx> {
                 self.compile_field_load(object, field)
             }
             Expr::NullSafeAccess { object, field, args } => {
-                // obj?.field veya obj?.method(args)
-                // Doğru phi-node implementasyonu:
-                //   null_bb  → null_ptr/0 → merge
-                //   ok_bb    → gerçek değer → merge
-                //   merge_bb → phi(null_val, ok_val)
                 let cur_fn = match self.cur_fn { Some(f) => f, None => return Ok(None) };
                 let obj_val = match self.compile_expr(object)? {
                     Some(v) => v,
@@ -2442,7 +2175,6 @@ impl<'ctx> CodeGen<'ctx> {
                 let ok_bb    = self.ctx.append_basic_block(cur_fn, "ns.ok");
                 let merge_bb = self.ctx.append_basic_block(cur_fn, "ns.merge");
 
-                // Null check → null_bb (= current block, falls through to merge)
                 let null_src_bb = self.builder.get_insert_block().unwrap();
                 let is_null = match obj_val {
                     BasicValueEnum::PointerValue(p) => {
@@ -2454,11 +2186,9 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                     _ => self.ctx.bool_type().const_int(0, false),
                 };
-                // is_null → merge_bb (null path), !is_null → ok_bb
                 self.builder.build_conditional_branch(is_null, merge_bb, ok_bb)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-                // ok_bb: gerçek dispatch
                 self.builder.position_at_end(ok_bb);
                 let result = match args {
                     Some(call_args) => {
@@ -2485,10 +2215,8 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_unconditional_branch(merge_bb)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-                // merge_bb: phi ile birleştir
                 self.builder.position_at_end(merge_bb);
 
-                // Phi node — tip her iki daldan türet
                 let merged: BasicValueEnum<'ctx> = match ok_val {
                     BasicValueEnum::PointerValue(_) => {
                         let phi = self.builder.build_phi(ptr_ty, "ns_phi")
@@ -2516,16 +2244,10 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── String interpolation → sprintf tabanlı string üretimi ────────────────
-    //
-    // IO.print içinde StrInterp doğrudan printf ile işlenir.
-    // Diğer bağlamlarda (return, VarDecl) sprintf ile gerçek string üretilir.
-
     fn compile_str_interp(
         &mut self,
         parts: &[StringPart],
     ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
-        // sprintf'i bildir
         if self.module.get_function("sprintf").is_none() {
             let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
             let i32_ty = self.ctx.i32_type();
@@ -2555,7 +2277,6 @@ impl<'ctx> CodeGen<'ctx> {
                             _ => "%d",
                         };
                         fmt_str.push_str(spec);
-                        // float promote, i8/i16 → i32
                         let promoted = match val {
                             BasicValueEnum::FloatValue(f) => {
                                 let f64ty = self.ctx.f64_type();
@@ -2581,7 +2302,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // malloc(1024) — heap buffer, fonksiyon sonrasında da geçerli
         let malloc_fn = self.module.get_function("malloc").unwrap();
         let i64_ty    = self.ctx.i64_type();
         let sz        = i64_ty.const_int(1024, false);
@@ -2592,7 +2312,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => return Ok(None),
         };
 
-        // sprintf(buf, fmt, args...)
         let fmt_ptr = self.build_global_string(&fmt_str)?;
         let sprintf_fn = self.module.get_function("sprintf").unwrap();
         let mut sprintf_args: Vec<inkwell::values::BasicMetadataValueEnum> =
@@ -2604,10 +2323,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(Some(buf_ptr.into()))
     }
 
-    // ── IO.print() ───────────────────────────────────────────────────────────
-
-    // ── Stdlib çağrıları ─────────────────────────────────────────────────────
-
     fn compile_stdlib_call(
         &mut self,
         class  : &str,
@@ -2615,18 +2330,15 @@ impl<'ctx> CodeGen<'ctx> {
         args   : &[Expr],
     ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
         match (class, method) {
-            // IO
             ("IO", "print") => {
                 self.compile_io_print(args)?;
                 Ok(None)
             }
             ("IO", "read") => {
-                // TODO: stdin okuma — şimdilik boş string
                 let s = self.build_global_string("")?;
                 Ok(Some(s.into()))
             }
 
-            // Math
             ("Math", "sqrt") => {
                 self.declare_math_fns();
                 if let Some(arg) = args.first() {
@@ -2652,7 +2364,6 @@ impl<'ctx> CodeGen<'ctx> {
                                 return Ok(r.try_as_basic_value().basic());
                             }
                             BasicValueEnum::IntValue(i) => {
-                                // abs = max(x, -x)
                                 let neg = self.builder.build_int_neg(i, "neg")
                                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                                 let cmp = self.builder.build_int_compare(
@@ -2688,14 +2399,11 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(self.ctx.f64_type().const_float(val).into()))
             }
 
-            // Time — stub implementasyonlar
             ("Time", "now") => {
-                // Şimdi için sabit string — gerçek impl Faza 5'te
                 let s = self.build_global_string("2026-01-01")?;
                 Ok(Some(s.into()))
             }
             ("Time", "generateId") => {
-                // Unique ID için static counter kullan
                 self.declare_arc_runtime();
                 let id_fn = self.module.get_function("arc_generate_id");
                 if let Some(f) = id_fn {
@@ -2703,13 +2411,11 @@ impl<'ctx> CodeGen<'ctx> {
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     Ok(r.try_as_basic_value().basic())
                 } else {
-                    // Fallback: sabit string
                     let s = self.build_global_string("id-1")?;
                     Ok(Some(s.into()))
                 }
             }
 
-            // Memory
             ("Memory", "alloc") => {
                 if let Some(arg) = args.first() {
                     if let Some(v) = self.compile_expr(arg)? {
@@ -2739,38 +2445,23 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(None)
             }
             ("Memory", "set") | ("Memory", "copy") => {
-                // TODO: memset/memcpy
                 for a in args { self.compile_expr(a)?; }
                 Ok(None)
             }
 
             _ => {
-                // Bilinmeyen stdlib çağrısı — argümanları derle, None döndür
                 for a in args { self.compile_expr(a)?; }
                 Ok(None)
             }
         }
     }
 
-    // ── Koleksiyon runtime — saf LLVM IR olarak üretilir ─────────────────────
-    //
-    // Flat-array düzeni (basit, yeterli):
-    //   ArcList  : malloc(8 * 257)  — [0]=len, [1..256]=data
-    //   ArcMap   : malloc(8 * 129)  — [0]=len, [1+i*2]=key_ptr, [2+i*2]=val_i64
-    //   ArcPair  : malloc(16)       — [0]=fst, [1]=snd  (i64 olarak)
-    //
-    // Her fonksiyon arc_generate_id gibi builder ile üretilir.
-    // Pipeline değişmez: .arm → LLVM IR → .o → .exe
-
     fn declare_collection_runtime(&mut self) {
-        // Önce gerekli extern'leri bildir
         self.declare_malloc();
         self.declare_strcmp();
 
-        // İmzaları önceden kayıt et (diğer fonksiyonlardan çağırabilmek için)
         self.pre_declare_arc_runtime_fns();
 
-        // Fonksiyon gövdelerini üret
         let prev = self.builder.get_insert_block();
 
         self.gen_arc_list_new();
@@ -2795,32 +2486,26 @@ impl<'ctx> CodeGen<'ctx> {
         let i32_ty = self.ctx.i32_type();
         let i8_ty  = self.ctx.i8_type();
 
-        // strlen(str) → i64
         if self.module.get_function("strlen").is_none() {
             let ft = i64_ty.fn_type(&[ptr_ty.into()], false);
             self.module.add_function("strlen", ft, None);
         }
-        // strstr(haystack, needle) → ptr
         if self.module.get_function("strstr").is_none() {
             let ft = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
             self.module.add_function("strstr", ft, None);
         }
-        // strncmp(a, b, n) → i32
         if self.module.get_function("strncmp").is_none() {
             let ft = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
             self.module.add_function("strncmp", ft, None);
         }
-        // strcat(dst, src) → ptr  (unsafe — dst must be big enough)
         if self.module.get_function("strcat").is_none() {
             let ft = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
             self.module.add_function("strcat", ft, None);
         }
-        // strcpy(dst, src) → ptr
         if self.module.get_function("strcpy").is_none() {
             let ft = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
             self.module.add_function("strcpy", ft, None);
         }
-        // toupper(c) / tolower(c) → i32
         if self.module.get_function("toupper").is_none() {
             let ft = i32_ty.fn_type(&[i32_ty.into()], false);
             self.module.add_function("toupper", ft, None);
@@ -2829,17 +2514,14 @@ impl<'ctx> CodeGen<'ctx> {
             let ft = i32_ty.fn_type(&[i32_ty.into()], false);
             self.module.add_function("tolower", ft, None);
         }
-        // strtok(str, delim) → ptr
         if self.module.get_function("strtok").is_none() {
             let ft = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
             self.module.add_function("strtok", ft, None);
         }
-        // strtol(str, endptr, base) → i64
         if self.module.get_function("strtol").is_none() {
             let ft = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i32_ty.into()], false);
             self.module.add_function("strtol", ft, None);
         }
-        // strtod(str, endptr) → f64
         if self.module.get_function("strtod").is_none() {
             let f64_ty = self.ctx.f64_type();
             let ft = f64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
@@ -2847,8 +2529,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
         let _ = i8_ty;
     }
-
-    // ── String metod dispatch ─────────────────────────────────────────────────
 
     fn is_string_method(method: &str) -> bool {
         matches!(method, "length" | "contains" | "startsWith" | "endsWith" |
@@ -2874,7 +2554,6 @@ impl<'ctx> CodeGen<'ctx> {
         };
 
         match method {
-            // str.length() → strlen(str) : i64
             "length" => {
                 let strlen = self.module.get_function("strlen").unwrap();
                 let r = self.builder.build_call(strlen, &[str_ptr.into()], "slen")
@@ -2882,7 +2561,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(r.try_as_basic_value().basic())
             }
 
-            // str.contains(sub) → strstr(str, sub) != null : bool
             "contains" => {
                 let arg = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
                     .unwrap_or(ptr_ty.const_null().into());
@@ -2908,7 +2586,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(self.ctx.bool_type().const_int(0, false).into()))
             }
 
-            // str.startsWith(prefix) → strncmp(str, prefix, strlen(prefix)) == 0 : bool
             "startsWith" => {
                 let arg = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
                     .unwrap_or(ptr_ty.const_null().into());
@@ -2933,7 +2610,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(self.ctx.bool_type().const_int(0, false).into()))
             }
 
-            // str.endsWith(suffix) → strncmp(str + (len-slen), suffix, slen) == 0
             "endsWith" => {
                 let arg = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
                     .unwrap_or(ptr_ty.const_null().into());
@@ -2961,7 +2637,6 @@ impl<'ctx> CodeGen<'ctx> {
                 };
                 let offset = self.builder.build_int_sub(str_len, suf_len, "ew_off")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
-                // GEP: str_ptr + offset
                 let i8_ty  = self.ctx.i8_type();
                 let start_ptr = unsafe {
                     self.builder.build_gep(i8_ty, str_ptr, &[offset], "ew_ptr")
@@ -2978,7 +2653,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(self.ctx.bool_type().const_int(0, false).into()))
             }
 
-            // str.compareTo(other) → strcmp(str, other) : Integer
             "compareTo" => {
                 self.declare_strcmp();
                 let arg = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
@@ -2998,19 +2672,16 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(None)
             }
 
-            // str.toUpper() → malloc(len+1) + loop calling toupper
             "toUpper" => {
                 let result = self.build_str_case_convert(str_ptr, true)?;
                 Ok(Some(result.into()))
             }
 
-            // str.toLower() → malloc(len+1) + loop calling tolower
             "toLower" => {
                 let result = self.build_str_case_convert(str_ptr, false)?;
                 Ok(Some(result.into()))
             }
 
-            // str.indexOf(sub) → strstr → offset
             "indexOf" => {
                 let arg = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
                     .unwrap_or(ptr_ty.const_null().into());
@@ -3040,9 +2711,7 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(i64_ty.const_int(u64::MAX, true).into()))
             }
 
-            // str.split(delim) → List<String> via strtok on a copy
             "split" => {
-                // malloc a copy, strtok it, push tokens into arc_list
                 let arg = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
                     .unwrap_or(ptr_ty.const_null().into());
                 let arg_ptr = match arg {
@@ -3053,7 +2722,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(result.into()))
             }
 
-            // str.parseInt() → strtol(str, null, 10)
             "parseInt" => {
                 let strtol  = self.module.get_function("strtol").unwrap();
                 let null_ptr = ptr_ty.const_null();
@@ -3063,7 +2731,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(r.try_as_basic_value().basic())
             }
 
-            // str.parseFloat() → strtod(str, null)
             "parseFloat" => {
                 let strtod = self.module.get_function("strtod").unwrap();
                 let null_ptr = ptr_ty.const_null();
@@ -3072,7 +2739,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(r.try_as_basic_value().basic())
             }
 
-            // str.substring(start, end) → malloc + memcpy
             "substring" => {
                 let start = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
                     .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
@@ -3091,13 +2757,11 @@ impl<'ctx> CodeGen<'ctx> {
                     Some(BasicValueEnum::PointerValue(p)) => p,
                     _ => return Ok(None),
                 };
-                // GEP: src_ptr + start
                 let i8_ty = self.ctx.i8_type();
                 let src_start = unsafe {
                     self.builder.build_gep(i8_ty, str_ptr, &[start], "sub_src")
                         .map_err(|e| CodeGenError::new(e.to_string()))?
                 };
-                // memcpy(buf, src_start, sub_len)
                 let memcpy_fn = self.module.get_function("memcpy").unwrap_or_else(|| {
                     let ptr = ptr_ty;
                     let ft  = ptr.fn_type(&[ptr.into(), ptr.into(), i64_ty.into()], false);
@@ -3105,7 +2769,6 @@ impl<'ctx> CodeGen<'ctx> {
                 });
                 self.builder.build_call(memcpy_fn, &[buf_ptr.into(), src_start.into(), sub_len.into()], "")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
-                // null terminator
                 let null_gep = unsafe {
                     self.builder.build_gep(i8_ty, buf_ptr, &[sub_len], "sub_null_gep")
                         .map_err(|e| CodeGenError::new(e.to_string()))?
@@ -3115,7 +2778,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(buf_ptr.into()))
             }
 
-            // str.replace(old, new) → strstr tabanlı basit impl (ilk occurrence)
             "replace" => {
                 let old_str = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
                     .and_then(|v| if let BasicValueEnum::PointerValue(p) = v { Some(p) } else { None })
@@ -3123,9 +2785,6 @@ impl<'ctx> CodeGen<'ctx> {
                 let new_str = args.get(1).and_then(|a| self.compile_expr(a).ok().flatten())
                     .and_then(|v| if let BasicValueEnum::PointerValue(p) = v { Some(p) } else { None })
                     .unwrap_or(ptr_ty.const_null());
-                // Basit: strstr ile konumu bul, yeni string oluştur
-                // malloc(strlen(src)) + strncpy(prefix) + new_str + suffix
-                // Şimdilik: strstr bulamazsa src'yi döndür
                 let strlen = self.module.get_function("strlen").unwrap();
                 let strstr = self.module.get_function("strstr").unwrap();
                 let malloc = self.module.get_function("malloc").unwrap();
@@ -3138,7 +2797,6 @@ impl<'ctx> CodeGen<'ctx> {
                     Some(BasicValueEnum::PointerValue(p)) => p,
                     _ => return Ok(Some(str_ptr.into())),
                 };
-                // prefix_len = found - src
                 let found_i  = self.builder.build_ptr_to_int(found_ptr, i64_ty, "rep_fi")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 let src_i    = self.builder.build_ptr_to_int(str_ptr, i64_ty, "rep_si")
@@ -3157,7 +2815,6 @@ impl<'ctx> CodeGen<'ctx> {
                     let r = self.builder.build_call(strlen, &[str_ptr.into()], "rep_sl").map_err(|e| CodeGenError::new(e.to_string()))?;
                     match r.try_as_basic_value().basic() { Some(BasicValueEnum::IntValue(v)) => v, _ => i64_ty.const_int(0, false) }
                 };
-                // total = pfx_len + new_len + (src_len - pfx_len - old_len) + 1
                 let sfx_len = self.builder.build_int_sub(src_len,
                     self.builder.build_int_add(pfx_len, old_len, "").map_err(|e| CodeGenError::new(e.to_string()))?,
                     "rep_sfxl").map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -3172,7 +2829,6 @@ impl<'ctx> CodeGen<'ctx> {
                     Some(BasicValueEnum::PointerValue(p)) => p,
                     _ => return Ok(Some(str_ptr.into())),
                 };
-                // Copy prefix
                 let i8_ty = self.ctx.i8_type();
                 let memcpy_fn = self.module.get_function("memcpy").unwrap_or_else(|| {
                     let ft = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
@@ -3184,10 +2840,8 @@ impl<'ctx> CodeGen<'ctx> {
                     self.builder.build_gep(i8_ty, buf_ptr, &[pfx_len], "rep_apfx")
                         .map_err(|e| CodeGenError::new(e.to_string()))?
                 };
-                // null terminate prefix
                 self.builder.build_store(buf_after_pfx, i8_ty.const_int(0, false))
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
-                // Append new_str + suffix
                 self.builder.build_call(strcat, &[buf_ptr.into(), new_str.into()], "")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 let old_end = unsafe {
@@ -3206,7 +2860,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // toUpper/toLower: malloc(len+1) + copy + loop
     fn build_str_case_convert(
         &mut self,
         src_ptr : inkwell::values::PointerValue<'ctx>,
@@ -3226,14 +2879,12 @@ impl<'ctx> CodeGen<'ctx> {
             self.module.get_function("tolower").unwrap()
         };
 
-        // len = strlen(src)
         let len_call = self.builder.build_call(strlen, &[src_ptr.into()], "cc_len")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let len = match len_call.try_as_basic_value().basic() {
             Some(BasicValueEnum::IntValue(v)) => v,
             _ => i64_ty.const_int(0, false),
         };
-        // buf = malloc(len + 1)
         let len1 = self.builder.build_int_add(len, i64_ty.const_int(1, false), "len1")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let buf_call = self.builder.build_call(malloc, &[len1.into()], "cc_buf")
@@ -3242,11 +2893,9 @@ impl<'ctx> CodeGen<'ctx> {
             Some(BasicValueEnum::PointerValue(p)) => p,
             _ => return Ok(ptr_ty.const_null()),
         };
-        // strcpy(buf, src)
         self.builder.build_call(strcpy, &[buf_ptr.into(), src_ptr.into()], "")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // Loop: i=0; while(buf[i]) { buf[i] = conv(buf[i]); i++; }
         let cur_fn = self.cur_fn.unwrap();
         let idx_alloca = self.builder.build_alloca(i64_ty, "cc_idx")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -3299,7 +2948,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(buf_ptr)
     }
 
-    // str.split(delim) → List<String>
     fn build_str_split(
         &mut self,
         src_ptr : inkwell::values::PointerValue<'ctx>,
@@ -3308,7 +2956,6 @@ impl<'ctx> CodeGen<'ctx> {
         let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
         let i64_ty = self.ctx.i64_type();
 
-        // list = arc_list_new()
         let list_new = self.module.get_function("arc_list_new").unwrap();
         let list_call = self.builder.build_call(list_new, &[], "split_list")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -3317,7 +2964,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => return Ok(ptr_ty.const_null()),
         };
 
-        // Make a copy of src for strtok (strtok modifies the string)
         let strlen = self.module.get_function("strlen").unwrap();
         let malloc = self.module.get_function("malloc").unwrap();
         let strcpy = self.module.get_function("strcpy").unwrap();
@@ -3338,7 +2984,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_call(strcpy, &[copy_ptr.into(), src_ptr.into()], "")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // token = strtok(copy, delim)
         let strtok = self.module.get_function("strtok").unwrap();
         let token_alloca = self.builder.build_alloca(ptr_ty, "sp_tok")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -3351,7 +2996,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(token_alloca, first_tok)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // while (token != null) { list.append(token); token = strtok(null, delim); }
         let cur_fn   = self.cur_fn.unwrap();
         let cond_bb  = self.ctx.append_basic_block(cur_fn, "sp.cond");
         let body_bb  = self.ctx.append_basic_block(cur_fn, "sp.body");
@@ -3405,7 +3049,6 @@ impl<'ctx> CodeGen<'ctx> {
         let void_ty = self.ctx.void_type();
 
         let decls: &[(&str, bool, &[inkwell::types::BasicMetadataTypeEnum], bool)] = &[
-            // (name, returns_ptr, params, is_void)
         ];
         let _ = decls;
 
@@ -3444,9 +3087,6 @@ impl<'ctx> CodeGen<'ctx> {
         decl!("arc_pair_second", i64,  [ptr_ty.into()]);
     }
 
-    // ── arc_list_new() → ptr ─────────────────────────────────────────────────
-    // malloc(8 * 257): [0]=len, [1..256]=i64 data
-
     fn gen_arc_list_new(&mut self) {
         let fn_val = match self.module.get_function("arc_list_new") {
             Some(f) if f.count_basic_blocks() > 0 => return,
@@ -3459,19 +3099,14 @@ impl<'ctx> CodeGen<'ctx> {
         let entry = self.ctx.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(entry);
 
-        // malloc(8 * 257) bytes
         let sz = i64_ty.const_int(8 * 257, false);
         let ptr = self.builder.build_call(malloc, &[sz.into()], "list_ptr")
             .unwrap().try_as_basic_value().basic().unwrap();
-        // Store len=0 at offset 0
         if let inkwell::values::BasicValueEnum::PointerValue(p) = ptr {
             self.builder.build_store(p, i64_ty.const_int(0, false)).unwrap();
             self.builder.build_return(Some(&p)).unwrap();
         }
     }
-
-    // ── arc_list_append(ptr list, i64 item) → void ───────────────────────────
-    // list[0]++ then list[old_len+1] = item
 
     fn gen_arc_list_append(&mut self) {
         let fn_val = match self.module.get_function("arc_list_append") {
@@ -3486,26 +3121,21 @@ impl<'ctx> CodeGen<'ctx> {
         let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
         let item     = fn_val.get_nth_param(1).unwrap().into_int_value();
 
-        // len = list[0]
         let len = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), list_ptr, "len"
         ).unwrap().into_int_value();
 
-        // list[len+1] = item
         let idx = self.builder.build_int_add(len, i64_ty.const_int(1, false), "idx").unwrap();
         let elem_ptr = unsafe {
             self.builder.build_gep(i64_ty, list_ptr, &[idx], "elem_ptr").unwrap()
         };
         self.builder.build_store(elem_ptr, item).unwrap();
 
-        // list[0] = len+1
         let new_len = self.builder.build_int_add(len, i64_ty.const_int(1, false), "nl").unwrap();
         self.builder.build_store(list_ptr, new_len).unwrap();
 
         self.builder.build_return(None).unwrap();
     }
-
-    // ── arc_list_length(ptr list) → i64 ─────────────────────────────────────
 
     fn gen_arc_list_length(&mut self) {
         let fn_val = match self.module.get_function("arc_list_length") {
@@ -3524,8 +3154,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_return(Some(&len)).unwrap();
     }
 
-    // ── arc_list_get(ptr list, i64 idx) → i64 ───────────────────────────────
-
     fn gen_arc_list_get(&mut self) {
         let fn_val = match self.module.get_function("arc_list_get") {
             Some(f) if f.count_basic_blocks() > 0 => return,
@@ -3539,7 +3167,6 @@ impl<'ctx> CodeGen<'ctx> {
         let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
         let idx      = fn_val.get_nth_param(1).unwrap().into_int_value();
 
-        // real_idx = idx + 1
         let real_idx = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "ri").unwrap();
         let elem_ptr = unsafe {
             self.builder.build_gep(i64_ty, list_ptr, &[real_idx], "ep").unwrap()
@@ -3549,8 +3176,6 @@ impl<'ctx> CodeGen<'ctx> {
         ).unwrap();
         self.builder.build_return(Some(&val)).unwrap();
     }
-
-    // ── arc_list_set(ptr list, i64 idx, i64 val) → void ────────────────────────
 
     fn gen_arc_list_set(&mut self) {
         let fn_name = "arc_list_set";
@@ -3577,8 +3202,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_return(None).unwrap();
     }
 
-    // ── arc_list_filter(ptr list, ptr fn_ptr) → ptr ──────────────────────────
-
     fn gen_arc_list_filter(&mut self) {
         let fn_val = match self.module.get_function("arc_list_filter") {
             Some(f) if f.count_basic_blocks() > 0 => return,
@@ -3594,7 +3217,6 @@ impl<'ctx> CodeGen<'ctx> {
         let next_bb   = self.ctx.append_basic_block(fn_val, "filter.next");
         let exit_bb   = self.ctx.append_basic_block(fn_val, "filter.exit");
 
-        // entry: out = arc_list_new(), len = arc_list_length(list), idx = 0
         self.builder.position_at_end(entry_bb);
         let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
         let fn_ptr   = fn_val.get_nth_param(1).unwrap().into_pointer_value();
@@ -3613,7 +3235,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(idx_slot, i64_ty.const_int(0, false)).unwrap();
         self.builder.build_unconditional_branch(cond_bb).unwrap();
 
-        // cond: idx < len
         self.builder.position_at_end(cond_bb);
         let idx = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), idx_slot, "idx"
@@ -3623,7 +3244,6 @@ impl<'ctx> CodeGen<'ctx> {
         ).unwrap();
         self.builder.build_conditional_branch(cmp, body_bb, exit_bb).unwrap();
 
-        // body: item = get(list, idx), res = fn(item)
         self.builder.position_at_end(body_bb);
         let idx2 = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), idx_slot, "idx2"
@@ -3631,7 +3251,6 @@ impl<'ctx> CodeGen<'ctx> {
         let item = self.builder.build_call(get_fn, &[list_ptr.into(), idx2.into()], "item")
             .unwrap().try_as_basic_value().basic().unwrap().into_int_value();
 
-        // Indirect call through fn_ptr: fn_ptr(item) → i64
         let fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
         let res = self.builder.build_indirect_call(fn_ty, fn_ptr, &[item.into()], "res")
             .unwrap().try_as_basic_value().basic().unwrap().into_int_value();
@@ -3640,13 +3259,11 @@ impl<'ctx> CodeGen<'ctx> {
         ).unwrap();
         self.builder.build_conditional_branch(is_true, append_bb, next_bb).unwrap();
 
-        // append: arc_list_append(out, item)
         self.builder.position_at_end(append_bb);
         let out_ptr = out.into_pointer_value();
         self.builder.build_call(app_fn, &[out_ptr.into(), item.into()], "").unwrap();
         self.builder.build_unconditional_branch(next_bb).unwrap();
 
-        // next: idx++
         self.builder.position_at_end(next_bb);
         let idx3 = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), idx_slot, "idx3"
@@ -3655,13 +3272,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(idx_slot, idx4).unwrap();
         self.builder.build_unconditional_branch(cond_bb).unwrap();
 
-        // exit
         self.builder.position_at_end(exit_bb);
         self.builder.build_return(Some(&out)).unwrap();
     }
-
-    // ── arc_map_new() → ptr ──────────────────────────────────────────────────
-    // malloc(8 * 129): [0]=len, [1+i*2]=key_ptr (i64), [2+i*2]=val (i64)
 
     fn gen_arc_map_new(&mut self) {
         let fn_val = match self.module.get_function("arc_map_new") {
@@ -3679,14 +3292,10 @@ impl<'ctx> CodeGen<'ctx> {
         let ptr = self.builder.build_call(malloc, &[sz.into()], "map_ptr")
             .unwrap().try_as_basic_value().basic().unwrap();
         if let inkwell::values::BasicValueEnum::PointerValue(p) = ptr {
-            // len = 0
             self.builder.build_store(p, i64_ty.const_int(0, false)).unwrap();
             self.builder.build_return(Some(&p)).unwrap();
         }
     }
-
-    // ── arc_map_set(ptr map, ptr key, i64 val) → void ───────────────────────
-    // Lineer arama; eşleşirse güncelle, yoksa ekle
 
     fn gen_arc_map_set(&mut self) {
         let fn_val = match self.module.get_function("arc_map_set") {
@@ -3717,7 +3326,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(i_slot, i64_ty.const_int(0, false)).unwrap();
         self.builder.build_unconditional_branch(cond_bb).unwrap();
 
-        // cond: i < len
         self.builder.position_at_end(cond_bb);
         let i = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i"
@@ -3727,12 +3335,10 @@ impl<'ctx> CodeGen<'ctx> {
         ).unwrap();
         self.builder.build_conditional_branch(lt, check_bb, insert_bb).unwrap();
 
-        // check: existing_key = map[1+i*2]; if strcmp==0 → update
         self.builder.position_at_end(check_bb);
         let i2 = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i2"
         ).unwrap().into_int_value();
-        // key_idx = 1 + i*2
         let two    = i64_ty.const_int(2, false);
         let one    = i64_ty.const_int(1, false);
         let i2t    = self.builder.build_int_mul(i2, two, "i2t").unwrap();
@@ -3740,7 +3346,6 @@ impl<'ctx> CodeGen<'ctx> {
         let kslot  = unsafe {
             self.builder.build_gep(i64_ty, map_ptr, &[ki], "kslot").unwrap()
         };
-        // load stored key as i64, then inttoptr
         let stored_key_i = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), kslot, "ski"
         ).unwrap().into_int_value();
@@ -3755,7 +3360,6 @@ impl<'ctx> CodeGen<'ctx> {
         ).unwrap();
         self.builder.build_conditional_branch(cmp_zero, update_bb, next_bb).unwrap();
 
-        // update: map[ki+1] = val; return
         self.builder.position_at_end(update_bb);
         let i3 = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i3"
@@ -3768,7 +3372,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(vslot, val_v).unwrap();
         self.builder.build_return(None).unwrap();
 
-        // next: i++
         self.builder.position_at_end(next_bb);
         let i4 = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i4"
@@ -3777,7 +3380,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(i_slot, i5).unwrap();
         self.builder.build_unconditional_branch(cond_bb).unwrap();
 
-        // insert: map[1+len*2] = key (as i64), map[2+len*2] = val, len++
         self.builder.position_at_end(insert_bb);
         let len2 = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), map_ptr, "len2"
@@ -3786,7 +3388,6 @@ impl<'ctx> CodeGen<'ctx> {
         let ki2  = self.builder.build_int_add(l2t, one, "ki2").unwrap();
         let vi2  = self.builder.build_int_add(l2t, i64_ty.const_int(2, false), "vi2").unwrap();
 
-        // store key as i64 (ptrtoint)
         let key_as_i = self.builder.build_ptr_to_int(key_ptr, i64_ty, "kasi").unwrap();
         let kslot2 = unsafe {
             self.builder.build_gep(i64_ty, map_ptr, &[ki2], "ksl2").unwrap()
@@ -3802,8 +3403,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(map_ptr, new_len).unwrap();
         self.builder.build_return(None).unwrap();
     }
-
-    // ── arc_map_get_or_default(ptr map, ptr key, i64 def) → i64 ─────────────
 
     fn gen_arc_map_get_or_default(&mut self) {
         let fn_val = match self.module.get_function("arc_map_get_or_default") {
@@ -3834,7 +3433,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(i_slot, i64_ty.const_int(0, false)).unwrap();
         self.builder.build_unconditional_branch(cond_bb).unwrap();
 
-        // cond
         self.builder.position_at_end(cond_bb);
         let i = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "i"
@@ -3844,7 +3442,6 @@ impl<'ctx> CodeGen<'ctx> {
         ).unwrap();
         self.builder.build_conditional_branch(lt, check_bb, miss_bb).unwrap();
 
-        // check
         self.builder.position_at_end(check_bb);
         let ic = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "ic"
@@ -3869,7 +3466,6 @@ impl<'ctx> CodeGen<'ctx> {
         ).unwrap();
         self.builder.build_conditional_branch(eq, found_bb, next_bb).unwrap();
 
-        // found: return map[ki+1]
         self.builder.position_at_end(found_bb);
         let if2 = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "if2"
@@ -3884,7 +3480,6 @@ impl<'ctx> CodeGen<'ctx> {
         ).unwrap();
         self.builder.build_return(Some(&val)).unwrap();
 
-        // next: i++
         self.builder.position_at_end(next_bb);
         let in_ = self.builder.build_load(
             inkwell::types::BasicTypeEnum::IntType(i64_ty), i_slot, "in"
@@ -3893,13 +3488,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(i_slot, in2).unwrap();
         self.builder.build_unconditional_branch(cond_bb).unwrap();
 
-        // miss
         self.builder.position_at_end(miss_bb);
         self.builder.build_return(Some(&def_v)).unwrap();
     }
-
-    // ── arc_pair_new(i64 fst, i64 snd) → ptr ────────────────────────────────
-    // malloc(16): [0]=fst, [1]=snd
 
     fn gen_arc_pair_new(&mut self) {
         let fn_val = match self.module.get_function("arc_pair_new") {
@@ -3921,9 +3512,7 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap().try_as_basic_value().basic().unwrap();
 
         if let inkwell::values::BasicValueEnum::PointerValue(ptr) = p {
-            // [0] = fst
             self.builder.build_store(ptr, fst).unwrap();
-            // [1] = snd
             let snd_ptr = unsafe {
                 self.builder.build_gep(i64_ty, ptr, &[i64_ty.const_int(1, false)], "snd_ptr").unwrap()
             };
@@ -3931,8 +3520,6 @@ impl<'ctx> CodeGen<'ctx> {
             self.builder.build_return(Some(&ptr)).unwrap();
         }
     }
-
-    // ── arc_pair_first(ptr pair) → i64 ──────────────────────────────────────
 
     fn gen_arc_pair_first(&mut self) {
         let fn_val = match self.module.get_function("arc_pair_first") {
@@ -3950,8 +3537,6 @@ impl<'ctx> CodeGen<'ctx> {
         ).unwrap();
         self.builder.build_return(Some(&val)).unwrap();
     }
-
-    // ── arc_pair_second(ptr pair) → i64 ─────────────────────────────────────
 
     fn gen_arc_pair_second(&mut self) {
         let fn_val = match self.module.get_function("arc_pair_second") {
@@ -3987,7 +3572,6 @@ impl<'ctx> CodeGen<'ctx> {
     fn declare_arc_runtime(&mut self) {
         if self.module.get_function("arc_generate_id").is_some() { return; }
 
-        // sprintf declare et
         if self.module.get_function("sprintf").is_none() {
             let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
             let i32_ty = self.ctx.i32_type();
@@ -3995,55 +3579,44 @@ impl<'ctx> CodeGen<'ctx> {
             self.module.add_function("sprintf", ft, None);
         }
 
-        // arc_generate_id: her çağrıda benzersiz "id-N" string döndür
         let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
         let i64_ty = self.ctx.i64_type();
 
-        // Global counter
         let counter = self.module.add_global(i64_ty, None, "arc_id_counter");
         counter.set_initializer(&i64_ty.const_int(0, false));
         counter.set_linkage(inkwell::module::Linkage::Internal);
 
-        // 32 byte buffer
         let buf_ty = self.ctx.i8_type().array_type(32);
         let buf = self.module.add_global(buf_ty, None, "arc_id_buf");
         buf.set_initializer(&buf_ty.const_zero());
         buf.set_linkage(inkwell::module::Linkage::Internal);
 
-        // format string "id-%lld"
         let fmt_bytes = b"id-%lld\0";
         let fmt_arr = self.ctx.const_string(fmt_bytes, false);
         let fmt_global = self.module.add_global(fmt_arr.get_type(), None, "arc_id_fmt");
         fmt_global.set_initializer(&fmt_arr);
         fmt_global.set_linkage(inkwell::module::Linkage::Internal);
 
-        // Fonksiyon gövdesi
         let ft = ptr_ty.fn_type(&[], false);
         let fn_val = self.module.add_function("arc_generate_id", ft, None);
         let entry = self.ctx.append_basic_block(fn_val, "entry");
 
-        // Builder'ın mevcut konumunu kaydet
         let prev_block = self.builder.get_insert_block();
         self.builder.position_at_end(entry);
 
-        // Counter yükle ve artır
         let n = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), counter.as_pointer_value(), "n")
             .unwrap().into_int_value();
         let n1 = self.builder.build_int_add(n, i64_ty.const_int(1, false), "n1").unwrap();
         self.builder.build_store(counter.as_pointer_value(), n1).unwrap();
 
-        // buf pointer
         let buf_ptr = buf.as_pointer_value();
 
-        // sprintf(buf, fmt, n)
         let sprintf = self.module.get_function("sprintf").unwrap();
         let fmt_ptr = fmt_global.as_pointer_value();
         self.builder.build_call(sprintf, &[buf_ptr.into(), fmt_ptr.into(), n.into()], "").unwrap();
 
-        // buf döndür
         self.builder.build_return(Some(&buf_ptr)).unwrap();
 
-        // Builder'ı eski konuma geri döndür
         if let Some(bb) = prev_block {
             self.builder.position_at_end(bb);
         }
@@ -4082,28 +3655,23 @@ impl<'ctx> CodeGen<'ctx> {
         }
 
         match &args[0] {
-            // Düz string literal — newline ekle
             Expr::StrLit(s) => {
                 let fmt = self.build_global_string(&format!("{}\n", s))?;
                 self.builder.build_call(printf, &[fmt.into()], "print")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
             }
 
-            // String interpolation — ${expr} → printf format specifier
             Expr::StrInterp(parts) => {
-                // 1. Format string ve değerleri topla
                 let mut fmt_str   = String::new();
                 let mut interp_vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
 
                 for part in parts {
                     match part {
                         StringPart::Text(t) => {
-                            // % işaretlerini escape et
                             fmt_str.push_str(&t.replace('%', "%%"));
                         }
                         StringPart::Interp(inner_expr) => {
                             if let Some(val) = self.compile_expr(inner_expr)? {
-                                // Tipi bakarak format specifier seç
                                 let spec = match val {
                                     BasicValueEnum::IntValue(iv) => {
                                         match iv.get_type().get_bit_width() {
@@ -4116,7 +3684,6 @@ impl<'ctx> CodeGen<'ctx> {
                                     _ => "%d",
                                 };
                                 fmt_str.push_str(spec);
-                                // Float için double promote
                                 let promoted = match val {
                                     BasicValueEnum::FloatValue(f) => {
                                         let f64ty = self.ctx.f64_type();
@@ -4127,7 +3694,6 @@ impl<'ctx> CodeGen<'ctx> {
                                             val
                                         }
                                     }
-                                    // i8/i16/i32 → i32 promote for printf
                                     BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() < 32 => {
                                         let i32ty = self.ctx.i32_type();
                                         self.builder.build_int_s_extend(iv, i32ty, "sext")
@@ -4153,7 +3719,6 @@ impl<'ctx> CodeGen<'ctx> {
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
             }
 
-            // Diğer expr — değeri doğrudan yazdır
             other => {
                 if let Some(val) = self.compile_expr(other)? {
                     let (fmt_s, promoted) = match val {
@@ -4181,8 +3746,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // ── Static çağrı ─────────────────────────────────────────────────────────
-
     fn compile_static_call(
         &mut self,
         class  : &str,
@@ -4191,7 +3754,6 @@ impl<'ctx> CodeGen<'ctx> {
     ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
         let fn_name = format!("{}_{}", class, method);
 
-        // Önce gerçek static metod olarak dene
         if let Some(fn_val) = self.fns.get(&fn_name).copied()
             .or_else(|| self.module.get_function(&fn_name))
         {
@@ -4205,11 +3767,8 @@ impl<'ctx> CodeGen<'ctx> {
             return Ok(call.try_as_basic_value().basic());
         }
 
-        // Bulunamadı — belki 'class' bir değişken ismi (instance method call)
-        // Parser StaticCall üretir: c.increment() → StaticCall("c","increment")
         let obj_expr = Expr::Ident(class.to_string());
 
-        // Koleksiyon değişkeni kontrolü (List, HashMap, Pair)
         if let Some(col_cls) = self.infer_object_class(&obj_expr) {
             if matches!(col_cls.as_str(), "__List" | "__HashMap" | "__Pair") {
                 let col_cls_owned = col_cls.clone();
@@ -4222,7 +3781,6 @@ impl<'ctx> CodeGen<'ctx> {
             if let Some(fn_val) = self.fns.get(&instance_fn).copied()
                 .or_else(|| self.module.get_function(&instance_fn))
             {
-                // this pointer'ı yükle
                 let this_ptr = if let Some(slot) = self.lookup_var(class).cloned() {
                     self.builder.build_load(slot.ty, slot.ptr, "this_load")
                         .map_err(|e| CodeGenError::new(e.to_string()))?
@@ -4230,7 +3788,6 @@ impl<'ctx> CodeGen<'ctx> {
                     return Ok(None);
                 };
 
-                // Argümanları derle
                 let compiled_args: Vec<BasicValueEnum<'ctx>> = args.iter()
                     .filter_map(|a| self.compile_expr(a).ok().flatten())
                     .collect();
@@ -4245,8 +3802,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // String metod kontrolü: 'class' isimli bir değişken ptr ise ve string metoduysa
-        // (parser s.length() → StaticCall { class: "s", method: "length" } olarak parse eder)
         if Self::is_string_method(method) {
             if let Some(slot) = self.lookup_var(class).cloned() {
                 if slot.class_name.is_none() {
@@ -4263,8 +3818,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(None)
     }
 
-    // ── Instance metod çağrısı ────────────────────────────────────────────────
-
     fn compile_method_call(
         &mut self,
         _object : &Expr,
@@ -4275,24 +3828,19 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(None)
     }
 
-    // ── Instance metod çağrısı ────────────────────────────────────────────────
-
     fn compile_instance_method_call(
         &mut self,
         object : &Expr,
         method : &str,
         args   : &[Expr],
     ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
-        // Nesnenin tipi — class adını bul
         let class_name = self.infer_object_class(object);
 
-        // this pointer'ı derle
         let this_ptr = match self.compile_expr(object)? {
             Some(v) => v,
             None    => return Ok(None),
         };
 
-        // Metod fonksiyonunu bul
         let fn_name = match &class_name {
             Some(c) => format!("{}_{}", c, method),
             None    => return Ok(None),
@@ -4305,7 +3853,6 @@ impl<'ctx> CodeGen<'ctx> {
             None    => return Ok(None),
         };
 
-        // Argümanları derle: this + args
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![this_ptr.into()];
         for a in args {
             if let Some(v) = self.compile_expr(a)? {
@@ -4317,8 +3864,6 @@ impl<'ctx> CodeGen<'ctx> {
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         Ok(call.try_as_basic_value().basic())
     }
-
-    // ── Field okuma ──────────────────────────────────────────────────────────
 
     fn compile_field_load(
         &mut self,
@@ -4354,7 +3899,6 @@ impl<'ctx> CodeGen<'ctx> {
         let i32_ty = self.ctx.i32_type();
         let gep = self.builder.build_struct_gep(struct_ty, ptr, idx, field)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        // Field tipini struct'tan al
         let field_ty = struct_ty.get_field_type_at_index(idx)
             .ok_or_else(|| CodeGenError::new(format!("field {} not found", field)))?;
         let val = self.builder.build_load(field_ty, gep, field)
@@ -4383,9 +3927,7 @@ impl<'ctx> CodeGen<'ctx> {
         let field_ty = struct_ty.get_field_type_at_index(idx)
             .ok_or_else(|| CodeGenError::new(format!("field {} not found", field)))?;
 
-        // ARC: field pointer tipinde ve class instance'ı ise release eski + retain yeni
         if matches!(field_ty, BasicTypeEnum::PointerType(_)) {
-            // Field'ın Arimo class adını bul
             let field_class = self.field_arimo_types
                 .get(class)
                 .and_then(|m| m.get(field))
@@ -4394,17 +3936,14 @@ impl<'ctx> CodeGen<'ctx> {
 
             if let Some(ref fcn) = field_class {
                 if !self.manual_memory_classes.contains(fcn.as_str()) {
-                    // Eski field değerini yükle ve release et
                     if let Ok(old_val) = self.builder.build_load(field_ty, gep, "field_old") {
                         if let BasicValueEnum::PointerValue(old_ptr) = old_val {
                             let fcn_clone = fcn.clone();
-                            // Geçici VarSlot ile release (alloca olarak gep kullanıyoruz — inline release)
                             let i64_ty  = self.ctx.i64_type();
                             let ptr_ty  = self.ctx.ptr_type(inkwell::AddressSpace::default());
                             let cur_fn  = self.cur_fn;
                             if let Some(cur_fn) = cur_fn {
                                 if !self.current_block_terminated() {
-                                    // Null check + dec + maybe free inline
                                     let dec_bb  = self.ctx.append_basic_block(cur_fn, "fs.dec");
                                     let free_bb = self.ctx.append_basic_block(cur_fn, "fs.free");
                                     let cont_bb = self.ctx.append_basic_block(cur_fn, "fs.cont");
@@ -4453,7 +3992,6 @@ impl<'ctx> CodeGen<'ctx> {
                             }
                         }
                     }
-                    // Yeni değeri retain et
                     if let BasicValueEnum::PointerValue(new_ptr) = val {
                         let fcn_clone = fcn.clone();
                         self.arc_retain_ptr(new_ptr, &fcn_clone)?;
@@ -4468,7 +4006,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // Nesnenin class adını VarSlot'tan, field tipinden veya cur_class'tan çıkar
     fn infer_object_class(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::This => self.cur_class.clone(),
@@ -4482,10 +4019,8 @@ impl<'ctx> CodeGen<'ctx> {
                 }
                 None
             }
-            // this.field → field'ın tipi
             Expr::FieldAccess { object, field } => {
                 let owner_class = self.infer_object_class(object)?;
-                // field_arimo_types'ta bu class'ın field tipini bul
                 self.field_arimo_types
                     .get(&owner_class)?
                     .get(field.as_str())
@@ -4495,19 +4030,15 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── Binary operatörler ────────────────────────────────────────────────────
-
     fn compile_binop(
         &mut self,
         op    : &BinOp,
         left  : &Expr,
         right : &Expr,
     ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
-        // Atama özel işlenir
         if matches!(op, BinOp::Assign) {
             return self.compile_assign(left, right);
         }
-        // Compound assignment
         if matches!(op, BinOp::AddAssign | BinOp::SubAssign | BinOp::MulAssign | BinOp::DivAssign) {
             return self.compile_compound_assign(op, left, right);
         }
@@ -4530,7 +4061,6 @@ impl<'ctx> CodeGen<'ctx> {
                     self.builder.build_float_add(l, r, "fadd")
                         .map_err(|e| CodeGenError::new(e.to_string()))?.into()
                 }
-                // String concat: ptr + ptr → malloc + strcpy + strcat
                 (BasicValueEnum::PointerValue(l), BasicValueEnum::PointerValue(r)) => {
                     self.declare_string_fns();
                     let i64_ty = self.ctx.i64_type();
@@ -4651,7 +4181,6 @@ impl<'ctx> CodeGen<'ctx> {
             },
             BinOp::Shl => match (lv, rv) {
                 (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
-                    // Shift miktarı sol operandla aynı tipte olmalı
                     let r_cast = self.match_int_width(r, l.get_type())?;
                     self.builder.build_left_shift(l, r_cast, "shl")
                         .map_err(|e| CodeGenError::new(e.to_string()))?.into()
@@ -4672,8 +4201,6 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn compile_assign(&mut self, target: &Expr, value: &Expr) -> CgResult<Option<BasicValueEnum<'ctx>>> {
-        // RHS'nin kaynağını belirle: Ident ise mevcut nesne kopyalanıyor → retain gerekli
-        // StaticCall/MethodCall/ConstructorCall → callee +1 döndürüyor → retain YAPMA
         let rhs_needs_retain = matches!(value, Expr::Ident(_));
 
         let val = self.compile_expr(value)?;
@@ -4683,17 +4210,14 @@ impl<'ctx> CodeGen<'ctx> {
                     if let Some(slot) = self.lookup_var(name).cloned() {
                         let coerced = self.coerce_value(v, slot.ty)?;
 
-                        // ARC: eski değeri her zaman release et, yeni değeri sadece Ident ise retain et
                         if let Some(ref cn) = slot.class_name.clone() {
                             if !matches!(cn.as_str(), "__List" | "__HashMap" | "__Pair") {
-                                // Eski değeri release et
                                 self.arc_release_var(VarSlot {
                                     ptr: slot.ptr,
                                     ty: slot.ty,
                                     class_name: Some(cn.clone()),
                                     elem_class: None,
                                 })?;
-                                // Yeni değeri retain et — sadece Ident RHS ise
                                 if rhs_needs_retain {
                                     if let BasicValueEnum::PointerValue(new_ptr) = coerced {
                                         let cn_clone = cn.clone();
@@ -4707,9 +4231,7 @@ impl<'ctx> CodeGen<'ctx> {
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
                     }
                 }
-                // this.field = value  veya  ClassName.staticField = value
                 Expr::FieldAccess { object, field } => {
-                    // Static field yazmayı önce dene
                     if let Expr::Ident(class_name) = object.as_ref() {
                         let global_name = format!("{}_{}", class_name, field);
                         if let Some(gv) = self.module.get_global(&global_name) {
@@ -4720,7 +4242,6 @@ impl<'ctx> CodeGen<'ctx> {
                                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                             }
                         } else {
-                            // Instance field yazma
                             let cn = self.infer_object_class(object);
                             let obj_ptr = self.compile_expr(object)?;
                             if let (Some(cn), Some(BasicValueEnum::PointerValue(ptr))) = (cn, obj_ptr) {
@@ -4763,8 +4284,6 @@ impl<'ctx> CodeGen<'ctx> {
         };
         self.compile_assign(target, &computed)
     }
-
-    // ── Unary operatörler ─────────────────────────────────────────────────────
 
     fn compile_unary(&mut self, op: &UnaryOp, expr: &Expr) -> CgResult<Option<BasicValueEnum<'ctx>>> {
         let val = self.compile_expr(expr)?;
@@ -4824,15 +4343,12 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── Yardımcılar ──────────────────────────────────────────────────────────
-
     fn build_global_string(&mut self, s: &str) -> CgResult<PointerValue<'ctx>> {
         let gs = self.builder.build_global_string_ptr(s, "str")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         Ok(gs.as_pointer_value())
     }
 
-    /// Shift için: sağ operandı sol operandın genişliğine getir
     fn any_to_basic(&self, any: inkwell::types::AnyTypeEnum<'ctx>) -> Option<BasicTypeEnum<'ctx>> {
         use inkwell::types::AnyTypeEnum;
         match any {
@@ -5021,13 +4537,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── Koleksiyon metod dispatch ─────────────────────────────────────────────
-
-    // ── Koleksiyon yardımcı fonksiyonları ────────────────────────────────────
-
-    // List iteration helper: arc_list_length + arc_list_get + arc_list_append döngüsü ile
-    // her eleman için lambda(item) → yeni liste üret
-
     fn build_list_map(
         &mut self,
         src_ptr : inkwell::values::PointerValue<'ctx>,
@@ -5111,7 +4620,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(result_ptr)
     }
 
-    // any/all: predicate'e göre boolean aggregate
     fn build_list_any_all(
         &mut self,
         src_ptr : inkwell::values::PointerValue<'ctx>,
@@ -5186,8 +4694,6 @@ impl<'ctx> CodeGen<'ctx> {
             let is_nonzero = self.builder.build_int_compare(
                 inkwell::IntPredicate::NE, pred_i64, i64_ty.const_int(0, false), "aa_nz"
             ).map_err(|e| CodeGenError::new(e.to_string()))?;
-            // any: if true → set result = true, break
-            // all: if false → set result = false, break
             let trigger = if is_any { is_nonzero } else {
                 self.builder.build_not(is_nonzero, "aa_not")
                     .map_err(|e| CodeGenError::new(e.to_string()))?
@@ -5203,7 +4709,6 @@ impl<'ctx> CodeGen<'ctx> {
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.build_store(idx_alloca, next)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        // Note: branching to cond_bb already done above, so early_bb handles early exit
         self.builder.position_at_end(early_bb);
         self.builder.build_store(res_alloca, i1_ty.const_int(if is_any { 1 } else { 0 }, false))
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -5216,7 +4721,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(res)
     }
 
-    // reduce(init, fn) → acc
     fn build_list_reduce(
         &mut self,
         src_ptr  : inkwell::values::PointerValue<'ctx>,
@@ -5300,7 +4804,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(result)
     }
 
-    // take/takeLast → ilk/son n eleman
     fn build_list_take(
         &mut self,
         src_ptr   : inkwell::values::PointerValue<'ctx>,
@@ -5328,8 +4831,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => return Ok(result_ptr),
         };
 
-        // start = from_last ? max(0, len - n) : 0
-        // end   = from_last ? len : min(n, len)
         let start = if from_last {
             let diff = self.builder.build_int_sub(len, n, "take_diff")
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -5389,8 +4890,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(result_ptr)
     }
 
-    // ── sortedBy(fn) → yeni sıralı liste (bubble sort, O(n²)) ─────────────────
-
     fn build_list_sorted_by(
         &mut self,
         src_ptr : inkwell::values::PointerValue<'ctx>,
@@ -5404,7 +4903,6 @@ impl<'ctx> CodeGen<'ctx> {
         let list_getf  = self.module.get_function("arc_list_get").unwrap();
         let list_set   = self.module.get_function("arc_list_set").unwrap();
 
-        // fat pointer ayrıştır
         let is_fat = matches!(fn_ptr, BasicValueEnum::StructValue(_));
         let (fn_p, cl_ptr) = self.extract_fn_closure(fn_ptr)?;
         let fn_type = if is_fat {
@@ -5413,7 +4911,6 @@ impl<'ctx> CodeGen<'ctx> {
             i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false)
         };
 
-        // 1. Kaynak listeyi kopyala → result
         let res_call = self.builder.build_call(list_new, &[], "srt_res")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let result_ptr = match res_call.try_as_basic_value().basic() {
@@ -5429,7 +4926,6 @@ impl<'ctx> CodeGen<'ctx> {
 
         let cur_fn = self.cur_fn.unwrap();
 
-        // Tüm alloca'ları buraya — loop başlamadan önce, mevcut BB'de
         let cp_idx      = self.builder.build_alloca(i64_ty, "srt_ci")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let pass_alloca = self.builder.build_alloca(i64_ty, "srt_pass")
@@ -5438,7 +4934,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_store(cp_idx, i64_ty.const_int(0, false))
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // 1. Kopyalama döngüsü
         let cp_cond = self.ctx.append_basic_block(cur_fn, "srt.cp.cond");
         let cp_body = self.ctx.append_basic_block(cur_fn, "srt.cp.body");
         let sort_bb = self.ctx.append_basic_block(cur_fn, "srt.outer.init");
@@ -5466,7 +4961,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_unconditional_branch(cp_cond)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // 2. Bubble sort: outer loop (pass = 0..len)
         self.builder.position_at_end(sort_bb);
         self.builder.build_store(pass_alloca, i64_ty.const_int(0, false))
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -5484,7 +4978,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_conditional_branch(o_ok, o_body, srt_exit)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // outer body → inner loop
         self.builder.position_at_end(o_body);
         let i_alloca = self.builder.build_alloca(i64_ty, "srt_i")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -5540,7 +5033,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_conditional_branch(need_swap, swap_bb, no_swap)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // swap: set(i, b), set(i+1, a)
         self.builder.position_at_end(swap_bb);
         let iv3 = self.builder.build_load(i64_ty, i_alloca, "srt_iv3")
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
@@ -5580,8 +5072,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.position_at_end(srt_exit);
         Ok(result_ptr)
     }
-
-    // ── flatMap(fn) → yeni liste (her eleman → List<T> dönüştürür, düzleştirir) ─
 
     fn build_list_flat_map(
         &mut self,
@@ -5645,7 +5135,6 @@ impl<'ctx> CodeGen<'ctx> {
             .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
             .unwrap_or(i64_ty.const_int(0, false));
 
-        // lambda(elem) → i64 (pointer to inner list)
         let lam_args: Vec<inkwell::values::BasicMetadataValueEnum> = if is_fat {
             vec![elem_i64.into(), cl_ptr.into()]
         } else {
@@ -5678,7 +5167,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => i64_ty.const_int(0, false),
         };
 
-        // inner loop: for j = 0..inner_len: result.append(inner.get(j))
         let ji = self.builder.build_alloca(i64_ty, "fm_ji")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.build_store(ji, i64_ty.const_int(0, false))
@@ -5726,8 +5214,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(result_ptr)
     }
 
-    // ── HashMap.remove(key) → bulup sil, son entryyi o slota taşı ─────────────
-
     fn build_map_remove(
         &mut self,
         map_ptr : inkwell::values::PointerValue<'ctx>,
@@ -5737,7 +5223,6 @@ impl<'ctx> CodeGen<'ctx> {
         let strcmp  = self.module.get_function("strcmp").unwrap();
         let cur_fn  = self.cur_fn.unwrap();
 
-        // len = map[0]
         let len = self.builder.build_load(i64_ty, map_ptr, "mr_len")
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
 
@@ -5786,7 +5271,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_conditional_branch(is_eq, found_bb, next_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // found: copy last entry to slot i, decrement len
         self.builder.position_at_end(found_bb);
         let idx2 = self.builder.build_load(i64_ty, idx_a, "mr_i2v")
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
@@ -5794,7 +5278,6 @@ impl<'ctx> CodeGen<'ctx> {
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
         let last = self.builder.build_int_sub(len2, one, "mr_last")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        // last key slot: 1 + last*2
         let lk2  = self.builder.build_int_mul(last, two, "mr_lk2")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let lks  = self.builder.build_int_add(lk2, one, "mr_lks")
@@ -5809,7 +5292,6 @@ impl<'ctx> CodeGen<'ctx> {
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
         let last_v = self.builder.build_load(i64_ty, lv_gep, "mr_lv_v")
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
-        // target key/val slots
         let i2v  = self.builder.build_int_mul(idx2, two, "mr_i2vx")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let tks  = self.builder.build_int_add(i2v, one, "mr_tks")
@@ -5842,8 +5324,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.position_at_end(done_bb);
         Ok(())
     }
-
-    // ── HashMap.forEach((k, v) → Void) ───────────────────────────────────────
 
     fn build_map_foreach(
         &mut self,
@@ -5920,9 +5400,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    // distinct() → tekrar eden elemanları çıkar (O(n²) doğru implementasyon)
-    // Dış döngü: her src elemanı için iç döngü: result'ta zaten var mı?
-    // Yok ise ekle, var ise atla.
     fn build_list_distinct(
         &mut self,
         src_ptr : inkwell::values::PointerValue<'ctx>,
@@ -5949,11 +5426,9 @@ impl<'ctx> CodeGen<'ctx> {
 
         let cur_fn = self.cur_fn.unwrap();
 
-        // found_alloca: inner loop'ta duplicate bulundu mu?
         let found_alloca = self.builder.build_alloca(i64_ty, "dist_found")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // ── Outer loop: i = 0; while i < src_len ──────────────────────────
         let i_alloca = self.builder.build_alloca(i64_ty, "dist_i")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.build_store(i_alloca, i64_ty.const_int(0, false))
@@ -5981,11 +5456,9 @@ impl<'ctx> CodeGen<'ctx> {
             _ => i64_ty.const_int(0, false),
         };
 
-        // found = 0 (not duplicate yet)
         self.builder.build_store(found_alloca, i64_ty.const_int(0, false))
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // res_len = current length of result list
         let res_len_call = self.builder.build_call(len_fn, &[res_ptr.into()], "dist_rlen")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let res_len = match res_len_call.try_as_basic_value().basic() {
@@ -5993,7 +5466,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => i64_ty.const_int(0, false),
         };
 
-        // ── Inner loop: j = 0; while j < res_len && !found ───────────────
         let j_alloca = self.builder.build_alloca(i64_ty, "dist_j")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.build_store(j_alloca, i64_ty.const_int(0, false))
@@ -6017,7 +5489,6 @@ impl<'ctx> CodeGen<'ctx> {
         let not_found = self.builder.build_int_compare(
             inkwell::IntPredicate::EQ, found_v, i64_ty.const_int(0, false), "dist_nf"
         ).map_err(|e| CodeGenError::new(e.to_string()))?;
-        // continue inner if j < res_len AND not_found
         let inner_ok = self.builder.build_and(j_ok, not_found, "dist_ij_ok")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.build_conditional_branch(inner_ok, inner_body, inner_exit)
@@ -6032,10 +5503,8 @@ impl<'ctx> CodeGen<'ctx> {
         };
         let is_dup = self.builder.build_int_compare(inkwell::IntPredicate::EQ, ritem, item, "dist_dup")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        // if dup: found = 1
         let dup_as_i64 = self.builder.build_int_z_extend(is_dup, i64_ty, "dist_dup64")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
-        // found = max(found, dup_as_i64) — effectively OR
         let new_found = self.builder.build_or(found_v, dup_as_i64, "dist_new_found")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.build_store(found_alloca, new_found)
@@ -6047,7 +5516,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_unconditional_branch(inner_cond)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // inner_exit: if not found → append item to result
         self.builder.position_at_end(inner_exit);
         self.builder.build_unconditional_branch(maybe_add)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -6068,7 +5536,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_unconditional_branch(outer_inc)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // outer_inc: i++
         self.builder.position_at_end(outer_inc);
         let i_next = self.builder.build_int_add(i, i64_ty.const_int(1, false), "dist_iinc")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -6081,7 +5548,6 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(res_ptr)
     }
 
-    // HashMap entries → List<Pair<K,V>>
     fn build_map_entries(
         &mut self,
         map_ptr : inkwell::values::PointerValue<'ctx>,
@@ -6101,7 +5567,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => return Ok(ptr_ty.const_null()),
         };
 
-        // map[0] = len
         let len_gep = unsafe {
             self.builder.build_gep(i8_ty, map_ptr, &[i64_ty.const_int(0, false)], "ent_lp")
                 .map_err(|e| CodeGenError::new(e.to_string()))?
@@ -6129,7 +5594,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_conditional_branch(cond, body_bb, exit_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // body: key_offset = 8*(1 + i*2), val_offset = 8*(2 + i*2)
         self.builder.position_at_end(body_bb);
         let two     = i64_ty.const_int(2, false);
         let one     = i64_ty.const_int(1, false);
@@ -6187,8 +5651,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.build_map_list(map_ptr, false)
     }
 
-    // map.keys() veya map.values() → List<T>
-    // keys_mode=true → key i64 listesi, false → val i64 listesi
     fn build_map_list(
         &mut self,
         map_ptr   : inkwell::values::PointerValue<'ctx>,
@@ -6207,7 +5669,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => return Ok(ptr_ty.const_null()),
         };
 
-        // len = map[0]
         let len = self.builder.build_load(i64_ty, map_ptr, "ml_len")
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
 
@@ -6234,7 +5695,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.position_at_end(body_bb);
         let two   = i64_ty.const_int(2, false);
         let one   = i64_ty.const_int(1, false);
-        // key slot: 1 + i*2,  val slot: 2 + i*2
         let i2    = self.builder.build_int_mul(idx, two, "ml_i2")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         let off   = if keys_mode {
@@ -6272,7 +5732,6 @@ impl<'ctx> CodeGen<'ctx> {
         let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
         let i64_ty = self.ctx.i64_type();
 
-        // Nesneyi derle → pointer değeri al
         let obj_val = match self.compile_expr(object)? {
             Some(v) => v,
             None    => return Ok(None),
@@ -6283,7 +5742,6 @@ impl<'ctx> CodeGen<'ctx> {
         };
 
         match (collection, method) {
-            // ── List metodları ───────────────────────────────────────────────
             ("__List", "append") => {
                 let item_val = if let Some(a) = args.first() {
                     self.compile_expr(a)?.map(|v| self.value_to_i64(v)).transpose()?
@@ -6326,7 +5784,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             ("__List", "removeAt") => {
-                // Shift elements left from idx+1, decrement len
                 let idx = args.first()
                     .and_then(|a| self.compile_expr(a).ok().flatten())
                     .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) }
@@ -6341,7 +5798,6 @@ impl<'ctx> CodeGen<'ctx> {
                     Some(BasicValueEnum::IntValue(v)) => v,
                     _ => return Ok(None),
                 };
-                // Shift: for i = idx..len-1: set(i, get(i+1))
                 let cur_fn2 = self.cur_fn.unwrap();
                 let rm_i   = self.builder.build_alloca(i64_ty, "rm_i")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -6380,7 +5836,6 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_unconditional_branch(rm_cond)
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 self.builder.position_at_end(rm_exit);
-                // Decrement len: list[0]--
                 let cur_len = self.builder.build_load(i64_ty, list_ptr, "rm_cl")
                     .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
                 let new_len = self.builder.build_int_sub(cur_len, i64_ty.const_int(1, false), "rm_nl")
@@ -6412,7 +5867,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             ("__List", "filter") => {
-                // Elem class'ı bul (lambda parametre tipi için)
                 let elem_cls = self.infer_elem_class(object);
                 let lambda_expr = args.first();
                 if let Some(lambda) = lambda_expr {
@@ -6427,14 +5881,12 @@ impl<'ctx> CodeGen<'ctx> {
                         return Ok(r.try_as_basic_value().basic());
                     }
                 }
-                // Lambda derlenemezse boş liste döndür
                 let f = self.module.get_function("arc_list_new").unwrap();
                 let r = self.builder.build_call(f, &[], "empty_list")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 Ok(r.try_as_basic_value().basic())
             }
 
-            // take / takeLast — ilk/son N elemanı döndür
             ("__List", "take") | ("__List", "takeLast") => {
                 let n_val = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
                     .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
@@ -6443,7 +5895,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(result.into()))
             }
 
-            // map(fn) → yeni liste
             ("__List", "map") => {
                 let lambda_expr = args.first();
                 if let Some(lambda) = lambda_expr {
@@ -6457,7 +5908,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(r.try_as_basic_value().basic())
             }
 
-            // any(fn) → bool
             ("__List", "any") => {
                 let lambda_expr = args.first();
                 if let Some(lambda) = lambda_expr {
@@ -6469,7 +5919,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(self.ctx.bool_type().const_int(0, false).into()))
             }
 
-            // all(fn) → bool
             ("__List", "all") => {
                 let lambda_expr = args.first();
                 if let Some(lambda) = lambda_expr {
@@ -6481,7 +5930,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(self.ctx.bool_type().const_int(1, false).into()))
             }
 
-            // reduce(init, fn) → T
             ("__List", "reduce") => {
                 let init_val = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
                     .map(|v| self.value_to_i64(v)).transpose()?
@@ -6496,7 +5944,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(init_val.into()))
             }
 
-            // sortedBy(fn) → yeni sıralı liste (bubble sort)
             ("__List", "sortedBy") => {
                 let lambda_expr = args.first();
                 if let Some(lambda) = lambda_expr {
@@ -6508,7 +5955,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(list_ptr.into()))
             }
 
-            // flatMap(fn) → düzleştirilmiş liste
             ("__List", "flatMap") => {
                 let lambda_expr = args.first();
                 if let Some(lambda) = lambda_expr {
@@ -6520,20 +5966,17 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(list_ptr.into()))
             }
 
-            // distinct() → tekrar edenleri çıkar (basit: yeni liste, zaten olmayan ekle)
             ("__List", "distinct") => {
                 let result = self.build_list_distinct(list_ptr)?;
                 Ok(Some(result.into()))
             }
 
-            // joinToString(sep) → String
             ("__List", "joinToString") => {
                 for a in args { self.compile_expr(a)?; }
                 let empty = self.build_global_string("")?;
                 Ok(Some(empty.into()))
             }
 
-            // ── HashMap metodları ────────────────────────────────────────────
             ("__HashMap", "set") => {
                 let key = if let Some(a) = args.first() {
                     self.compile_expr(a)?
@@ -6574,7 +6017,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             ("__HashMap", "get") => {
-                // get → nullable: default olarak 0 döndür (null semantiği yok henüz)
                 let key = if let Some(a) = args.first() {
                     self.compile_expr(a)?
                         .map(|v| if let BasicValueEnum::PointerValue(p) = v { p }
@@ -6610,14 +6052,12 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             ("__HashMap", "length") => {
-                // HashMap layout: [0] = len
                 let i8_ty = self.ctx.i8_type();
                 let gep = unsafe {
                     self.builder.build_gep(i8_ty, list_ptr,
                         &[i64_ty.const_int(0, false)], "map_len_gep")
                         .map_err(|e| CodeGenError::new(e.to_string()))?
                 };
-                // Load map length from offset 0
                 let len_val = self.builder.build_load(i64_ty, gep, "map_len")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 Ok(Some(len_val))
@@ -6659,12 +6099,10 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(None)
             }
 
-            // ── Pair metodları ───────────────────────────────────────────────
             ("__Pair", "getFirst") => {
                 let f = self.module.get_function("arc_pair_first").unwrap();
                 let r = self.builder.build_call(f, &[list_ptr.into()], "pair_fst")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
-                // i64 → ptr (String ise) : inttoptr
                 if let Some(BasicValueEnum::IntValue(v)) = r.try_as_basic_value().basic() {
                     let ptr = self.builder.build_int_to_ptr(v, ptr_ty, "fst_ptr")
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -6687,8 +6125,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    // ── Lambda → LLVM function pointer (filter için) ──────────────────────────
-
     fn compile_lambda_for_filter(
         &mut self,
         lambda   : &Expr,
@@ -6703,15 +6139,12 @@ impl<'ctx> CodeGen<'ctx> {
         let i64_ty = self.ctx.i64_type();
         let i1_ty  = self.ctx.bool_type();
 
-        // Benzersiz lambda fonksiyon adı
         self.lambda_counter += 1;
         let fn_name = format!("arc_lambda_{}", self.lambda_counter);
 
-        // Fonksiyon tipi: i64(i64) — item'ı i64 olarak alır, bool (i64) döner
         let fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
         let fn_val = self.module.add_function(&fn_name, fn_ty, None);
 
-        // Builder konumunu kaydet
         let prev_block = self.builder.get_insert_block();
         let prev_fn = self.cur_fn;
         let prev_class = self.cur_class.clone();
@@ -6721,33 +6154,26 @@ impl<'ctx> CodeGen<'ctx> {
         self.cur_fn = Some(fn_val);
         self.push_scope();
 
-        // Parametre: i64 → ptr (item pointer)
         let param_name = params.first().map(|s| s.as_str()).unwrap_or("item");
         let item_i64 = fn_val.get_nth_param(0).unwrap().into_int_value();
 
-        // i64 → ptr dönüşümü
         let item_ptr = self.builder.build_int_to_ptr(item_i64, ptr_ty, "item_ptr")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // Lambda parametresini scope'a ekle
         let alloca = self.builder.build_alloca(ptr_ty, param_name)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.build_store(alloca, item_ptr)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // class_name ile define et (elem_class'tan)
         let ec = elem_cls.clone();
         self.define_collection_var(param_name, alloca, ptr_ty.into(), ec.clone(), None);
 
-        // cur_class'ı geçici olarak set et (method dispatch için)
         if let Some(ref cls) = ec {
             self.cur_class = Some(cls.clone());
         }
 
-        // Body'yi derle
         let result = self.compile_expr(&body)?;
 
-        // Sonucu i64'e genişlet (bool → i64)
         let ret_val = match result {
             Some(BasicValueEnum::IntValue(v)) => {
                 if v.get_type().get_bit_width() == 1 {
@@ -6767,7 +6193,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => i64_ty.const_int(0, false),
         };
 
-        // Return değeri döndür
         let _ = i1_ty;
         self.builder.build_return(Some(&ret_val))
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -6776,18 +6201,14 @@ impl<'ctx> CodeGen<'ctx> {
         self.cur_fn = prev_fn;
         self.cur_class = prev_class;
 
-        // Builder konumunu geri yükle
         if let Some(bb) = prev_block {
             self.builder.position_at_end(bb);
         }
 
         fn_val.verify(true);
 
-        // Fonksiyon pointer'ını döndür
         Ok(Some(fn_val.as_global_value().as_pointer_value().into()))
     }
-
-    // ── Free variable analizi (closure capture için) ─────────────────────────
 
     fn collect_idents_in_expr(expr: &Expr, out: &mut Vec<String>) {
         match expr {
@@ -6847,10 +6268,6 @@ impl<'ctx> CodeGen<'ctx> {
         free
     }
 
-    // ── Genel Lambda → fat pointer { fn_ptr, closure_ptr } ──────────────────
-    // Lambda her zaman (params..., ptr %closure) → i64 imzasına sahiptir.
-    // Free var yoksa closure_ptr = null. Dönen değer { ptr, ptr } struct'ı.
-
     fn compile_general_lambda(
         &mut self,
         params : &[String],
@@ -6863,17 +6280,14 @@ impl<'ctx> CodeGen<'ctx> {
         let counter = self.lambda_counter;
         let fn_name = format!("arc_lambda_{}", counter);
 
-        // 1. Free variable analizi
         let free_vars = self.find_free_vars(body, params);
 
-        // 2. Fonksiyon imzası: (params..., ptr %closure) → i64
         let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
             params.iter().map(|_| i64_ty.into()).collect();
         param_types.push(ptr_ty.into());
         let fn_ty  = i64_ty.fn_type(&param_types, false);
         let fn_val = self.module.add_function(&fn_name, fn_ty, None);
 
-        // Builder durumunu kaydet
         let prev_block = self.builder.get_insert_block();
         let prev_fn    = self.cur_fn;
         let prev_class = self.cur_class.clone();
@@ -6883,7 +6297,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.cur_fn = Some(fn_val);
         self.push_scope();
 
-        // 3. Parametreleri scope'a ekle
         for (i, param_name) in params.iter().enumerate() {
             if let Some(pv) = fn_val.get_nth_param(i as u32) {
                 let alloca = self.builder.build_alloca(i64_ty, param_name)
@@ -6894,7 +6307,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // 4. Free var'ları closure struct'tan yükle
         if !free_vars.is_empty() {
             let closure_param_idx = params.len() as u32;
             if let Some(closure_param) = fn_val.get_nth_param(closure_param_idx) {
@@ -6916,7 +6328,6 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
-        // 5. Body derle ve i64'e çevir
         let result  = self.compile_expr(body)?;
         let ret_val = match result {
             Some(BasicValueEnum::IntValue(v)) => {
@@ -6946,7 +6357,6 @@ impl<'ctx> CodeGen<'ctx> {
             self.builder.position_at_end(bb);
         }
 
-        // 6. Closure struct'ı heap'te oluştur ve doldur
         let closure_ptr = if !free_vars.is_empty() {
             let field_types: Vec<BasicTypeEnum<'ctx>> =
                 free_vars.iter().map(|_| i64_ty.as_basic_type_enum()).collect();
@@ -6977,7 +6387,6 @@ impl<'ctx> CodeGen<'ctx> {
             ptr_ty.const_null()
         };
 
-        // 7. Fat pointer { fn_ptr, closure_ptr } döndür
         let fat_ty = self.ctx.struct_type(&[ptr_ty.into(), ptr_ty.into()], false);
         let fat_alloca = self.builder.build_alloca(fat_ty, "fat_ptr")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -6995,8 +6404,6 @@ impl<'ctx> CodeGen<'ctx> {
         fn_val.verify(true);
         Ok(Some(fat))
     }
-
-    // ── Fat pointer veya bare fn ptr → (fn_ptr, closure_ptr) ─────────────────
 
     fn extract_fn_closure(
         &mut self,
@@ -7017,8 +6424,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => Err(CodeGenError::new("expected fn ptr or fat ptr")),
         }
     }
-
-    // ── ForEach döngüsü: List üzerinde ───────────────────────────────────────
 
     fn compile_for_each(
         &mut self,
@@ -7044,7 +6449,6 @@ impl<'ctx> CodeGen<'ctx> {
             .ok_or_else(|| CodeGenError::new("arc_list_length returned void"))?;
         let len_i64 = match len_val { BasicValueEnum::IntValue(v) => v, _ => return Ok(false) };
 
-        // Sayaç alloca
         let idx_alloca = self.builder.build_alloca(i64_ty, "fe_idx")
             .map_err(|e| CodeGenError::new(e.to_string()))?;
         self.builder.build_store(idx_alloca, i64_ty.const_int(0, false))
@@ -7058,7 +6462,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_unconditional_branch(cond_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // Koşul: idx < len
         self.builder.position_at_end(cond_bb);
         let idx = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), idx_alloca, "fe_i")
             .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
@@ -7068,7 +6471,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_conditional_branch(cond, body_bb, exit_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-        // Gövde: item al, değişkene bağla, body'yi derle
         self.builder.position_at_end(body_bb);
         self.push_scope();
 
@@ -7077,7 +6479,6 @@ impl<'ctx> CodeGen<'ctx> {
         ).map_err(|e| CodeGenError::new(e.to_string()))?;
 
         if let Some(BasicValueEnum::IntValue(item_i64)) = item_call.try_as_basic_value().basic() {
-            // i64 → ptr (class instance)
             let item_ptr = self.builder.build_int_to_ptr(item_i64, ptr_ty, "fe_ptr")
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
 
@@ -7086,7 +6487,6 @@ impl<'ctx> CodeGen<'ctx> {
             self.builder.build_store(alloca, item_ptr)
                 .map_err(|e| CodeGenError::new(e.to_string()))?;
 
-            // class_name'i Type'dan çıkar
             let class_name = match ty {
                 Type::Named(n) => Some(n.clone()),
                 _ => None,
@@ -7099,7 +6499,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
         self.pop_scope();
 
-        // idx++
         if !self.current_block_terminated() {
             let idx2 = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), idx_alloca, "fe_i2")
                 .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
@@ -7114,8 +6513,6 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.position_at_end(exit_bb);
         Ok(false)
     }
-
-    // ── Değer → i64 dönüşümü (koleksiyon item storage için) ──────────────────
 
     fn value_to_i64(
         &mut self,
@@ -7146,8 +6543,6 @@ impl<'ctx> CodeGen<'ctx> {
             _ => Ok(i64_ty.const_int(0, false)),
         }
     }
-
-    // ── LLVM IR çıktısı ve native binary üretimi ─────────────────────────────
 
     pub fn emit_ir(&self) -> String {
         self.module.print_to_string().to_string()
@@ -7190,10 +6585,6 @@ impl<'ctx> CodeGen<'ctx> {
             .map_err(|e| CodeGenError::new(e.to_string()))
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Giriş noktası: .arm → .o üretimi
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub fn emit_ir_only(
     module_ast  : &crate::ast::Module,

@@ -1,0 +1,96 @@
+module arimo.test.annotations;
+
+@Deprecated("Use NewService instead")
+public class OldService {
+    public static run() : Void {
+        IO.print("old");
+    }
+}
+
+@Experimental
+public class GpuCompute {
+    public static run() : Void {
+        IO.print("gpu");
+    }
+}
+
+@FunctionalInterface
+interface Runnable {
+    run() : Void;
+}
+
+@FunctionalInterface
+interface Comparator {
+    compare(a: Float, b: Float) : Integer;
+}
+
+@Sealed
+public abstract class Shape {
+    public abstract area() : Float;
+}
+
+public class Circle extends Shape {
+    private readonly radius : Float;
+    public constructor(radius: Float) {
+        this.radius = radius;
+    }
+    public area() : Float {
+        return 3.14 * this.radius * this.radius;
+    }
+}
+
+@Immutable
+public class Point {
+    private readonly x : Float;
+    private readonly y : Float;
+
+    public constructor(x: Float, y: Float) {
+        this.x = x;
+        this.y = y;
+    }
+
+    public getX() : Float { return this.x; }
+    public getY() : Float { return this.y; }
+}
+
+public class FileReader {
+    @Throws(IOException)
+    public static read(path: String) : String {
+        return "content";
+    }
+}
+
+public class MathUtils {
+    @Pure
+    public static square(x: Float) : Float {
+        return x * x;
+    }
+
+    @Pure
+    public static clamp(v: Float, min: Float, max: Float) : Float {
+        if @Likely (v >= min && v <= max) {
+            return v;
+        } else if (v < min) {
+            return min;
+        } else {
+            return max;
+        }
+    }
+}
+
+public class LegacyCode {
+    @SuppressWarnings("deprecated")
+    public static useOld() : Void {
+        OldService.run();
+    }
+}
+
+public class Application {
+    public static main() : Void {
+        Circle c    = Circle(5.0);
+        Float  area = c.area();
+        Point  p    = Point(1.0, 2.0);
+        Float  sq   = MathUtils.square(3.0);
+        IO.print("annotations: OK");
+    }
+}

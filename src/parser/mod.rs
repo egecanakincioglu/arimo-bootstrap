@@ -1,25 +1,4 @@
-﻿/*
-Arimo Lang - A modern programming language and compiler
-Copyright (C) 2026 Egecan Akıncıoğlu
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Arimo Lang — Parser (Pratt Parser)
-// ─────────────────────────────────────────────────────────────────────────────
-
+﻿
 use crate::lexer::{Token, SpannedToken};
 use crate::ast::*;
 
@@ -48,8 +27,6 @@ impl Parser {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
         Parser { tokens, pos: 0, pending_close_gt: false }
     }
-
-    // ── Token yönetimi ────────────────────────────────────────────────────────
 
     fn current(&self) -> &Token {
         &self.tokens[self.pos].token
@@ -87,7 +64,6 @@ impl Parser {
         }
     }
 
-    // Generic kapanışı için: Gt veya GtGt'nin birinci > 'si
     fn eat_close_gt(&mut self) -> bool {
         if self.pending_close_gt {
             self.pending_close_gt = false;
@@ -97,7 +73,6 @@ impl Parser {
             self.advance();
             return true;
         }
-        // >> token'ı: birinci > tüket, ikincisi pending
         if self.current() == &Token::GtGt {
             self.advance();
             self.pending_close_gt = true;
@@ -154,8 +129,6 @@ impl Parser {
         else { false }
     }
 
-    // ── Program girişi ────────────────────────────────────────────────────────
-
     pub fn parse(&mut self) -> ParseResult<Module> {
         let mut nostd = false;
         while self.check(&Token::At) {
@@ -178,8 +151,6 @@ impl Parser {
         Ok(Module { path, nostd, imports, items })
     }
 
-    // package arimo.io;   ← yeni sözdizimi
-    // module arimo.io;    ← geriye dönük uyumlu
     fn parse_module_decl(&mut self) -> ParseResult<String> {
         if self.check(&Token::Package) {
             self.advance(); // package
@@ -194,7 +165,6 @@ impl Parser {
     fn parse_dotted_path(&mut self) -> ParseResult<String> {
         let mut path = self.expect_ident()?;
         while self.eat(&Token::Dot) {
-            // Wildcard import: import arimo.util.*; → son '*' bileşeni
             if self.check(&Token::Star) {
                 self.advance();
                 path.push_str(".*");
@@ -226,8 +196,6 @@ impl Parser {
         }
         Ok(items)
     }
-
-    // ── Üst düzey tanımlar ────────────────────────────────────────────────────
 
     fn parse_item(&mut self) -> ParseResult<Item> {
         let mut manual       = false;
@@ -342,8 +310,6 @@ impl Parser {
             _ => Ok(Visibility::Public),
         }
     }
-
-    // ── Class parser ──────────────────────────────────────────────────────────
 
     fn parse_class(&mut self, visibility: Visibility, abstract_: bool, manual: bool, sealed: bool, immutable: bool, deprecated: Option<String>, experimental: bool) -> ParseResult<ClassDecl> {
         self.expect(&Token::Class)?;
@@ -466,7 +432,6 @@ impl Parser {
             let abstract_ = self.eat(&Token::Abstract);
             let override_ = self.eat(&Token::Override);
 
-            // operator overloading — public operator +(other: Vec3) : Vec3 { ... }
             if self.check(&Token::Operator) {
                 self.advance();
                 let op_sym = self.parse_operator_symbol()?;
@@ -619,14 +584,11 @@ impl Parser {
         Ok(sym.to_string())
     }
 
-    // ── Struct parser ─────────────────────────────────────────────────────────
-
     fn parse_struct(&mut self, visibility: Visibility, packed: bool, align: Option<usize>, deprecated: Option<String>, experimental: bool) -> ParseResult<StructDecl> {
         self.expect(&Token::Struct)?;
         let name     = self.expect_ident()?;
         let generics = self.parse_generics_decl()?;
 
-        // struct extends etmez, sadece implements
         let implements = if self.eat(&Token::Implements) {
             self.parse_comma_separated_class_names()?
         } else { Vec::new() };
@@ -738,7 +700,6 @@ impl Parser {
             let _readonly = self.eat(&Token::Readonly); // struct fields are value-copied, readonly is on field
             let override_ = self.eat(&Token::Override);
 
-            // operator overloading
             if self.check(&Token::Operator) {
                 self.advance();
                 let op_sym = self.parse_operator_symbol()?;
@@ -766,7 +727,6 @@ impl Parser {
                                 continue;
                             }
                         }
-                        // field: name : Type
                         if self.pos + 1 < self.tokens.len() {
                             let next = &self.tokens[self.pos + 1].token;
                             if *next == Token::Colon {
@@ -812,8 +772,6 @@ impl Parser {
         self.expect(&Token::RBrace)?;
         Ok(StructDecl { visibility, packed, align, deprecated, experimental, name, generics, implements, fields, constructor, methods })
     }
-
-    // ── Union parser ─────────────────────────────────────────────────────────
 
     fn parse_union(&mut self, visibility: Visibility) -> ParseResult<UnionDecl> {
         self.expect(&Token::Union)?;
@@ -898,8 +856,6 @@ impl Parser {
         Ok(content.trim().to_string())
     }
 
-    // ── Interface parser ──────────────────────────────────────────────────────
-
     fn parse_interface(&mut self, functional: bool, sealed: bool, deprecated: Option<String>, experimental: bool) -> ParseResult<InterfaceDecl> {
         self.expect(&Token::Interface)?;
         let name     = self.expect_ident()?;
@@ -949,8 +905,6 @@ impl Parser {
         Ok(InterfaceDecl { name, generics, functional, sealed, deprecated, experimental, methods })
     }
 
-    // ── Enum parser ───────────────────────────────────────────────────────────
-
     fn parse_enum(&mut self, visibility: Visibility, deprecated: Option<String>, experimental: bool) -> ParseResult<EnumDecl> {
         self.expect(&Token::Enum)?;
         let name = self.expect_ident()?;
@@ -961,7 +915,6 @@ impl Parser {
 
         while !self.check(&Token::Semicolon) && !self.check(&Token::RBrace) {
             let vname = self.expect_ident()?;
-            // Veri tipler opsiyonel: Circle(Float)  Rectangle(Float, Float)
             let data = if self.check(&Token::LParen) {
                 self.advance();
                 let mut types = Vec::new();
@@ -993,8 +946,6 @@ impl Parser {
         Ok(EnumDecl { visibility, deprecated, experimental, name, variants, methods })
     }
 
-    // ── Tip parser ────────────────────────────────────────────────────────────
-
     fn is_type_token(&self) -> bool {
         matches!(self.current(),
             Token::TypeInteger | Token::TypeFloat | Token::TypeBoolean |
@@ -1008,7 +959,6 @@ impl Parser {
         )
     }
 
-    // (T, T, ...) -> R pattern'ını lookahead ile tespit et
     fn is_fn_ptr_type_ahead(&self) -> bool {
         let mut i = self.pos;
         if !matches!(self.tokens.get(i).map(|t| &t.token), Some(&Token::LParen)) {
@@ -1062,7 +1012,6 @@ impl Parser {
                 self.expect(&Token::Lt)?;
                 let elem = self.parse_type()?;
                 self.expect(&Token::Comma)?;
-                // N: compile-time integer literal
                 let size = match self.current().clone() {
                     Token::Int(n) if n >= 0 => { self.advance(); n as usize }
                     _ => {
@@ -1085,7 +1034,6 @@ impl Parser {
                 Type::Slice(Box::new(elem))
             }
 
-            // Function pointer type: (T1, T2) -> R
             Token::LParen => {
                 self.advance();
                 let mut param_tys = Vec::new();
@@ -1162,8 +1110,6 @@ impl Parser {
         }
     }
 
-    // ── Parametre listesi ─────────────────────────────────────────────────────
-
     fn parse_params(&mut self) -> ParseResult<Vec<Param>> {
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
@@ -1186,8 +1132,6 @@ impl Parser {
         Ok(Param { name, ty })
     }
 
-    // ── Generics tanımı ───────────────────────────────────────────────────────
-
     fn parse_generics_decl(&mut self) -> ParseResult<Vec<GenericParam>> {
         if !self.check(&Token::Lt) { return Ok(Vec::new()); }
         self.advance();
@@ -1201,7 +1145,6 @@ impl Parser {
 
     fn parse_generic_param(&mut self) -> ParseResult<GenericParam> {
         let name = self.expect_ident()?;
-        // Optional bound: T: Interface
         let bounds = if self.eat(&Token::Colon) {
             let mut b = vec![self.expect_ident()?];
             while self.eat(&Token::Plus) {
@@ -1221,8 +1164,6 @@ impl Parser {
         }
         Ok(names)
     }
-
-    // ── Statement parser ──────────────────────────────────────────────────────
 
     fn parse_stmts(&mut self) -> ParseResult<Vec<Stmt>> {
         let mut stmts = Vec::new();
@@ -1271,7 +1212,6 @@ impl Parser {
 
             Token::Try => self.parse_try_catch(),
 
-            // match — blok ile biter, ; gerekmez
             Token::Match => {
                 let expr = self.parse_expr(0)?;
                 Ok(Stmt::ExprStmt(expr))
@@ -1328,7 +1268,6 @@ impl Parser {
 
     fn is_var_decl(&self) -> bool {
         if self.check(&Token::Volatile) { return true; }
-        // Function pointer var decl: (T, ...) -> R name = ...
         if self.check(&Token::LParen) {
             return self.is_fn_ptr_type_ahead();
         }
@@ -1360,7 +1299,6 @@ impl Parser {
 
     fn parse_if(&mut self) -> ParseResult<Stmt> {
         self.expect(&Token::If)?;
-        // @likely / @unlikely hint â€” optional annotation
         let hint = if self.check(&Token::At) {
             self.advance();
             let ann = self.expect_ident()?;
@@ -1502,28 +1440,10 @@ impl Parser {
         Ok(Stmt::TryCatch { try_body, catches, finally_body })
     }
 
-    // ── Expression parser — Pratt ─────────────────────────────────────────────
-    //
-    // Precedence table (low → high):
-    //   assign     1/2
-    //   ||         3/4
-    //   &&         5/6
-    //   | (BitOr)  7/8
-    //   ^ (BitXor) 9/10
-    //   & (BitAnd) 11/12
-    //   == !=      13/14
-    //   < <= > >=  15/16
-    //   << >>      17/18
-    //   + -        19/20
-    //   * / %      21/22
-    //   as cast    23 (handled specially, tighter than any binary)
-    //   unary      25
-
     fn parse_expr(&mut self, min_bp: u8) -> ParseResult<Expr> {
         let mut left = self.parse_prefix()?;
 
         loop {
-            // Postfix: x++ x--
             match self.current() {
                 Token::PlusPlus => {
                     self.advance();
@@ -1538,7 +1458,6 @@ impl Parser {
                 _ => {}
             }
 
-            // Index — arr[i]
             if self.check(&Token::LBracket) {
                 self.advance();
                 let idx = self.parse_expr(0)?;
@@ -1547,7 +1466,6 @@ impl Parser {
                 continue;
             }
 
-            // as cast — tightest postfix
             if self.check(&Token::As) {
                 if 23 < min_bp { break; }
                 self.advance();
@@ -1556,7 +1474,6 @@ impl Parser {
                 continue;
             }
 
-            // Field access / method call
             if self.check(&Token::Dot) {
                 self.advance();
                 let field = self.expect_ident()?;
@@ -1576,7 +1493,6 @@ impl Parser {
                 continue;
             }
 
-            // Null-safe
             if self.check(&Token::QuestionDot) {
                 self.advance();
                 let field = self.expect_ident()?;
@@ -1593,7 +1509,6 @@ impl Parser {
                 continue;
             }
 
-            // Ternary
             if self.check(&Token::Question) {
                 self.advance();
                 let then  = self.parse_expr(0)?;
@@ -1607,7 +1522,6 @@ impl Parser {
                 continue;
             }
 
-            // Binary
             let (op, left_bp, right_bp) = match self.infix_binding_power() {
                 Some(x) => x,
                 None    => break,
@@ -1717,7 +1631,6 @@ impl Parser {
                 }
             }
 
-            // Primitif tip isimleri expression'da — Float.sizeOf()  u32.sizeOf()
             Token::TypeInteger | Token::TypeFloat | Token::TypeBoolean
             | Token::TypeString | Token::TypeVoid => {
                 let class = match self.current() {
@@ -1750,7 +1663,6 @@ impl Parser {
                 }
             }
 
-            // Fixed-size integer types in expression — u32.sizeOf()
             Token::TypeU8  | Token::TypeU16 | Token::TypeU32 | Token::TypeU64 |
             Token::TypeI8  | Token::TypeI16 | Token::TypeI32 | Token::TypeI64 => {
                 let class = match self.current() {
@@ -1786,7 +1698,6 @@ impl Parser {
                 }
             }
 
-            // Array ve Slice static çağrılar — Array.zeroed()  Slice.of(ptr, len)
             Token::TypeArray | Token::TypeSlice => {
                 let class = match self.current() {
                     Token::TypeArray => "Array",
@@ -1811,7 +1722,6 @@ impl Parser {
                 }
             }
 
-            // Builtin koleksiyon constructor ve static çağrılar
             Token::TypeList | Token::TypeMap | Token::TypeHashMap | Token::TypeTreeMap | Token::TypePair => {
                 let class = match self.current() {
                     Token::TypeList    => "List",
@@ -1842,7 +1752,6 @@ impl Parser {
                 }
             }
 
-            // Parantez — (expr) veya lambda
             Token::LParen => {
                 self.advance();
                 if self.is_lambda() {
@@ -1854,7 +1763,6 @@ impl Parser {
                 }
             }
 
-            // Prefix unary
             Token::Minus => {
                 self.advance();
                 let expr = self.parse_expr(25)?;
@@ -1902,36 +1810,28 @@ impl Parser {
         }
     }
 
-    // Pratt parser — operatör öncelikleri
     fn infix_binding_power(&self) -> Option<(BinOp, u8, u8)> {
         match self.current() {
-            // Assignments — sağ-asosiyatif (right_bp = left_bp + 1)
             Token::Eq       => Some((BinOp::Assign,    1,  2)),
             Token::PlusEq   => Some((BinOp::AddAssign, 1,  2)),
             Token::MinusEq  => Some((BinOp::SubAssign, 1,  2)),
             Token::StarEq   => Some((BinOp::MulAssign, 1,  2)),
             Token::SlashEq  => Some((BinOp::DivAssign, 1,  2)),
-            // Logical
             Token::PipePipe => Some((BinOp::Or,        3,  4)),
             Token::AndAnd   => Some((BinOp::And,       5,  6)),
-            // Bitwise
             Token::Pipe     => Some((BinOp::BitOr,     7,  8)),
             Token::Caret    => Some((BinOp::BitXor,    9, 10)),
             Token::Amp      => Some((BinOp::BitAnd,   11, 12)),
-            // Comparison
             Token::EqEq     => Some((BinOp::Eq,       13, 14)),
             Token::BangEq   => Some((BinOp::Ne,       13, 14)),
             Token::Lt       => Some((BinOp::Lt,       15, 16)),
             Token::LtEq     => Some((BinOp::Le,       15, 16)),
             Token::Gt       => Some((BinOp::Gt,       15, 16)),
             Token::GtEq     => Some((BinOp::Ge,       15, 16)),
-            // Shift
             Token::LtLt     => Some((BinOp::Shl,      17, 18)),
             Token::GtGt     => Some((BinOp::Shr,      17, 18)),
-            // Additive
             Token::Plus     => Some((BinOp::Add,      19, 20)),
             Token::Minus    => Some((BinOp::Sub,      19, 20)),
-            // Multiplicative
             Token::Star     => Some((BinOp::Mul,      21, 22)),
             Token::Slash    => Some((BinOp::Div,      21, 22)),
             Token::Percent  => Some((BinOp::Mod,      21, 22)),
@@ -1985,10 +1885,7 @@ impl Parser {
         Ok(args)
     }
 
-    // ── Match expression parser ───────────────────────────────────────────────
-
     fn parse_match_expr(&mut self) -> ParseResult<Expr> {
-        // 'match' zaten tüketildi (parse_prefix'te)
         let expr = self.parse_expr(0)?;
         self.expect(&Token::LBrace)?;
 
@@ -2007,7 +1904,6 @@ impl Parser {
     }
 
     fn parse_match_pattern(&mut self) -> ParseResult<MatchPattern> {
-        // Wildcard: _
         if let Token::Ident(name) = self.current().clone() {
             if name == "_" {
                 self.advance();
@@ -2015,7 +1911,6 @@ impl Parser {
             }
         }
 
-        // Enum.Variant veya Enum.Variant(a, b, ...)
         let enum_name = self.expect_ident()?;
         self.expect(&Token::Dot)?;
         let variant = self.expect_ident()?;

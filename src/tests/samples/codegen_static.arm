@@ -1,7 +1,7 @@
 module arimo.codegenstatic;
 
 public class Config {
-    public static readonly VERSION : Integer = 14;
+    public static readonly VERSION  : Integer = 14;
     public static readonly MAX_SIZE : Integer = 1024;
     public static count : Integer = 0;
 
@@ -16,14 +16,12 @@ public class Config {
 
 public class Application {
     public static main() : Void {
-        // Static readonly field okuma
         Integer v = Config.VERSION;
         IO.print("Versiyon: ${v}");
 
         Integer m = Config.MAX_SIZE;
         IO.print("Max: ${m}");
 
-        // Static mutable field
         Config.increment();
         Config.increment();
         Config.increment();
