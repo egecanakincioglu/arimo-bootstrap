@@ -1949,16 +1949,31 @@ impl TypeChecker {
         _args  : &[Type],
     ) -> Option<Type> {
         match (class, method) {
-            ("List", "append")   => Some(Type::Void),
-            ("List", "length")   => Some(Type::Integer),
-            ("List", "isEmpty")  => Some(Type::Boolean),
-            ("List", "take")     => Some(ty.clone()),
-            ("List", "takeLast") => Some(ty.clone()),
-            ("List", "filter")   => Some(ty.clone()),
-            ("List", "sortedBy") => Some(ty.clone()),
-            ("List", "reduce")   => Some(Type::Named("Unknown".to_string())),
-            ("List", "of")       => Some(ty.clone()),
-            ("List", "empty")    => Some(ty.clone()),
+            ("List", "append")      => Some(Type::Void),
+            ("List", "length")      => Some(Type::Integer),
+            ("List", "isEmpty")     => Some(Type::Boolean),
+            ("List", "take")        => Some(ty.clone()),
+            ("List", "takeLast")    => Some(ty.clone()),
+            ("List", "filter")      => Some(ty.clone()),
+            ("List", "sortedBy")    => Some(ty.clone()),
+            ("List", "map")         => Some(ty.clone()),
+            ("List", "flatMap")     => Some(ty.clone()),
+            ("List", "distinct")    => Some(ty.clone()),
+            ("List", "any")         => Some(Type::Boolean),
+            ("List", "all")         => Some(Type::Boolean),
+            ("List", "reduce")      => Some(Type::Named("Unknown".to_string())),
+            ("List", "forEach")     => Some(Type::Void),
+            ("List", "joinToString")=> Some(Type::Str),
+            ("List", "get")         => {
+                match ty {
+                    Type::List(inner) => Some(*inner.clone()),
+                    _ => Some(Type::Named("Unknown".to_string())),
+                }
+            }
+            ("List", "set")         => Some(Type::Void),
+            ("List", "removeAt")    => Some(Type::Void),
+            ("List", "of")          => Some(ty.clone()),
+            ("List", "empty")       => Some(ty.clone()),
 
             ("Map" | "HashMap" | "TreeMap", "set")  => Some(Type::Void),
             ("Map" | "HashMap" | "TreeMap", "get")  => {
@@ -1977,6 +1992,7 @@ impl TypeChecker {
             }
             ("Map" | "HashMap" | "TreeMap", "containsKey") => Some(Type::Boolean),
             ("Map" | "HashMap" | "TreeMap", "remove")      => Some(Type::Void),
+            ("Map" | "HashMap" | "TreeMap", "forEach")     => Some(Type::Void),
             ("Map" | "HashMap" | "TreeMap", "keys") => {
                 match ty {
                     Type::HashMap(k, _) | Type::TreeMap(k, _) | Type::Map(k, _) =>

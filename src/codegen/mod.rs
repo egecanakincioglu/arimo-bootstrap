@@ -2777,6 +2777,7 @@ impl<'ctx> CodeGen<'ctx> {
         self.gen_arc_list_append();
         self.gen_arc_list_length();
         self.gen_arc_list_get();
+        self.gen_arc_list_set();
         self.gen_arc_list_filter();
         self.gen_arc_map_new();
         self.gen_arc_map_set();
@@ -3433,6 +3434,7 @@ impl<'ctx> CodeGen<'ctx> {
         decl!("arc_list_append", void, [ptr_ty.into(), i64_ty.into()]);
         decl!("arc_list_length", i64,  [ptr_ty.into()]);
         decl!("arc_list_get",    i64,  [ptr_ty.into(), i64_ty.into()]);
+        decl!("arc_list_set",    void, [ptr_ty.into(), i64_ty.into(), i64_ty.into()]);
         decl!("arc_list_filter", ptr,  [ptr_ty.into(), ptr_ty.into()]);
         decl!("arc_map_new",             ptr,  []);
         decl!("arc_map_set",             void, [ptr_ty.into(), ptr_ty.into(), i64_ty.into()]);
@@ -3546,6 +3548,33 @@ impl<'ctx> CodeGen<'ctx> {
             inkwell::types::BasicTypeEnum::IntType(i64_ty), elem_ptr, "val"
         ).unwrap();
         self.builder.build_return(Some(&val)).unwrap();
+    }
+
+    // ── arc_list_set(ptr list, i64 idx, i64 val) → void ────────────────────────
+
+    fn gen_arc_list_set(&mut self) {
+        let fn_name = "arc_list_set";
+        if let Some(f) = self.module.get_function(fn_name) {
+            if f.count_basic_blocks() > 0 { return; }
+        } else {
+            let i64_ty = self.ctx.i64_type();
+            let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+            let fn_ty  = self.ctx.void_type().fn_type(
+                &[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
+            self.module.add_function(fn_name, fn_ty, None);
+        }
+        let fn_val = self.module.get_function(fn_name).unwrap();
+        if fn_val.count_basic_blocks() > 0 { return; }
+        let i64_ty = self.ctx.i64_type();
+        let entry  = self.ctx.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+        let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
+        let idx      = fn_val.get_nth_param(1).unwrap().into_int_value();
+        let val      = fn_val.get_nth_param(2).unwrap().into_int_value();
+        let slot     = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "slot").unwrap();
+        let elem_ptr = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[slot], "ep").unwrap() };
+        self.builder.build_store(elem_ptr, val).unwrap();
+        self.builder.build_return(None).unwrap();
     }
 
     // ── arc_list_filter(ptr list, ptr fn_ptr) → ptr ──────────────────────────
@@ -5360,6 +5389,537 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(result_ptr)
     }
 
+    // ── sortedBy(fn) → yeni sıralı liste (bubble sort, O(n²)) ─────────────────
+
+    fn build_list_sorted_by(
+        &mut self,
+        src_ptr : inkwell::values::PointerValue<'ctx>,
+        fn_ptr  : BasicValueEnum<'ctx>,
+    ) -> CgResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty     = self.ctx.i64_type();
+        let ptr_ty     = self.ctx.ptr_type(AddressSpace::default());
+        let list_new   = self.module.get_function("arc_list_new").unwrap();
+        let list_app   = self.module.get_function("arc_list_append").unwrap();
+        let list_get   = self.module.get_function("arc_list_length").unwrap();
+        let list_getf  = self.module.get_function("arc_list_get").unwrap();
+        let list_set   = self.module.get_function("arc_list_set").unwrap();
+
+        // fat pointer ayrıştır
+        let is_fat = matches!(fn_ptr, BasicValueEnum::StructValue(_));
+        let (fn_p, cl_ptr) = self.extract_fn_closure(fn_ptr)?;
+        let fn_type = if is_fat {
+            i64_ty.fn_type(&[i64_ty.into(), i64_ty.into(), ptr_ty.into()], false)
+        } else {
+            i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false)
+        };
+
+        // 1. Kaynak listeyi kopyala → result
+        let res_call = self.builder.build_call(list_new, &[], "srt_res")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let result_ptr = match res_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::PointerValue(p)) => p,
+            _ => return Ok(ptr_ty.const_null()),
+        };
+        let len_call = self.builder.build_call(list_get, &[src_ptr.into()], "srt_len")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let len = match len_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::IntValue(v)) => v,
+            _ => return Ok(result_ptr),
+        };
+
+        let cur_fn = self.cur_fn.unwrap();
+
+        // Tüm alloca'ları buraya — loop başlamadan önce, mevcut BB'de
+        let cp_idx      = self.builder.build_alloca(i64_ty, "srt_ci")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let pass_alloca = self.builder.build_alloca(i64_ty, "srt_pass")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.build_store(cp_idx, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // 1. Kopyalama döngüsü
+        let cp_cond = self.ctx.append_basic_block(cur_fn, "srt.cp.cond");
+        let cp_body = self.ctx.append_basic_block(cur_fn, "srt.cp.body");
+        let sort_bb = self.ctx.append_basic_block(cur_fn, "srt.outer.init");
+        self.builder.build_unconditional_branch(cp_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.position_at_end(cp_cond);
+        let ci = self.builder.build_load(i64_ty, cp_idx, "srt_ci_v")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let cp_ok = self.builder.build_int_compare(inkwell::IntPredicate::SLT, ci, len, "srt_cp_ok")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(cp_ok, cp_body, sort_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.position_at_end(cp_body);
+        let elem = self.builder.build_call(list_getf, &[src_ptr.into(), ci.into()], "srt_e")
+            .map_err(|e| CodeGenError::new(e.to_string()))?
+            .try_as_basic_value().basic()
+            .unwrap_or(i64_ty.const_int(0, false).into());
+        let elem_i64 = self.value_to_i64(elem)?;
+        self.builder.build_call(list_app, &[result_ptr.into(), elem_i64.into()], "")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let ci_next = self.builder.build_int_add(ci, i64_ty.const_int(1, false), "srt_ci_n")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(cp_idx, ci_next)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(cp_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // 2. Bubble sort: outer loop (pass = 0..len)
+        self.builder.position_at_end(sort_bb);
+        self.builder.build_store(pass_alloca, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let o_cond = self.ctx.append_basic_block(cur_fn, "srt.o.cond");
+        let o_body = self.ctx.append_basic_block(cur_fn, "srt.o.body");
+        let srt_exit = self.ctx.append_basic_block(cur_fn, "srt.exit");
+        self.builder.build_unconditional_branch(o_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(o_cond);
+        let pass = self.builder.build_load(i64_ty, pass_alloca, "srt_pass_v")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let o_ok = self.builder.build_int_compare(inkwell::IntPredicate::SLT, pass, len, "srt_o_ok")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(o_ok, o_body, srt_exit)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // outer body → inner loop
+        self.builder.position_at_end(o_body);
+        let i_alloca = self.builder.build_alloca(i64_ty, "srt_i")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(i_alloca, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let len_m1 = self.builder.build_int_sub(len, i64_ty.const_int(1, false), "srt_lm1")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let i_cond = self.ctx.append_basic_block(cur_fn, "srt.i.cond");
+        let i_body = self.ctx.append_basic_block(cur_fn, "srt.i.body");
+        let swap_bb = self.ctx.append_basic_block(cur_fn, "srt.swap");
+        let no_swap = self.ctx.append_basic_block(cur_fn, "srt.noswap");
+        let i_next  = self.ctx.append_basic_block(cur_fn, "srt.i.next");
+        let o_next  = self.ctx.append_basic_block(cur_fn, "srt.o.next");
+        self.builder.build_unconditional_branch(i_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(i_cond);
+        let i_v = self.builder.build_load(i64_ty, i_alloca, "srt_i_v")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let i_ok = self.builder.build_int_compare(inkwell::IntPredicate::SLT, i_v, len_m1, "srt_i_ok")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(i_ok, i_body, o_next)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(i_body);
+        let iv2 = self.builder.build_load(i64_ty, i_alloca, "srt_iv2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let i1  = self.builder.build_int_add(iv2, i64_ty.const_int(1, false), "srt_i1")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let a_call = self.builder.build_call(list_getf, &[result_ptr.into(), iv2.into()], "srt_a")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let a = a_call.try_as_basic_value().basic()
+            .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
+            .unwrap_or(i64_ty.const_int(0, false));
+        let b_call = self.builder.build_call(list_getf, &[result_ptr.into(), i1.into()], "srt_b")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let b = b_call.try_as_basic_value().basic()
+            .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
+            .unwrap_or(i64_ty.const_int(0, false));
+        let cmp_args: Vec<inkwell::values::BasicMetadataValueEnum> = if is_fat {
+            vec![a.into(), b.into(), cl_ptr.into()]
+        } else {
+            vec![a.into(), b.into()]
+        };
+        let cmp_call = self.builder.build_indirect_call(fn_type, fn_p, &cmp_args, "srt_cmp")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let cmp_val = cmp_call.try_as_basic_value().basic()
+            .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
+            .unwrap_or(i64_ty.const_int(0, false));
+        let need_swap = self.builder.build_int_compare(
+            inkwell::IntPredicate::SGT, cmp_val, i64_ty.const_int(0, false), "srt_ns")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(need_swap, swap_bb, no_swap)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // swap: set(i, b), set(i+1, a)
+        self.builder.position_at_end(swap_bb);
+        let iv3 = self.builder.build_load(i64_ty, i_alloca, "srt_iv3")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let i1b = self.builder.build_int_add(iv3, i64_ty.const_int(1, false), "srt_i1b")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_call(list_set, &[result_ptr.into(), iv3.into(), b.into()], "")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_call(list_set, &[result_ptr.into(), i1b.into(), a.into()], "")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(i_next)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(no_swap);
+        self.builder.build_unconditional_branch(i_next)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(i_next);
+        let iv4 = self.builder.build_load(i64_ty, i_alloca, "srt_iv4")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let in2 = self.builder.build_int_add(iv4, i64_ty.const_int(1, false), "srt_in")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(i_alloca, in2)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(i_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(o_next);
+        let pv2 = self.builder.build_load(i64_ty, pass_alloca, "srt_pv2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let pn  = self.builder.build_int_add(pv2, i64_ty.const_int(1, false), "srt_pn")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(pass_alloca, pn)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(o_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(srt_exit);
+        Ok(result_ptr)
+    }
+
+    // ── flatMap(fn) → yeni liste (her eleman → List<T> dönüştürür, düzleştirir) ─
+
+    fn build_list_flat_map(
+        &mut self,
+        src_ptr : inkwell::values::PointerValue<'ctx>,
+        fn_ptr  : BasicValueEnum<'ctx>,
+    ) -> CgResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty    = self.ctx.i64_type();
+        let ptr_ty    = self.ctx.ptr_type(AddressSpace::default());
+        let list_new  = self.module.get_function("arc_list_new").unwrap();
+        let list_app  = self.module.get_function("arc_list_append").unwrap();
+        let list_len  = self.module.get_function("arc_list_length").unwrap();
+        let list_get  = self.module.get_function("arc_list_get").unwrap();
+
+        let is_fat = matches!(fn_ptr, BasicValueEnum::StructValue(_));
+        let (fn_p, cl_ptr) = self.extract_fn_closure(fn_ptr)?;
+        let fn_type = if is_fat {
+            i64_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false)
+        } else {
+            i64_ty.fn_type(&[i64_ty.into()], false)
+        };
+
+        let res_call = self.builder.build_call(list_new, &[], "fm_res")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let result_ptr = match res_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::PointerValue(p)) => p,
+            _ => return Ok(ptr_ty.const_null()),
+        };
+        let src_len_call = self.builder.build_call(list_len, &[src_ptr.into()], "fm_slen")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let src_len = match src_len_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::IntValue(v)) => v,
+            _ => return Ok(result_ptr),
+        };
+
+        let cur_fn = self.cur_fn.unwrap();
+        let oi = self.builder.build_alloca(i64_ty, "fm_oi")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(oi, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        let o_cond = self.ctx.append_basic_block(cur_fn, "fm.o.cond");
+        let o_body = self.ctx.append_basic_block(cur_fn, "fm.o.body");
+        let fm_exit= self.ctx.append_basic_block(cur_fn, "fm.exit");
+        self.builder.build_unconditional_branch(o_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(o_cond);
+        let oiv = self.builder.build_load(i64_ty, oi, "fm_oiv")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let o_ok = self.builder.build_int_compare(inkwell::IntPredicate::SLT, oiv, src_len, "fm_o_ok")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(o_ok, o_body, fm_exit)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(o_body);
+        let oiv2 = self.builder.build_load(i64_ty, oi, "fm_oiv2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let elem_call = self.builder.build_call(list_get, &[src_ptr.into(), oiv2.into()], "fm_elem")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let elem_i64 = elem_call.try_as_basic_value().basic()
+            .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
+            .unwrap_or(i64_ty.const_int(0, false));
+
+        // lambda(elem) → i64 (pointer to inner list)
+        let lam_args: Vec<inkwell::values::BasicMetadataValueEnum> = if is_fat {
+            vec![elem_i64.into(), cl_ptr.into()]
+        } else {
+            vec![elem_i64.into()]
+        };
+        let inner_call = self.builder.build_indirect_call(fn_type, fn_p, &lam_args, "fm_inner")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let inner_i64 = match inner_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::IntValue(v)) => v,
+            _ => {
+                let o_next = self.ctx.append_basic_block(cur_fn, "fm.o.next_skip");
+                self.builder.build_unconditional_branch(o_next)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.position_at_end(o_next);
+                let ov_n = self.builder.build_int_add(oiv2, i64_ty.const_int(1, false), "fm_on")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(oi, ov_n)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_unconditional_branch(o_cond)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                return Ok(result_ptr); // unreachable
+            }
+        };
+        let inner_ptr = self.builder.build_int_to_ptr(inner_i64, ptr_ty, "fm_iptr")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let inner_len_call = self.builder.build_call(list_len, &[inner_ptr.into()], "fm_ilen")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let inner_len = match inner_len_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::IntValue(v)) => v,
+            _ => i64_ty.const_int(0, false),
+        };
+
+        // inner loop: for j = 0..inner_len: result.append(inner.get(j))
+        let ji = self.builder.build_alloca(i64_ty, "fm_ji")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(ji, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let i_cond = self.ctx.append_basic_block(cur_fn, "fm.i.cond");
+        let i_body = self.ctx.append_basic_block(cur_fn, "fm.i.body");
+        let o_next = self.ctx.append_basic_block(cur_fn, "fm.o.next");
+        self.builder.build_unconditional_branch(i_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(i_cond);
+        let jiv = self.builder.build_load(i64_ty, ji, "fm_jiv")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let j_ok = self.builder.build_int_compare(inkwell::IntPredicate::SLT, jiv, inner_len, "fm_j_ok")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(j_ok, i_body, o_next)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(i_body);
+        let jiv2 = self.builder.build_load(i64_ty, ji, "fm_jiv2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let ie_call = self.builder.build_call(list_get, &[inner_ptr.into(), jiv2.into()], "fm_ie")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let ie_val = ie_call.try_as_basic_value().basic()
+            .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
+            .unwrap_or(i64_ty.const_int(0, false));
+        self.builder.build_call(list_app, &[result_ptr.into(), ie_val.into()], "")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let j_next = self.builder.build_int_add(jiv2, i64_ty.const_int(1, false), "fm_jn")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(ji, j_next)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(i_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(o_next);
+        let o_n = self.builder.build_int_add(oiv2, i64_ty.const_int(1, false), "fm_on2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(oi, o_n)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(o_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(fm_exit);
+        Ok(result_ptr)
+    }
+
+    // ── HashMap.remove(key) → bulup sil, son entryyi o slota taşı ─────────────
+
+    fn build_map_remove(
+        &mut self,
+        map_ptr : inkwell::values::PointerValue<'ctx>,
+        key_ptr : inkwell::values::PointerValue<'ctx>,
+    ) -> CgResult<()> {
+        let i64_ty  = self.ctx.i64_type();
+        let strcmp  = self.module.get_function("strcmp").unwrap();
+        let cur_fn  = self.cur_fn.unwrap();
+
+        // len = map[0]
+        let len = self.builder.build_load(i64_ty, map_ptr, "mr_len")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+
+        let idx_a  = self.builder.build_alloca(i64_ty, "mr_idx")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(idx_a, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        let cond_bb  = self.ctx.append_basic_block(cur_fn, "mr.cond");
+        let chk_bb   = self.ctx.append_basic_block(cur_fn, "mr.chk");
+        let found_bb = self.ctx.append_basic_block(cur_fn, "mr.found");
+        let next_bb  = self.ctx.append_basic_block(cur_fn, "mr.next");
+        let done_bb  = self.ctx.append_basic_block(cur_fn, "mr.done");
+
+        self.builder.build_unconditional_branch(cond_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(cond_bb);
+        let idx = self.builder.build_load(i64_ty, idx_a, "mr_i")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let lt = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx, len, "mr_lt")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(lt, chk_bb, done_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(chk_bb);
+        let two   = i64_ty.const_int(2, false);
+        let one   = i64_ty.const_int(1, false);
+        let i2    = self.builder.build_int_mul(idx, two, "mr_i2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let kslot_idx = self.builder.build_int_add(i2, one, "mr_ks")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let k_gep = unsafe { self.builder.build_gep(i64_ty, map_ptr, &[kslot_idx], "mr_kp")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        let stored_ki = self.builder.build_load(i64_ty, k_gep, "mr_ski")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let ptr_ty  = self.ctx.ptr_type(AddressSpace::default());
+        let stored_kp = self.builder.build_int_to_ptr(stored_ki, ptr_ty, "mr_skp")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let cmp = self.builder.build_call(strcmp, &[stored_kp.into(), key_ptr.into()], "mr_cmp")
+            .map_err(|e| CodeGenError::new(e.to_string()))?
+            .try_as_basic_value().basic().unwrap().into_int_value();
+        let is_eq = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ, cmp, self.ctx.i32_type().const_int(0, false), "mr_eq")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(is_eq, found_bb, next_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // found: copy last entry to slot i, decrement len
+        self.builder.position_at_end(found_bb);
+        let idx2 = self.builder.build_load(i64_ty, idx_a, "mr_i2v")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let len2 = self.builder.build_load(i64_ty, map_ptr, "mr_len2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let last = self.builder.build_int_sub(len2, one, "mr_last")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        // last key slot: 1 + last*2
+        let lk2  = self.builder.build_int_mul(last, two, "mr_lk2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let lks  = self.builder.build_int_add(lk2, one, "mr_lks")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let lvs  = self.builder.build_int_add(lk2, two, "mr_lvs")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let lk_gep = unsafe { self.builder.build_gep(i64_ty, map_ptr, &[lks], "mr_lkp")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        let lv_gep = unsafe { self.builder.build_gep(i64_ty, map_ptr, &[lvs], "mr_lvp")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        let last_k = self.builder.build_load(i64_ty, lk_gep, "mr_lk_v")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let last_v = self.builder.build_load(i64_ty, lv_gep, "mr_lv_v")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        // target key/val slots
+        let i2v  = self.builder.build_int_mul(idx2, two, "mr_i2vx")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let tks  = self.builder.build_int_add(i2v, one, "mr_tks")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let tvs  = self.builder.build_int_add(i2v, two, "mr_tvs")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let tk_gep = unsafe { self.builder.build_gep(i64_ty, map_ptr, &[tks], "mr_tkp")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        let tv_gep = unsafe { self.builder.build_gep(i64_ty, map_ptr, &[tvs], "mr_tvp")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        self.builder.build_store(tk_gep, last_k)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(tv_gep, last_v)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let new_len = self.builder.build_int_sub(len2, one, "mr_nl")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(map_ptr, new_len)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(done_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(next_bb);
+        let idx_n = self.builder.build_int_add(idx, one, "mr_in")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(idx_a, idx_n)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(cond_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(done_bb);
+        Ok(())
+    }
+
+    // ── HashMap.forEach((k, v) → Void) ───────────────────────────────────────
+
+    fn build_map_foreach(
+        &mut self,
+        map_ptr : inkwell::values::PointerValue<'ctx>,
+        fn_ptr  : BasicValueEnum<'ctx>,
+    ) -> CgResult<()> {
+        let i64_ty  = self.ctx.i64_type();
+        let ptr_ty  = self.ctx.ptr_type(AddressSpace::default());
+        let is_fat  = matches!(fn_ptr, BasicValueEnum::StructValue(_));
+        let (fn_p, cl_ptr) = self.extract_fn_closure(fn_ptr)?;
+        let fn_type = if is_fat {
+            i64_ty.fn_type(&[i64_ty.into(), i64_ty.into(), ptr_ty.into()], false)
+        } else {
+            i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false)
+        };
+
+        let len = self.builder.build_load(i64_ty, map_ptr, "mfe_len")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+
+        let cur_fn = self.cur_fn.unwrap();
+        let idx_a  = self.builder.build_alloca(i64_ty, "mfe_idx")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(idx_a, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        let cond_bb = self.ctx.append_basic_block(cur_fn, "mfe.cond");
+        let body_bb = self.ctx.append_basic_block(cur_fn, "mfe.body");
+        let exit_bb = self.ctx.append_basic_block(cur_fn, "mfe.exit");
+
+        self.builder.build_unconditional_branch(cond_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.position_at_end(cond_bb);
+        let idx = self.builder.build_load(i64_ty, idx_a, "mfe_i")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let lt  = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx, len, "mfe_lt")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(lt, body_bb, exit_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(body_bb);
+        let two  = i64_ty.const_int(2, false);
+        let one  = i64_ty.const_int(1, false);
+        let i2   = self.builder.build_int_mul(idx, two, "mfe_i2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let ks   = self.builder.build_int_add(i2, one, "mfe_ks")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let vs   = self.builder.build_int_add(i2, two, "mfe_vs")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let k_gep = unsafe { self.builder.build_gep(i64_ty, map_ptr, &[ks], "mfe_kp")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        let v_gep = unsafe { self.builder.build_gep(i64_ty, map_ptr, &[vs], "mfe_vp")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        let k_val = self.builder.build_load(i64_ty, k_gep, "mfe_k")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let v_val = self.builder.build_load(i64_ty, v_gep, "mfe_v")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+
+        let call_args: Vec<inkwell::values::BasicMetadataValueEnum> = if is_fat {
+            vec![k_val.into(), v_val.into(), cl_ptr.into()]
+        } else {
+            vec![k_val.into(), v_val.into()]
+        };
+        self.builder.build_indirect_call(fn_type, fn_p, &call_args, "mfe_call")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        let idx_n = self.builder.build_int_add(idx, one, "mfe_in")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(idx_a, idx_n)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(cond_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(exit_bb);
+        Ok(())
+    }
+
     // distinct() → tekrar eden elemanları çıkar (O(n²) doğru implementasyon)
     // Dış döngü: her src elemanı için iç döngü: result'ta zaten var mı?
     // Yok ise ekle, var ise atla.
@@ -5617,18 +6177,89 @@ impl<'ctx> CodeGen<'ctx> {
         &mut self,
         map_ptr : inkwell::values::PointerValue<'ctx>,
     ) -> CgResult<inkwell::values::PointerValue<'ctx>> {
-        // Sadece key'leri döndür: entries'den Pair.getFirst()
-        // Basit: entries yap, key'leri çıkar
-        let entries = self.build_map_entries(map_ptr)?;
-        Ok(entries) // caller'a bırak key extraction'ı
+        self.build_map_list(map_ptr, true)
     }
 
     fn build_map_values(
         &mut self,
         map_ptr : inkwell::values::PointerValue<'ctx>,
     ) -> CgResult<inkwell::values::PointerValue<'ctx>> {
-        let entries = self.build_map_entries(map_ptr)?;
-        Ok(entries) // benzer şekilde
+        self.build_map_list(map_ptr, false)
+    }
+
+    // map.keys() veya map.values() → List<T>
+    // keys_mode=true → key i64 listesi, false → val i64 listesi
+    fn build_map_list(
+        &mut self,
+        map_ptr   : inkwell::values::PointerValue<'ctx>,
+        keys_mode : bool,
+    ) -> CgResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.ctx.i64_type();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+
+        let list_new_fn    = self.module.get_function("arc_list_new").unwrap();
+        let list_append_fn = self.module.get_function("arc_list_append").unwrap();
+
+        let result_call = self.builder.build_call(list_new_fn, &[], "ml_res")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let result_ptr = match result_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::PointerValue(p)) => p,
+            _ => return Ok(ptr_ty.const_null()),
+        };
+
+        // len = map[0]
+        let len = self.builder.build_load(i64_ty, map_ptr, "ml_len")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+
+        let cur_fn     = self.cur_fn.unwrap();
+        let idx_alloca = self.builder.build_alloca(i64_ty, "ml_idx")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(idx_alloca, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        let cond_bb = self.ctx.append_basic_block(cur_fn, "ml.cond");
+        let body_bb = self.ctx.append_basic_block(cur_fn, "ml.body");
+        let exit_bb = self.ctx.append_basic_block(cur_fn, "ml.exit");
+
+        self.builder.build_unconditional_branch(cond_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.position_at_end(cond_bb);
+        let idx = self.builder.build_load(i64_ty, idx_alloca, "ml_i")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let cond = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx, len, "ml_c")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(cond, body_bb, exit_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(body_bb);
+        let two   = i64_ty.const_int(2, false);
+        let one   = i64_ty.const_int(1, false);
+        // key slot: 1 + i*2,  val slot: 2 + i*2
+        let i2    = self.builder.build_int_mul(idx, two, "ml_i2")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let off   = if keys_mode {
+            self.builder.build_int_add(i2, one, "ml_ko")
+                .map_err(|e| CodeGenError::new(e.to_string()))?
+        } else {
+            self.builder.build_int_add(i2, two, "ml_vo")
+                .map_err(|e| CodeGenError::new(e.to_string()))?
+        };
+        let slot_gep = unsafe { self.builder.build_gep(i64_ty, map_ptr, &[off], "ml_gep")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        let item_val = self.builder.build_load(i64_ty, slot_gep, "ml_item")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+
+        self.builder.build_call(list_append_fn, &[result_ptr.into(), item_val.into()], "")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        let next = self.builder.build_int_add(idx, one, "ml_inc")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(idx_alloca, next)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(cond_bb)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.position_at_end(exit_bb);
+        Ok(result_ptr)
     }
 
     fn compile_collection_method(
@@ -5664,6 +6295,99 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_call(f, &[list_ptr.into(), item_val.into()], "")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 Ok(None)
+            }
+
+            ("__List", "get") => {
+                let idx = args.first()
+                    .and_then(|a| self.compile_expr(a).ok().flatten())
+                    .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) }
+                                  else { Some(i64_ty.const_int(0, false)) })
+                    .unwrap_or(i64_ty.const_int(0, false));
+                let f = self.module.get_function("arc_list_get").unwrap();
+                let r = self.builder.build_call(f, &[list_ptr.into(), idx.into()], "list_get")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                return Ok(r.try_as_basic_value().basic());
+            }
+
+            ("__List", "set") => {
+                let idx = args.first()
+                    .and_then(|a| self.compile_expr(a).ok().flatten())
+                    .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) }
+                                  else { Some(i64_ty.const_int(0, false)) })
+                    .unwrap_or(i64_ty.const_int(0, false));
+                let val = args.get(1)
+                    .and_then(|a| self.compile_expr(a).ok().flatten())
+                    .map(|v| self.value_to_i64(v)).transpose()?
+                    .unwrap_or(i64_ty.const_int(0, false));
+                let f = self.module.get_function("arc_list_set").unwrap();
+                self.builder.build_call(f, &[list_ptr.into(), idx.into(), val.into()], "")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                return Ok(None);
+            }
+
+            ("__List", "removeAt") => {
+                // Shift elements left from idx+1, decrement len
+                let idx = args.first()
+                    .and_then(|a| self.compile_expr(a).ok().flatten())
+                    .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) }
+                                  else { Some(i64_ty.const_int(0, false)) })
+                    .unwrap_or(i64_ty.const_int(0, false));
+                let len_f = self.module.get_function("arc_list_length").unwrap();
+                let get_f = self.module.get_function("arc_list_get").unwrap();
+                let set_f = self.module.get_function("arc_list_set").unwrap();
+                let len_call = self.builder.build_call(len_f, &[list_ptr.into()], "rm_len")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let len = match len_call.try_as_basic_value().basic() {
+                    Some(BasicValueEnum::IntValue(v)) => v,
+                    _ => return Ok(None),
+                };
+                // Shift: for i = idx..len-1: set(i, get(i+1))
+                let cur_fn2 = self.cur_fn.unwrap();
+                let rm_i   = self.builder.build_alloca(i64_ty, "rm_i")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(rm_i, idx)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let lm1    = self.builder.build_int_sub(len, i64_ty.const_int(1, false), "rm_lm1")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let rm_cond = self.ctx.append_basic_block(cur_fn2, "rm.cond");
+                let rm_body = self.ctx.append_basic_block(cur_fn2, "rm.body");
+                let rm_exit = self.ctx.append_basic_block(cur_fn2, "rm.exit");
+                self.builder.build_unconditional_branch(rm_cond)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.position_at_end(rm_cond);
+                let ri = self.builder.build_load(i64_ty, rm_i, "rm_iv")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+                let rm_ok = self.builder.build_int_compare(inkwell::IntPredicate::SLT, ri, lm1, "rm_ok")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_conditional_branch(rm_ok, rm_body, rm_exit)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.position_at_end(rm_body);
+                let ri2  = self.builder.build_load(i64_ty, rm_i, "rm_iv2")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+                let ri1  = self.builder.build_int_add(ri2, i64_ty.const_int(1, false), "rm_i1")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let next_elem = self.builder.build_call(get_f, &[list_ptr.into(), ri1.into()], "rm_ne")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?
+                    .try_as_basic_value().basic()
+                    .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
+                    .unwrap_or(i64_ty.const_int(0, false));
+                self.builder.build_call(set_f, &[list_ptr.into(), ri2.into(), next_elem.into()], "")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let ri_n = self.builder.build_int_add(ri2, i64_ty.const_int(1, false), "rm_in")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(rm_i, ri_n)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_unconditional_branch(rm_cond)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.position_at_end(rm_exit);
+                // Decrement len: list[0]--
+                let cur_len = self.builder.build_load(i64_ty, list_ptr, "rm_cl")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+                let new_len = self.builder.build_int_sub(cur_len, i64_ty.const_int(1, false), "rm_nl")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(list_ptr, new_len)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                return Ok(None);
             }
 
             ("__List", "length") => {
@@ -5772,9 +6496,27 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(init_val.into()))
             }
 
-            // sortedBy(fn) → şimdilik listeyi olduğu gibi döndür (qsort sonraki aşama)
+            // sortedBy(fn) → yeni sıralı liste (bubble sort)
             ("__List", "sortedBy") => {
-                for a in args { self.compile_expr(a)?; }
+                let lambda_expr = args.first();
+                if let Some(lambda) = lambda_expr {
+                    if let Some(fn_ptr_val) = self.compile_expr(lambda)? {
+                        let result = self.build_list_sorted_by(list_ptr, fn_ptr_val)?;
+                        return Ok(Some(result.into()));
+                    }
+                }
+                Ok(Some(list_ptr.into()))
+            }
+
+            // flatMap(fn) → düzleştirilmiş liste
+            ("__List", "flatMap") => {
+                let lambda_expr = args.first();
+                if let Some(lambda) = lambda_expr {
+                    if let Some(fn_ptr_val) = self.compile_expr(lambda)? {
+                        let result = self.build_list_flat_map(list_ptr, fn_ptr_val)?;
+                        return Ok(Some(result.into()));
+                    }
+                }
                 Ok(Some(list_ptr.into()))
             }
 
@@ -5897,8 +6639,23 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             ("__HashMap", "remove") => {
-                // remove: length--  (basit: son slot'u temizle — collision yoksa yeter)
-                for a in args { self.compile_expr(a)?; }
+                let key = if let Some(a) = args.first() {
+                    self.compile_expr(a)?
+                        .map(|v| if let BasicValueEnum::PointerValue(p) = v { p }
+                             else { ptr_ty.const_null() })
+                        .unwrap_or(ptr_ty.const_null())
+                } else { ptr_ty.const_null() };
+                self.build_map_remove(list_ptr, key)?;
+                Ok(None)
+            }
+
+            ("__HashMap", "forEach") => {
+                let lambda_expr = args.first();
+                if let Some(lambda) = lambda_expr {
+                    if let Some(fn_ptr_val) = self.compile_expr(lambda)? {
+                        self.build_map_foreach(list_ptr, fn_ptr_val)?;
+                    }
+                }
                 Ok(None)
             }
 
