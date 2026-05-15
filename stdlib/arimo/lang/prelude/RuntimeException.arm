@@ -1,0 +1,7 @@
+package arimo.lang.prelude;
+
+public class RuntimeException extends Exception {
+    public constructor(message: String) {
+        super(message);
+    }
+}

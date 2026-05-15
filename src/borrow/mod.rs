@@ -138,6 +138,8 @@ impl BorrowChecker {
             Type::Integer | Type::Float | Type::Boolean |
             Type::U8 | Type::U16 | Type::U32 | Type::U64 |
             Type::I8 | Type::I16 | Type::I32 | Type::I64 => true,
+            Type::Str                => true,
+            Type::RawPtr(_)          => true,
             Type::Array(_, _) => true,
             Type::Slice(_)    => true,
             Type::FnPtr(_, _) => true,

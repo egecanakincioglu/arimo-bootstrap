@@ -1,0 +1,7 @@
+package arimo.fs;
+
+public class IOException extends Exception {
+    public constructor(message: String) {
+        super(message);
+    }
+}

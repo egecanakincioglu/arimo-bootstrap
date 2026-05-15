@@ -1,0 +1,11 @@
+package arimo.lang.prelude;
+
+public class IndexOutOfBoundsException extends RuntimeException {
+    public constructor(index: Integer, size: Integer) {
+        super("index ${index} out of bounds for size ${size}");
+    }
+
+    public constructor(message: String) {
+        super(message);
+    }
+}

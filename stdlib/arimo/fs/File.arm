@@ -1,0 +1,68 @@
+package arimo.fs;
+
+extern "C" {
+    fopen(path: String, mode: String) : RawPtr<Void>;
+    fread(buf: RawPtr<Void>, size: Integer, n: Integer, f: RawPtr<Void>) : Integer;
+    fwrite(buf: RawPtr<Void>, size: Integer, n: Integer, f: RawPtr<Void>) : Integer;
+    fclose(f: RawPtr<Void>) : Integer;
+    fseek(f: RawPtr<Void>, offset: Integer, whence: Integer) : Integer;
+    ftell(f: RawPtr<Void>) : Integer;
+    remove(path: String) : Integer;
+}
+
+public class File {
+
+    public static exists(path: String) : Boolean {
+        RawPtr<Void> f = fopen(path, "r");
+        if (f == null) { return false; }
+        fclose(f);
+        return true;
+    }
+
+    public static read(path: String) : String {
+        RawPtr<Void> f = fopen(path, "r");
+        if (f == null) {
+            throw IOException("cannot open file: ${path}");
+        }
+        fseek(f, 0, 2);
+        Integer size = ftell(f);
+        fseek(f, 0, 0);
+        RawPtr<Void> buf = Memory.alloc(size + 1);
+        fread(buf, 1, size, f);
+        fclose(f);
+        return buf as String;
+    }
+
+    public static write(path: String, content: String) : Void {
+        RawPtr<Void> f = fopen(path, "w");
+        if (f == null) {
+            throw IOException("cannot write file: ${path}");
+        }
+        fwrite(content as RawPtr<Void>, 1, content.length(), f);
+        fclose(f);
+    }
+
+    public static append(path: String, content: String) : Void {
+        RawPtr<Void> f = fopen(path, "a");
+        if (f == null) {
+            throw IOException("cannot open file for append: ${path}");
+        }
+        fwrite(content as RawPtr<Void>, 1, content.length(), f);
+        fclose(f);
+    }
+
+    public static delete(path: String) : Boolean {
+        Integer r = remove(path);
+        if (r == 0) { return true; }
+        return false;
+    }
+
+    public static size(path: String) : Integer {
+        RawPtr<Void> f = fopen(path, "r");
+        if (f == null) { return -1; }
+        fseek(f, 0, 2);
+        Integer sz = ftell(f);
+        fclose(f);
+        return sz;
+    }
+}

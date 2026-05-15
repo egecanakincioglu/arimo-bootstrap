@@ -1,0 +1,37 @@
+package arimo.fs;
+
+public class Path {
+    private value : String;
+
+    private constructor(p: String) {
+        this.value = p;
+    }
+
+    public static of(p: String) : Path {
+        return Path(p);
+    }
+
+    public join(other: String) : Path {
+        if (this.value.endsWith("/") || this.value.endsWith("\\")) {
+            return Path(this.value.concat(other));
+        }
+        return Path(this.value.concat("/").concat(other));
+    }
+
+    public toString() : String {
+        return this.value;
+    }
+
+    public exists() : Boolean {
+        return File.exists(this.value);
+    }
+
+    public filename() : String {
+        Integer lastSlash = this.value.indexOf("/");
+        Integer lastBack  = this.value.indexOf("\\");
+        Integer last = lastSlash;
+        if (lastBack > lastSlash) { last = lastBack; }
+        if (last < 0) { return this.value; }
+        return this.value.substring(last + 1, this.value.length());
+    }
+}

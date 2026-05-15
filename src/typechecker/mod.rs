@@ -1170,6 +1170,14 @@ impl TypeChecker {
                 }
 
                 let arg_types : Vec<Type> = args.iter().map(|a| self.infer_expr(a)).collect();
+                // Check if this is a bare extern C function call (looks like constructor syntax)
+                if let Some(extern_cls) = self.classes.get("__extern_C").cloned() {
+                    if let Some(overloads) = extern_cls.methods.get(class.as_str()) {
+                        if let Some(mi) = overloads.first() {
+                            return mi.return_ty.clone().unwrap_or(Type::Void);
+                        }
+                    }
+                }
                 match self.classes.get(class.as_str()).cloned() {
                     None => {
                         self.error(format!("unknown type '{}'", class));
@@ -1597,6 +1605,9 @@ impl TypeChecker {
         if matches!(from, Type::Float) && matches!(to, Type::Float) { return true; }
         if matches!(from, Type::RawPtr(_)) && matches!(to, Type::RawPtr(_)) { return true; }
         if self.is_integer_type(from) && matches!(to, Type::RawPtr(_)) { return true; }
+        if matches!(from, Type::RawPtr(_)) && self.is_integer_type(to) { return true; }
+        if matches!(from, Type::RawPtr(_)) && matches!(to, Type::Str) { return true; }
+        if matches!(from, Type::Str) && matches!(to, Type::RawPtr(_)) { return true; }
         if self.types_equal(from, to) { return true; }
         false
     }
@@ -1713,6 +1724,13 @@ impl TypeChecker {
             "split"      => Type::List(Box::new(Type::Str)),
             "parseInt"   => Type::Integer,
             "parseFloat" => Type::Float,
+            "concat"     => Type::Str,
+            "isEmpty"    => Type::Boolean,
+            "isBlank"    => Type::Boolean,
+            "repeat"     => Type::Str,
+            "padStart"   => Type::Str,
+            "padEnd"     => Type::Str,
+            "chars"      => Type::List(Box::new(Type::Str)),
             _ => {
                 self.error(format!("unknown String method '{}'", method));
                 Type::Named("Error".to_string())

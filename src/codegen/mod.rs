@@ -1171,13 +1171,22 @@ impl<'ctx> CodeGen<'ctx> {
                 match ret_val {
                     None => {
                         let cur = self.cur_fn.unwrap();
-                        if cur.get_type().get_return_type().is_some() {
-                            let zero = self.ctx.i32_type().const_int(0, false);
-                            self.builder.build_return(Some(&zero))
-                                .map_err(|e| CodeGenError::new(e.to_string()))?;
-                        } else {
-                            self.builder.build_return(None)
-                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        match cur.get_type().get_return_type() {
+                            None => {
+                                self.builder.build_return(None)
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            }
+                            Some(rt) => {
+                                use inkwell::types::BasicTypeEnum;
+                                let zero_val: inkwell::values::BasicValueEnum = match rt {
+                                    BasicTypeEnum::IntType(t)   => t.const_int(0, false).into(),
+                                    BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
+                                    BasicTypeEnum::PointerType(t) => t.const_null().into(),
+                                    _ => self.ctx.i64_type().const_int(0, false).into(),
+                                };
+                                self.builder.build_return(Some(&zero_val))
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            }
                         }
                     }
                     Some(v) => {
@@ -2117,16 +2126,23 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                 }
 
-                let ctor_name = format!("{}_new", class);
                 let compiled: Vec<BasicValueEnum<'ctx>> = args.iter()
                     .filter_map(|a| self.compile_expr(a).ok().flatten())
                     .collect();
+                let meta: Vec<inkwell::values::BasicMetadataValueEnum> =
+                    compiled.iter().map(|v| (*v).into()).collect();
 
+                // Try as a direct extern function call (e.g. fopen, remove, ftell...)
+                if let Some(extern_fn) = self.module.get_function(class.as_str()) {
+                    let call = self.builder.build_call(extern_fn, &meta, "extern_call")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    return Ok(call.try_as_basic_value().basic());
+                }
+
+                let ctor_name = format!("{}_new", class);
                 if let Some(ctor_fn) = self.fns.get(&ctor_name).copied()
                     .or_else(|| self.module.get_function(&ctor_name))
                 {
-                    let meta: Vec<inkwell::values::BasicMetadataValueEnum> =
-                        compiled.iter().map(|v| (*v).into()).collect();
                     let call = self.builder.build_call(ctor_fn, &meta, "obj")
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     Ok(call.try_as_basic_value().basic())
@@ -2625,7 +2641,7 @@ impl<'ctx> CodeGen<'ctx> {
                          "compareTo" | "toUpper" | "toLower" | "trim" |
                          "split" | "indexOf" | "substring" | "replace" |
                          "parseInt" | "parseFloat" | "isEmpty" | "isBlank" |
-                         "repeat" | "padStart" | "padEnd" | "chars")
+                         "repeat" | "padStart" | "padEnd" | "chars" | "concat")
     }
 
     fn compile_string_method(
@@ -2961,6 +2977,34 @@ impl<'ctx> CodeGen<'ctx> {
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 phi.add_incoming(&[(&str_ptr, rep_nofound_bb), (&buf_ptr, rep_found_bb)]);
                 Ok(Some(phi.as_basic_value()))
+            }
+
+            "concat" => {
+                let other = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
+                    .and_then(|v| if let BasicValueEnum::PointerValue(p) = v { Some(p) } else { None })
+                    .unwrap_or(ptr_ty.const_null());
+                let strlen = self.module.get_function("strlen").unwrap();
+                let malloc  = self.module.get_function("malloc").unwrap();
+                let llen = { let r = self.builder.build_call(strlen, &[str_ptr.into()], "llen").map_err(|e| CodeGenError::new(e.to_string()))?; match r.try_as_basic_value().basic() { Some(BasicValueEnum::IntValue(v)) => v, _ => i64_ty.const_int(0, false) } };
+                let rlen = { let r = self.builder.build_call(strlen, &[other.into()], "rlen").map_err(|e| CodeGenError::new(e.to_string()))?; match r.try_as_basic_value().basic() { Some(BasicValueEnum::IntValue(v)) => v, _ => i64_ty.const_int(0, false) } };
+                let total = self.builder.build_int_add(llen, rlen, "cat_total").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let total1 = self.builder.build_int_add(total, i64_ty.const_int(1, false), "cat_total1").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let buf_call = self.builder.build_call(malloc, &[total1.into()], "cat_buf").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let buf_ptr = match buf_call.try_as_basic_value().basic() {
+                    Some(BasicValueEnum::PointerValue(p)) => p,
+                    _ => return Ok(Some(str_ptr.into())),
+                };
+                let memcpy_fn = self.module.get_function("memcpy").unwrap_or_else(|| {
+                    let ft = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
+                    self.module.add_function("memcpy", ft, None)
+                });
+                self.builder.build_call(memcpy_fn, &[buf_ptr.into(), str_ptr.into(), llen.into()], "").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let i8_ty = self.ctx.i8_type();
+                let mid = unsafe { self.builder.build_gep(i8_ty, buf_ptr, &[llen], "cat_mid").map_err(|e| CodeGenError::new(e.to_string()))? };
+                self.builder.build_call(memcpy_fn, &[mid.into(), other.into(), rlen.into()], "").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let end = unsafe { self.builder.build_gep(i8_ty, buf_ptr, &[total], "cat_end").map_err(|e| CodeGenError::new(e.to_string()))? };
+                self.builder.build_store(end, i8_ty.const_int(0, false)).map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(Some(buf_ptr.into()))
             }
 
             _ => {
@@ -3954,16 +3998,42 @@ impl<'ctx> CodeGen<'ctx> {
             None    => return Ok(None),
         };
 
-        let fn_name = match &class_name {
-            Some(c) => format!("{}_{}", c, method),
-            None    => return Ok(None),
-        };
+        // When class_name is None (object is result of expression, not a simple Ident),
+        // try string method dispatch if the compiled object is a pointer
+        if class_name.is_none() {
+            if let BasicValueEnum::PointerValue(_) = this_ptr {
+                if Self::is_string_method(method) {
+                    return self.compile_string_method(this_ptr, method, args);
+                }
+            }
+            return Ok(None);
+        }
+
+        let fn_name = format!("{}_{}", class_name.as_ref().unwrap(), method);
 
         let fn_val = match self.fns.get(&fn_name).copied()
             .or_else(|| self.module.get_function(&fn_name))
         {
             Some(f) => f,
-            None    => return Ok(None),
+            None => {
+                // Fallback 1: field access (e.g. this.buf where buf is a String field)
+                if args.is_empty() {
+                    if let (Some(cn), BasicValueEnum::PointerValue(ptr)) =
+                        (class_name.as_deref(), this_ptr)
+                    {
+                        if let Some(loaded) = self.gep_field_load(cn, ptr, method)? {
+                            return Ok(Some(loaded));
+                        }
+                    }
+                }
+                // Fallback 2: string method on ptr (field that happens to be String)
+                if let BasicValueEnum::PointerValue(_) = this_ptr {
+                    if Self::is_string_method(method) {
+                        return self.compile_string_method(this_ptr, method, args);
+                    }
+                }
+                return Ok(None);
+            }
         };
 
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![this_ptr.into()];
@@ -4368,6 +4438,14 @@ impl<'ctx> CodeGen<'ctx> {
                         if let (Some(cn), Some(BasicValueEnum::PointerValue(ptr))) = (class_name, obj_ptr) {
                             self.gep_field_store(&cn.clone(), ptr, field, v)?;
                         }
+                    }
+                }
+                // this.field = val where field access is represented as zero-arg MethodCall
+                Expr::MethodCall { object, method, args } if args.is_empty() => {
+                    let cn = self.infer_object_class(object);
+                    let obj_ptr = self.compile_expr(object)?;
+                    if let (Some(cn), Some(BasicValueEnum::PointerValue(ptr))) = (cn, obj_ptr) {
+                        self.gep_field_store(&cn.clone(), ptr, method, v)?;
                     }
                 }
                 _ => {}

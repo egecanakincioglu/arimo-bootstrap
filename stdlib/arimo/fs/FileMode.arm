@@ -1,0 +1,8 @@
+package arimo.fs;
+
+enum FileMode {
+    Read,
+    Write,
+    Append,
+    ReadWrite
+}

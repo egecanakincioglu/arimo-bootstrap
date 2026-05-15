@@ -398,11 +398,9 @@ impl<'a> Lexer<'a> {
         loop {
             match self.advance() {
                 Some((_, '"')) => {
-                    if !buf.is_empty() {
-                        let span = self.span();
-                        tokens.push(SpannedToken { token: Token::Str(buf.clone()), span });
-                        buf.clear();
-                    }
+                    let span = self.span();
+                    tokens.push(SpannedToken { token: Token::Str(buf.clone()), span });
+                    buf.clear();
                     break;
                 }
                 Some((_, '$')) if self.peek() == Some('{') => {

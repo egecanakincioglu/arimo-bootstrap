@@ -1,0 +1,23 @@
+package test.stdlib;
+
+public class Main {
+    public static main() : Void {
+        // StringBuilder test
+        StringBuilder sb = StringBuilder();
+        sb.append("Hello");
+        sb.append(", World");
+        String result = sb.toString();
+        IO.println(result);
+
+        // File test
+        String path = "stdlib_test_tmp.txt";
+        File.write(path, "arimo stdlib\n");
+        Boolean exists = File.exists(path);
+        IO.println("exists: ${exists}");
+        String content = File.read(path);
+        IO.println("content: ${content}");
+        File.delete(path);
+
+        IO.println("stdlib_fs_test: OK");
+    }
+}
