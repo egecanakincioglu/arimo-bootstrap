@@ -2371,6 +2371,18 @@ impl<'ctx> CodeGen<'ctx> {
                         fmt_str.push_str("%s");
                         interp_vals.push(ep.into());
                     } else if let Some(val) = self.compile_expr(inner_expr)? {
+                        // Boolean i1 → "true"/"false" BEFORE spec is determined
+                        if let BasicValueEnum::IntValue(iv) = val {
+                            if iv.get_type().get_bit_width() == 1 {
+                                let ts = self.build_global_string("true")?;
+                                let fs = self.build_global_string("false")?;
+                                let sel = self.builder.build_select(iv, ts, fs, "bool_str")
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                fmt_str.push_str("%s");
+                                interp_vals.push(sel.into());
+                                continue;
+                            }
+                        }
                         let spec = match val {
                             BasicValueEnum::IntValue(iv) => {
                                 match iv.get_type().get_bit_width() {
@@ -2395,7 +2407,7 @@ impl<'ctx> CodeGen<'ctx> {
                                 if iv.get_type().get_bit_width() < 32 =>
                             {
                                 let i32ty = self.ctx.i32_type();
-                                self.builder.build_int_s_extend(iv, i32ty, "sext")
+                                self.builder.build_int_z_extend(iv, i32ty, "zext")
                                     .map_err(|e| CodeGenError::new(e.to_string()))?.into()
                             }
                             _ => val,
@@ -3802,15 +3814,12 @@ impl<'ctx> CodeGen<'ctx> {
             .ok_or_else(|| CodeGenError::new("printf not declared"))?;
 
         if args.is_empty() {
-            let fmt = self.build_global_string("\n")?;
-            self.builder.build_call(printf, &[fmt.into()], "print")
-                .map_err(|e| CodeGenError::new(e.to_string()))?;
             return Ok(());
         }
 
         match &args[0] {
             Expr::StrLit(s) => {
-                let fmt = self.build_global_string(&format!("{}\n", s))?;
+                let fmt = self.build_global_string(s)?;
                 self.builder.build_call(printf, &[fmt.into()], "print")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
             }
@@ -3829,6 +3838,18 @@ impl<'ctx> CodeGen<'ctx> {
                                 fmt_str.push_str("%s");
                                 interp_vals.push(ep.into());
                             } else if let Some(val) = self.compile_expr(inner_expr)? {
+                                // Boolean i1 → "true"/"false"
+                                if let BasicValueEnum::IntValue(iv) = val {
+                                    if iv.get_type().get_bit_width() == 1 {
+                                        let ts = self.build_global_string("true")?;
+                                        let fs = self.build_global_string("false")?;
+                                        let sel = self.builder.build_select(iv, ts, fs, "bool_str")
+                                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                        fmt_str.push_str("%s");
+                                        interp_vals.push(sel.into());
+                                        continue;
+                                    }
+                                }
                                 let spec = match val {
                                     BasicValueEnum::IntValue(iv) => {
                                         match iv.get_type().get_bit_width() {
@@ -3853,7 +3874,7 @@ impl<'ctx> CodeGen<'ctx> {
                                     }
                                     BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() < 32 => {
                                         let i32ty = self.ctx.i32_type();
-                                        self.builder.build_int_s_extend(iv, i32ty, "sext")
+                                        self.builder.build_int_z_extend(iv, i32ty, "zext")
                                             .map_err(|e| CodeGenError::new(e.to_string()))?.into()
                                     }
                                     _ => val,
@@ -3865,8 +3886,6 @@ impl<'ctx> CodeGen<'ctx> {
                         }
                     }
                 }
-                fmt_str.push('\n');
-
                 let fmt_ptr = self.build_global_string(&fmt_str)?;
                 let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![fmt_ptr.into()];
                 for v in interp_vals {
@@ -3878,9 +3897,22 @@ impl<'ctx> CodeGen<'ctx> {
 
             other => {
                 if let Some(val) = self.compile_expr(other)? {
+                    // Boolean i1 → "true"/"false"
+                    if let BasicValueEnum::IntValue(iv) = val {
+                        if iv.get_type().get_bit_width() == 1 {
+                            let ts = self.build_global_string("true")?;
+                            let fs = self.build_global_string("false")?;
+                            let sel = self.builder.build_select(iv, ts, fs, "bool_str")
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            let fmt_ptr = self.build_global_string("%s")?;
+                            self.builder.build_call(printf, &[fmt_ptr.into(), sel.into()], "print")
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            return Ok(());
+                        }
+                    }
                     let (fmt_s, promoted) = match val {
                         BasicValueEnum::IntValue(iv) => {
-                            let spec = if iv.get_type().get_bit_width() == 64 { "%lld\n" } else { "%d\n" };
+                            let spec = if iv.get_type().get_bit_width() == 64 { "%lld" } else { "%d" };
                             (spec, val)
                         }
                         BasicValueEnum::FloatValue(f) => {
@@ -3889,10 +3921,10 @@ impl<'ctx> CodeGen<'ctx> {
                                 self.builder.build_float_ext(f, f64ty, "fpext")
                                     .map_err(|e| CodeGenError::new(e.to_string()))?.into()
                             } else { val };
-                            ("%g\n", prom)
+                            ("%g", prom)
                         }
-                        BasicValueEnum::PointerValue(_) => ("%s\n", val),
-                        _ => ("%d\n", val),
+                        BasicValueEnum::PointerValue(_) => ("%s", val),
+                        _ => ("%d", val),
                     };
                     let fmt_ptr = self.build_global_string(fmt_s)?;
                     self.builder.build_call(printf, &[fmt_ptr.into(), promoted.into()], "print")
