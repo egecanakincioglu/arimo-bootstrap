@@ -1,0 +1,40 @@
+package arimo.lang;
+
+public class StringBuilder {
+    private buf : String;
+
+    public constructor() {
+        this.buf = "";
+    }
+
+    public append(s: String) : StringBuilder {
+        this.buf = this.buf.concat(s);
+        return this;
+    }
+
+    public appendLine(s: String) : StringBuilder {
+        this.buf = this.buf.concat(s).concat("\n");
+        return this;
+    }
+
+    public prepend(s: String) : StringBuilder {
+        this.buf = s.concat(this.buf);
+        return this;
+    }
+
+    public length() : Integer {
+        return this.buf.length();
+    }
+
+    public isEmpty() : Boolean {
+        return this.buf.length() == 0;
+    }
+
+    public clear() : Void {
+        this.buf = "";
+    }
+
+    public toString() : String {
+        return this.buf;
+    }
+}
