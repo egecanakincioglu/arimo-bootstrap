@@ -1,0 +1,19 @@
+package arimo.test.stdlib_env;
+
+public class EnvTest {
+    public static main() : Void {
+        IO.println("=== Env ===");
+
+        String plat = Env.platform();
+        IO.println("platform: ${plat}");
+
+        List<String> args = Env.args();
+        IO.println("argc: ${args.length()}");
+
+        if (args.length() > 0) {
+            IO.println("args[0]: ${args.get(0)}");
+        }
+
+        IO.println("stdlib_env: OK");
+    }
+}

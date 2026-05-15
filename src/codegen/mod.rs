@@ -509,6 +509,15 @@ impl<'ctx> CodeGen<'ctx> {
         self.module.add_function("strcmp", ft, None);
     }
 
+    fn get_or_create_env_global(&mut self, name: &str, ty: BasicTypeEnum<'ctx>) -> inkwell::values::GlobalValue<'ctx> {
+        if let Some(g) = self.module.get_global(name) { return g; }
+        let zero = self.make_zero_value(ty);
+        let g = self.module.add_global(ty, None, name);
+        g.set_initializer(&zero);
+        g.set_linkage(inkwell::module::Linkage::Internal);
+        g
+    }
+
     fn get_or_create_eh_global(&mut self, name: &str) -> inkwell::values::GlobalValue<'ctx> {
         if let Some(g) = self.module.get_global(name) { return g; }
         let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
@@ -1025,7 +1034,9 @@ impl<'ctx> CodeGen<'ctx> {
         let is_entry = m.name == "main" && m.static_;
 
         let fn_val = if is_entry {
-            let main_ty = self.ctx.i32_type().fn_type(&[], false);
+            let i32_ty = self.ctx.i32_type();
+            let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+            let main_ty = i32_ty.fn_type(&[i32_ty.into(), ptr_ty.into()], false);
             if let Some(existing) = self.module.get_function("main") {
                 existing
             } else {
@@ -1079,6 +1090,17 @@ impl<'ctx> CodeGen<'ctx> {
         self.cur_fn = Some(fn_val);
         self.try_saved_tops.clear();
         self.push_scope();
+
+        if is_entry {
+            let i32_ty = self.ctx.i32_type();
+            let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+            let argc_gv = self.get_or_create_env_global("__arimo_argc", i32_ty.into());
+            let argv_gv = self.get_or_create_env_global("__arimo_argv", ptr_ty.into());
+            if let (Some(argc_p), Some(argv_p)) = (fn_val.get_nth_param(0), fn_val.get_nth_param(1)) {
+                let _ = self.builder.build_store(argc_gv.as_pointer_value(), argc_p);
+                let _ = self.builder.build_store(argv_gv.as_pointer_value(), argv_p);
+            }
+        }
 
         if !m.static_ {
             if let Some(this_val) = fn_val.get_nth_param(0) {
@@ -1210,7 +1232,11 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                     Type::List(inner) => {
                         let ec = match inner.as_ref() {
-                            Type::Named(n) => Some(n.clone()),
+                            Type::Named(n)   => Some(n.clone()),
+                            Type::Str        => Some("String".to_string()),
+                            Type::Integer    => Some("Integer".to_string()),
+                            Type::Float      => Some("Float".to_string()),
+                            Type::Boolean    => Some("Boolean".to_string()),
                             _ => None,
                         };
                         (Some("__List".to_string()), ec)
@@ -2011,7 +2037,7 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             Expr::StaticCall { class, method, args } if
-                matches!(class.as_str(), "IO"|"Math"|"Time"|"Memory") =>
+                matches!(class.as_str(), "IO"|"Math"|"Time"|"Memory"|"Env") =>
             {
                 self.compile_stdlib_call(class, method, args)
             }
@@ -2570,6 +2596,96 @@ impl<'ctx> CodeGen<'ctx> {
             ("Memory", "set") | ("Memory", "copy") => {
                 for a in args { self.compile_expr(a)?; }
                 Ok(None)
+            }
+
+            ("Env", "exit") => {
+                let i32_ty = self.ctx.i32_type();
+                let code_i32 = if let Some(arg) = args.first() {
+                    if let Some(v) = self.compile_expr(arg)? {
+                        match v {
+                            BasicValueEnum::IntValue(i) =>
+                                self.builder.build_int_truncate_or_bit_cast(i, i32_ty, "exit_code")
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?,
+                            _ => i32_ty.const_int(0, false),
+                        }
+                    } else { i32_ty.const_int(0, false) }
+                } else { i32_ty.const_int(0, false) };
+                let exit_fn = self.module.get_function("exit").unwrap_or_else(|| {
+                    let ft = self.ctx.void_type().fn_type(&[i32_ty.into()], false);
+                    self.module.add_function("exit", ft, None)
+                });
+                self.builder.build_call(exit_fn, &[code_i32.into()], "")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(None)
+            }
+
+            ("Env", "platform") => {
+                let s = self.build_global_string("windows")?;
+                Ok(Some(s.into()))
+            }
+
+            ("Env", "args") => {
+                let i32_ty = self.ctx.i32_type();
+                let i64_ty = self.ctx.i64_type();
+                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                let argc_gv = self.get_or_create_env_global("__arimo_argc", i32_ty.into());
+                let argv_gv = self.get_or_create_env_global("__arimo_argv", ptr_ty.into());
+                let argc = self.builder.build_load(i32_ty, argc_gv.as_pointer_value(), "argc")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+                let argv = self.builder.build_load(ptr_ty, argv_gv.as_pointer_value(), "argv")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_pointer_value();
+
+                let list_new_fn = self.module.get_function("arc_list_new").unwrap();
+                let list_append_fn = self.module.get_function("arc_list_append").unwrap();
+                let list_call = self.builder.build_call(list_new_fn, &[], "env_args_list")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let list_ptr = match list_call.try_as_basic_value().basic() {
+                    Some(BasicValueEnum::PointerValue(p)) => p,
+                    _ => return Ok(None),
+                };
+
+                let cur_fn = match self.cur_fn { Some(f) => f, None => return Ok(None) };
+                let idx_alloca = self.builder.build_alloca(i32_ty, "args_i")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(idx_alloca, i32_ty.const_int(0, false))
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                let cond_bb = self.ctx.append_basic_block(cur_fn, "args.cond");
+                let body_bb = self.ctx.append_basic_block(cur_fn, "args.body");
+                let exit_bb = self.ctx.append_basic_block(cur_fn, "args.exit");
+
+                self.builder.build_unconditional_branch(cond_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.position_at_end(cond_bb);
+                let idx = self.builder.build_load(i32_ty, idx_alloca, "ai")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+                let cond = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx, argc, "ac")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_conditional_branch(cond, body_bb, exit_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                self.builder.position_at_end(body_bb);
+                let idx64 = self.builder.build_int_s_extend(idx, i64_ty, "ai64")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let arg_ptr_ptr = unsafe {
+                    self.builder.build_gep(ptr_ty, argv, &[idx64], "argpp")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                };
+                let arg_ptr = self.builder.build_load(ptr_ty, arg_ptr_ptr, "argp")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_pointer_value();
+                let arg_i64 = self.builder.build_ptr_to_int(arg_ptr, i64_ty, "argpi")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_call(list_append_fn, &[list_ptr.into(), arg_i64.into()], "")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let next = self.builder.build_int_add(idx, i32_ty.const_int(1, false), "ai_inc")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(idx_alloca, next)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_unconditional_branch(cond_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                self.builder.position_at_end(exit_bb);
+                Ok(Some(list_ptr.into()))
             }
 
             _ => {
@@ -6168,7 +6284,20 @@ impl<'ctx> CodeGen<'ctx> {
                 let f = self.module.get_function("arc_list_get").unwrap();
                 let r = self.builder.build_call(f, &[list_ptr.into(), idx.into()], "list_get")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
-                return Ok(r.try_as_basic_value().basic());
+                let raw = r.try_as_basic_value().basic();
+                let elem_is_ptr = if let Expr::Ident(n) = object {
+                    self.lookup_var(n).and_then(|s| s.elem_class.as_deref()
+                        .map(|ec| matches!(ec, "String" | "Str"))
+                    ).unwrap_or(false)
+                } else { false };
+                if elem_is_ptr {
+                    if let Some(BasicValueEnum::IntValue(iv)) = raw {
+                        let ptr = self.builder.build_int_to_ptr(iv, ptr_ty, "list_get_ptr")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        return Ok(Some(ptr.into()));
+                    }
+                }
+                return Ok(raw);
             }
 
             ("__List", "set") => {

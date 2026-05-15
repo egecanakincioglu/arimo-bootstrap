@@ -154,9 +154,9 @@ Alt klasörde olsa bile `[[İsim]]` yeterli.
 ## Kritik Teknik Bilgiler (Her Session Geçerli)
 
 ### Sıradaki Görev
-**5-D — arimo.env stdlib**
-args(), exit(Integer), platform()
-Detay: `brain/proje/Görev-Kuyruğu.md` | `brain/stdlib/Stdlib-Plan.md`
+**6-A — Dil Genişletmeleri**
+`??` null coalescing, `is` type check, `as?` safe cast
+Detay: `brain/proje/Görev-Kuyruğu.md` | `brain/proje/Gelecek-Özellikler.md`
 
 ### En Kritik Tuzaklar (ezber)
 1. `build_store(ptr, value)` — pointer ÖNCE, değer SONRA (inkwell'in tersi!)

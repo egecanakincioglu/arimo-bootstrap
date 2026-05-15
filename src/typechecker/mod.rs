@@ -2023,6 +2023,10 @@ impl TypeChecker {
             ("Memory", "copy")   => Some(Type::Void),
             ("Memory", "set")    => Some(Type::Void),
 
+            ("Env", "exit")      => Some(Type::Void),
+            ("Env", "platform")  => Some(Type::Str),
+            ("Env", "args")      => Some(Type::List(Box::new(Type::Str))),
+
             ("RawPtr", "read") => {
                 match ty {
                     Type::RawPtr(inner) => Some(*inner.clone()),
