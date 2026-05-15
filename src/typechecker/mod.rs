@@ -1297,8 +1297,16 @@ impl TypeChecker {
 
                 for arm in arms {
                     match &arm.pattern {
-                        MatchPattern::Wildcard => {
+                        MatchPattern::Wildcard | MatchPattern::Binding(_)
+                        | MatchPattern::StrLit(_) | MatchPattern::IntLit(_)
+                        | MatchPattern::Multi(_) => {
+                            self.push_scope();
+                            if let MatchPattern::Binding(name) = &arm.pattern {
+                                self.define_var(name, scrutinee_ty.clone(), false);
+                            }
+                            if let Some(g) = &arm.guard { self.infer_expr(g); }
                             let arm_ty = self.infer_expr(&arm.body);
+                            self.pop_scope();
                             if result_ty.is_none() { result_ty = Some(arm_ty); }
                         }
                         MatchPattern::Variant { enum_name, variant, bindings } => {
@@ -1311,6 +1319,7 @@ impl TypeChecker {
                                     .unwrap_or_else(|| Type::Named("Unknown".to_string()));
                                 self.define_var(b, ty, false);
                             }
+                            if let Some(g) = &arm.guard { self.infer_expr(g); }
                             let arm_ty = self.infer_expr(&arm.body);
                             self.pop_scope();
                             if result_ty.is_none() { result_ty = Some(arm_ty); }
@@ -1319,6 +1328,15 @@ impl TypeChecker {
                 }
 
                 result_ty.unwrap_or(Type::Void)
+            }
+
+            Expr::NullCoalesce { left, right } => {
+                let left_ty = self.infer_expr(left);
+                self.infer_expr(right);
+                match left_ty {
+                    Type::Nullable(inner) => *inner,
+                    other => other,
+                }
             }
 
             Expr::Index { object, index } => {

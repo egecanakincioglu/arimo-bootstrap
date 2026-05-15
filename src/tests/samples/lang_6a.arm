@@ -1,0 +1,69 @@
+package arimo.test.lang_6a;
+
+public class Lang6ATest {
+    public static main() : Void {
+
+        IO.println("=== ?? null coalescing ===");
+        String a = "hello";
+        String? b = null;
+        String r1 = a ?? "default";
+        String r2 = b ?? "default";
+        IO.println("a ?? default: ${r1}");
+        IO.println("null ?? default: ${r2}");
+
+        IO.println("=== match string patterns ===");
+        String cmd = "quit";
+        String result = match cmd {
+            "quit" | "exit" => "exiting",
+            "help" => "showing help",
+            _ => "unknown"
+        };
+        IO.println("match quit: ${result}");
+
+        String cmd2 = "help";
+        String result2 = match cmd2 {
+            "quit" | "exit" => "exiting",
+            "help" => "showing help",
+            _ => "unknown"
+        };
+        IO.println("match help: ${result2}");
+
+        String cmd3 = "run";
+        String result3 = match cmd3 {
+            "quit" | "exit" => "exiting",
+            "help" => "showing help",
+            _ => "unknown"
+        };
+        IO.println("match run: ${result3}");
+
+        IO.println("=== match int patterns ===");
+        Integer n = 2;
+        String s = match n {
+            0 => "zero",
+            1 => "one",
+            2 => "two",
+            _ => "other"
+        };
+        IO.println("match 2: ${s}");
+
+        IO.println("=== match guard ===");
+        Integer x = 42;
+        String g = match x {
+            v if v < 0 => "negative",
+            v if v == 0 => "zero",
+            v if v < 100 => "small",
+            v => "large"
+        };
+        IO.println("match guard 42: ${g}");
+
+        Integer y = -5;
+        String g2 = match y {
+            v if v < 0 => "negative",
+            v if v == 0 => "zero",
+            v => "positive"
+        };
+        IO.println("match guard -5: ${g2}");
+
+        IO.println("lang_6a: OK");
+    }
+}

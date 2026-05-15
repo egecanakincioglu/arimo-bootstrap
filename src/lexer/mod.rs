@@ -137,6 +137,7 @@ pub enum Token {
     FatArrow,
     Question,
     QuestionDot,
+    QuestionQuestion,
 
     Amp,
     Pipe,
@@ -545,7 +546,13 @@ impl<'a> Lexer<'a> {
                     '^' => Token::Caret,
                     '~' => Token::Tilde,
 
-                    '?' => if self.peek() == Some('.') { self.advance(); Token::QuestionDot } else { Token::Question },
+                    '?' => if self.peek() == Some('.') {
+                        self.advance(); Token::QuestionDot
+                    } else if self.peek() == Some('?') {
+                        self.advance(); Token::QuestionQuestion
+                    } else {
+                        Token::Question
+                    },
 
                     ':' => Token::Colon,
                     '.' => {

@@ -144,11 +144,17 @@ pub enum Expr {
         expr : Box<Expr>,
         arms : Vec<MatchArm>,
     },
+
+    NullCoalesce {
+        left  : Box<Expr>,
+        right : Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern : MatchPattern,
+    pub guard   : Option<Box<Expr>>,
     pub body    : Box<Expr>,
 }
 
@@ -160,6 +166,10 @@ pub enum MatchPattern {
         bindings  : Vec<String>,
     },
     Wildcard,
+    Binding(String),
+    StrLit(String),
+    IntLit(i64),
+    Multi(Vec<MatchPattern>),
 }
 
 #[derive(Debug, Clone)]

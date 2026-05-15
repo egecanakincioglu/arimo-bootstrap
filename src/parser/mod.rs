@@ -1536,6 +1536,14 @@ impl Parser {
                 continue;
             }
 
+            if self.check(&Token::QuestionQuestion) {
+                if 5 < min_bp { break; }
+                self.advance();
+                let right = self.parse_expr(6)?;
+                left = Expr::NullCoalesce { left: Box::new(left), right: Box::new(right) };
+                continue;
+            }
+
             let (op, left_bp, right_bp) = match self.infix_binding_power() {
                 Some(x) => x,
                 None    => break,
@@ -1907,9 +1915,14 @@ impl Parser {
 
         while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
             let pattern = self.parse_match_pattern()?;
+            let guard = if self.eat(&Token::If) {
+                Some(Box::new(self.parse_expr(0)?))
+            } else {
+                None
+            };
             self.expect(&Token::FatArrow)?;
             let body = self.parse_expr(0)?;
-            arms.push(MatchArm { pattern, body: Box::new(body) });
+            arms.push(MatchArm { pattern, guard, body: Box::new(body) });
             self.eat(&Token::Comma);
         }
 
@@ -1918,13 +1931,66 @@ impl Parser {
     }
 
     fn parse_match_pattern(&mut self) -> ParseResult<MatchPattern> {
-        if let Token::Ident(name) = self.current().clone() {
-            if name == "_" {
+        let pat = self.parse_single_match_pattern()?;
+        if self.check(&Token::Pipe) {
+            let mut alts = vec![pat];
+            while self.eat(&Token::Pipe) {
+                alts.push(self.parse_single_match_pattern()?);
+            }
+            return Ok(MatchPattern::Multi(alts));
+        }
+        Ok(pat)
+    }
+
+    fn parse_single_match_pattern(&mut self) -> ParseResult<MatchPattern> {
+        // String literal pattern
+        if let Token::Str(_) | Token::DollarLBrace = self.current().clone() {
+            if let Token::Str(s) = self.current().clone() {
                 self.advance();
-                return Ok(MatchPattern::Wildcard);
+                return Ok(MatchPattern::StrLit(s));
+            }
+        }
+        if let Token::Str(s) = self.current().clone() {
+            self.advance();
+            return Ok(MatchPattern::StrLit(s));
+        }
+
+        // Negative integer literal
+        if self.check(&Token::Minus) {
+            self.advance();
+            if let Token::Int(n) = self.current().clone() {
+                self.advance();
+                return Ok(MatchPattern::IntLit(-n));
             }
         }
 
+        // Integer literal
+        if let Token::Int(n) = self.current().clone() {
+            self.advance();
+            return Ok(MatchPattern::IntLit(n));
+        }
+
+        // Null literal
+        if self.check(&Token::Null) {
+            self.advance();
+            return Ok(MatchPattern::StrLit("null".to_string()));
+        }
+
+        // Wildcard or binding
+        if let Token::Ident(name) = self.current().clone() {
+            // Check for enum variant: Name.Variant
+            let next_is_dot = matches!(self.tokens.get(self.pos + 1), Some(st) if matches!(st.token, Token::Dot));
+            if name == "_" || !next_is_dot {
+                self.advance();
+                return if name == "_" {
+                    Ok(MatchPattern::Wildcard)
+                } else {
+                    Ok(MatchPattern::Binding(name))
+                };
+            }
+        }
+
+        // Enum variant: EnumName.Variant(bindings)
         let enum_name = self.expect_ident()?;
         self.expect(&Token::Dot)?;
         let variant = self.expect_ident()?;

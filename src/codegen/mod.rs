@@ -1904,7 +1904,120 @@ impl<'ctx> CodeGen<'ctx> {
 
         for arm in arms {
             match &arm.pattern {
-                MatchPattern::Wildcard => {
+                MatchPattern::Wildcard | MatchPattern::Binding(_) => {
+                    if let Some(guard) = &arm.guard {
+                        let body_bb = self.ctx.append_basic_block(cur_fn, "match.arm");
+                        let skip_bb = self.ctx.append_basic_block(cur_fn, "match.skip");
+                        self.push_scope();
+                        if let MatchPattern::Binding(name) = &arm.pattern {
+                            let alloca = self.builder.build_alloca(i64_ty, name)
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            let mval64 = self.value_to_i64(match_val)?;
+                            self.builder.build_store(alloca, mval64)
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            self.define_var(name, alloca, i64_ty.into());
+                        }
+                        let gv = self.compile_expr(guard)?.unwrap_or(i64_ty.const_int(0, false).into());
+                        let gb = self.to_bool(gv)?;
+                        self.builder.build_conditional_branch(gb, body_bb, skip_bb)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                        self.builder.position_at_end(body_bb);
+                        let body_val = self.compile_expr(&arm.body)?;
+                        if let Some(v) = body_val {
+                            let stored = self.value_to_i64(v)?;
+                            self.builder.build_store(res_alloca, stored)
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        }
+                        if !self.current_block_terminated() {
+                            self.builder.build_unconditional_branch(merge_bb)
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        }
+                        self.pop_scope();
+                        self.builder.position_at_end(skip_bb);
+                    } else {
+                        self.push_scope();
+                        if let MatchPattern::Binding(name) = &arm.pattern {
+                            let alloca = self.builder.build_alloca(i64_ty, name)
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            let mval64 = self.value_to_i64(match_val)?;
+                            self.builder.build_store(alloca, mval64)
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            self.define_var(name, alloca, i64_ty.into());
+                        }
+                        let body_val = self.compile_expr(&arm.body)?;
+                        self.pop_scope();
+                        if let Some(v) = body_val {
+                            let stored = self.value_to_i64(v)?;
+                            self.builder.build_store(res_alloca, stored)
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        }
+                        if !self.current_block_terminated() {
+                            self.builder.build_unconditional_branch(merge_bb)
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        }
+                        break;
+                    }
+                }
+
+                MatchPattern::StrLit(_) | MatchPattern::Multi(_) => {
+                    let patterns: Vec<String> = match &arm.pattern {
+                        MatchPattern::StrLit(s) => vec![s.clone()],
+                        MatchPattern::Multi(pats) => pats.iter().filter_map(|p| {
+                            if let MatchPattern::StrLit(s) = p { Some(s.clone()) } else { None }
+                        }).collect(),
+                        _ => vec![],
+                    };
+                    let int_pats: Vec<i64> = match &arm.pattern {
+                        MatchPattern::IntLit(n) => vec![*n],
+                        MatchPattern::Multi(pats) => pats.iter().filter_map(|p| {
+                            if let MatchPattern::IntLit(n) = p { Some(*n) } else { None }
+                        }).collect(),
+                        _ => vec![],
+                    };
+
+                    let then_bb = self.ctx.append_basic_block(cur_fn, "match.arm");
+                    let next_bb = self.ctx.append_basic_block(cur_fn, "match.next");
+
+                    let mut or_cond: Option<inkwell::values::IntValue<'ctx>> = None;
+                    let str_ptr = match match_val { BasicValueEnum::PointerValue(p) => Some(p), _ => None };
+                    if !patterns.is_empty() {
+                        self.declare_string_fns();
+                        let strcmp = self.module.get_function("strcmp").unwrap();
+                        for pat_s in &patterns {
+                            let pat_ptr = self.build_global_string(pat_s)?;
+                            if let Some(sp) = str_ptr {
+                                let r = self.builder.build_call(strcmp, &[sp.into(), pat_ptr.into()], "sc")
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                if let Some(BasicValueEnum::IntValue(cmp)) = r.try_as_basic_value().basic() {
+                                    let eq = self.builder.build_int_compare(
+                                        inkwell::IntPredicate::EQ, cmp, self.ctx.i32_type().const_int(0, false), "seq"
+                                    ).map_err(|e| CodeGenError::new(e.to_string()))?;
+                                    or_cond = Some(match or_cond {
+                                        None => eq,
+                                        Some(prev) => self.builder.build_or(prev, eq, "or").map_err(|e| CodeGenError::new(e.to_string()))?,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    for n in &int_pats {
+                        if let BasicValueEnum::IntValue(mv) = match_val {
+                            let nv = i64_ty.const_int(*n as u64, *n < 0);
+                            let eq = self.builder.build_int_compare(inkwell::IntPredicate::EQ, mv, nv, "ieq")
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                            or_cond = Some(match or_cond {
+                                None => eq,
+                                Some(prev) => self.builder.build_or(prev, eq, "or").map_err(|e| CodeGenError::new(e.to_string()))?,
+                            });
+                        }
+                    }
+
+                    let cond = or_cond.unwrap_or(self.ctx.bool_type().const_int(0, false));
+                    self.builder.build_conditional_branch(cond, then_bb, next_bb)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                    self.builder.position_at_end(then_bb);
                     self.push_scope();
                     let body_val = self.compile_expr(&arm.body)?;
                     self.pop_scope();
@@ -1913,9 +2026,39 @@ impl<'ctx> CodeGen<'ctx> {
                         self.builder.build_store(res_alloca, stored)
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
                     }
-                    self.builder.build_unconditional_branch(merge_bb)
+                    if !self.current_block_terminated() {
+                        self.builder.build_unconditional_branch(merge_bb)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    }
+                    self.builder.position_at_end(next_bb);
+                }
+
+                MatchPattern::IntLit(n) => {
+                    let then_bb = self.ctx.append_basic_block(cur_fn, "match.arm");
+                    let next_bb = self.ctx.append_basic_block(cur_fn, "match.next");
+                    let cond = if let BasicValueEnum::IntValue(mv) = match_val {
+                        let nv = i64_ty.const_int(*n as u64, *n < 0);
+                        self.builder.build_int_compare(inkwell::IntPredicate::EQ, mv, nv, "ieq")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?
+                    } else {
+                        self.ctx.bool_type().const_int(0, false)
+                    };
+                    self.builder.build_conditional_branch(cond, then_bb, next_bb)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
-                    break;
+                    self.builder.position_at_end(then_bb);
+                    self.push_scope();
+                    let body_val = self.compile_expr(&arm.body)?;
+                    self.pop_scope();
+                    if let Some(v) = body_val {
+                        let stored = self.value_to_i64(v)?;
+                        self.builder.build_store(res_alloca, stored)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    }
+                    if !self.current_block_terminated() {
+                        self.builder.build_unconditional_branch(merge_bb)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    }
+                    self.builder.position_at_end(next_bb);
                 }
 
                 MatchPattern::Variant { enum_name, variant, bindings } => {
@@ -2270,6 +2413,40 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             Expr::Await(inner) => self.compile_expr(inner),
+
+            Expr::NullCoalesce { left, right } => {
+                let cur_fn = self.cur_fn.unwrap();
+                let lv = match self.compile_expr(left)? {
+                    Some(v) => v,
+                    None    => return Ok(None),
+                };
+                let lbool = self.to_bool(lv)?;
+                let then_bb  = self.ctx.append_basic_block(cur_fn, "coal.left");
+                let else_bb  = self.ctx.append_basic_block(cur_fn, "coal.right");
+                let merge_bb = self.ctx.append_basic_block(cur_fn, "coal.merge");
+                self.builder.build_conditional_branch(lbool, then_bb, else_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                self.builder.position_at_end(then_bb);
+                self.builder.build_unconditional_branch(merge_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                self.builder.position_at_end(else_bb);
+                let rv = self.compile_expr(right)?;
+                self.builder.build_unconditional_branch(merge_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let else_end = self.builder.get_insert_block().unwrap();
+
+                self.builder.position_at_end(merge_bb);
+                if let Some(r) = rv {
+                    let phi = self.builder.build_phi(lv.get_type(), "coal_phi")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    phi.add_incoming(&[(&lv, then_bb), (&r, else_end)]);
+                    Ok(Some(phi.as_basic_value()))
+                } else {
+                    Ok(Some(lv))
+                }
+            }
 
             Expr::Match { expr, arms } => {
                 self.compile_match(expr, arms)
@@ -6780,7 +6957,14 @@ impl<'ctx> CodeGen<'ctx> {
             }
             Expr::Match { expr, arms } => {
                 Self::collect_idents_in_expr(expr, out);
-                for arm in arms { Self::collect_idents_in_expr(&arm.body, out); }
+                for arm in arms {
+                    if let Some(g) = &arm.guard { Self::collect_idents_in_expr(g, out); }
+                    Self::collect_idents_in_expr(&arm.body, out);
+                }
+            }
+            Expr::NullCoalesce { left, right } => {
+                Self::collect_idents_in_expr(left, out);
+                Self::collect_idents_in_expr(right, out);
             }
             _ => {}
         }

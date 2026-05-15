@@ -480,8 +480,13 @@ impl BorrowChecker {
                                 self.declare_var(b, Type::Named("Unknown".to_string()), true);
                             }
                         }
-                        MatchPattern::Wildcard => {}
+                        MatchPattern::Binding(name) => {
+                            self.declare_var(name, Type::Named("Unknown".to_string()), true);
+                        }
+                        MatchPattern::Wildcard | MatchPattern::StrLit(_)
+                        | MatchPattern::IntLit(_) | MatchPattern::Multi(_) => {}
                     }
+                    if let Some(g) = &arm.guard { self.check_expr_operand(g, false); }
                     self.check_expr_operand(&arm.body, false);
                     self.pop_scope_with_drops();
                 }
@@ -493,6 +498,11 @@ impl BorrowChecker {
 
             Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_)
             | Expr::StrLit(_) | Expr::NullLit | Expr::This | Expr::Super => {}
+
+            Expr::NullCoalesce { left, right } => {
+                self.check_expr_operand(left, false);
+                self.check_expr_operand(right, false);
+            }
         }
     }
 
