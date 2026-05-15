@@ -39,6 +39,7 @@ pub enum Token {
     Enum,
     Extends,
     Implements,
+    Extend,
     Operator,
 
     Static,
@@ -320,6 +321,7 @@ impl<'a> Lexer<'a> {
             "enum"        => Token::Enum,
             "extends"     => Token::Extends,
             "implements"  => Token::Implements,
+            "extend"      => Token::Extend,
             "static"      => Token::Static,
             "readonly"    => Token::Readonly,
             "override"    => Token::Override,

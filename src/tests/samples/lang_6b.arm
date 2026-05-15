@@ -1,0 +1,51 @@
+package arimo.test.lang_6b;
+
+extend Integer {
+    isEven() : Boolean { return this % 2 == 0; }
+    isOdd()  : Boolean { return this % 2 != 0; }
+    abs()    : Integer {
+        if (this < 0) { return -this; }
+        return this;
+    }
+    squared() : Integer { return this * this; }
+}
+
+extend Float {
+    isPositive() : Boolean { return this > 0.0; }
+}
+
+public class Calculator {
+    public static add(a: Integer, b: Integer = 0) : Integer {
+        return a + b;
+    }
+
+    public static greet(name: String, prefix: String = "Hello") : String {
+        return "${prefix}, ${name}!";
+    }
+
+    public static repeat(s: String, n: Integer = 1) : String {
+        return s.repeat(n);
+    }
+}
+
+public class Lang6BTest {
+    public static main() : Void {
+
+        IO.println("=== extension methods ===");
+        IO.println("4.isEven: ${4.isEven()}");
+        IO.println("7.isEven: ${7.isEven()}");
+        IO.println("7.isOdd: ${7.isOdd()}");
+        IO.println("(-5).abs: ${(-5).abs()}");
+        IO.println("6.squared: ${6.squared()}");
+
+        IO.println("=== default parameters ===");
+        IO.println("add(3): ${Calculator.add(3)}");
+        IO.println("add(3,4): ${Calculator.add(3, 4)}");
+        String g1 = Calculator.greet("Ali");
+        String g2 = Calculator.greet("Ali", "Merhaba");
+        IO.println("greet(Ali): ${g1}");
+        IO.println("greet(Ali,Merhaba): ${g2}");
+
+        IO.println("lang_6b: OK");
+    }
+}

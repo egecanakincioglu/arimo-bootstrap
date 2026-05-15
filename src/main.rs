@@ -336,6 +336,9 @@ fn print_module_summary(m: &ast::Module) {
             ast::Item::Extern(e) => {
                 println!("  extern \"{}\" ({} decls)", e.abi, e.decls.len());
             }
+            ast::Item::Extension(e) => {
+                println!("  extend {} ({} methods)", e.target, e.methods.len());
+            }
         }
     }
 }

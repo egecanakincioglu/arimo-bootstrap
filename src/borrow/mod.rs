@@ -128,6 +128,7 @@ impl BorrowChecker {
                 Item::TypeAlias(_) => {}
                 Item::Union(_)     => {}
                 Item::Extern(_)    => {}
+                Item::Extension(_) => {}
             }
         }
         &self.errors

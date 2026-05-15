@@ -174,6 +174,7 @@ impl TypeChecker {
                 Item::TypeAlias(_) => {}
                 Item::Union(_)     => {}
                 Item::Extern(_)    => {}
+                Item::Extension(_) => {}
             }
         }
         &self.errors
@@ -192,7 +193,51 @@ impl TypeChecker {
                 }
                 Item::Union(u)  => self.register_union(u),
                 Item::Extern(e) => self.register_extern(e),
+                Item::Extension(ext) => self.register_extension(ext),
             }
+        }
+    }
+
+    fn register_extension(&mut self, ext: &ExtensionDecl) {
+        if let Some(info) = self.classes.get_mut(&ext.target) {
+            for m in &ext.methods {
+                let mi = MethodInfo {
+                    params    : m.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
+                    return_ty : m.return_ty.clone(),
+                    static_   : m.static_,
+                    abstract_ : false,
+                    vis       : m.visibility.clone(),
+                };
+                info.methods.entry(m.name.clone()).or_default().push(mi);
+            }
+        } else {
+            // Target is a primitive type — store in a separate map
+            let mut methods = HashMap::new();
+            for m in &ext.methods {
+                let mi = MethodInfo {
+                    params    : m.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
+                    return_ty : m.return_ty.clone(),
+                    static_   : m.static_,
+                    abstract_ : false,
+                    vis       : m.visibility.clone(),
+                };
+                methods.entry(m.name.clone()).or_insert_with(Vec::new).push(mi);
+            }
+            let info = ClassInfo {
+                kind          : ClassKind::Concrete,
+                generics      : Vec::new(),
+                generic_bounds: HashMap::new(),
+                extends       : None,
+                implements    : Vec::new(),
+                fields        : HashMap::new(),
+                methods,
+                constructor   : None,
+                variant_data  : HashMap::new(),
+                sealed        : false,
+                deprecated    : None,
+                experimental  : false,
+            };
+            self.classes.insert(ext.target.clone(), info);
         }
     }
 
@@ -1790,6 +1835,9 @@ impl TypeChecker {
             Type::I16 => "i16".to_string(),
             Type::I32 => "i32".to_string(),
             Type::I64 => "i64".to_string(),
+            Type::Integer  => "Integer".to_string(),
+            Type::Float    => "Float".to_string(),
+            Type::Boolean  => "Boolean".to_string(),
             Type::Str => {
                 return self.resolve_string_method(method, args);
             }
@@ -1856,7 +1904,7 @@ impl TypeChecker {
             Some(overloads) => {
                 for mi in &overloads {
                     if mi.static_ != is_static { continue; }
-                    if mi.params.len() != args.len() { continue; }
+                    if mi.params.len() < args.len() { continue; }
                     self.check_member_visibility(&class_name, method, &mi.vis.clone());
                     for (i, ((_, param_ty), arg_ty)) in
                         mi.params.iter().zip(args.iter()).enumerate()

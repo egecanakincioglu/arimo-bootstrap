@@ -73,6 +73,7 @@ pub struct CodeGen<'ctx> {
     struct_types  : HashMap<String, inkwell::types::StructType<'ctx>>,
     field_indices : HashMap<String, HashMap<String, u32>>,
     cur_class : Option<String>,
+    default_params: HashMap<String, Vec<Option<Expr>>>,
     enum_variants : HashMap<String, HashMap<String, u32>>,
     static_fields : HashMap<String, inkwell::values::GlobalValue<'ctx>>,
     field_arimo_types : HashMap<String, HashMap<String, String>>,
@@ -100,6 +101,7 @@ impl<'ctx> CodeGen<'ctx> {
             struct_types  : HashMap::new(),
             field_indices : HashMap::new(),
             cur_class     : None,
+            default_params: HashMap::new(),
             enum_variants : HashMap::new(),
             static_fields         : HashMap::new(),
             field_arimo_types     : HashMap::new(),
@@ -426,11 +428,107 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
         for item in &module.items {
-            match item {
-                Item::Class(c) => self.compile_class(c)?,
-                Item::Enum(e)  => self.compile_enum(e)?,
-                _              => {}
+            if let Item::Extension(ext) = item {
+                self.register_extension_methods(ext)?;
             }
+        }
+        for item in &module.items {
+            match item {
+                Item::Class(c)     => self.compile_class(c)?,
+                Item::Enum(e)      => self.compile_enum(e)?,
+                Item::Extension(e) => self.compile_extension(e)?,
+                _                  => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn register_extension_methods(&mut self, ext: &ExtensionDecl) -> CgResult<()> {
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let target_llvm = match ext.target.as_str() {
+            "Integer" | "Long"   => self.ctx.i64_type().as_basic_type_enum(),
+            "Float"   | "Double" => self.ctx.f64_type().as_basic_type_enum(),
+            "Boolean"            => self.ctx.bool_type().as_basic_type_enum(),
+            "String"             => ptr_ty.as_basic_type_enum(),
+            _                    => ptr_ty.as_basic_type_enum(),
+        };
+        for m in &ext.methods {
+            let fn_name = format!("{}_{}", ext.target, m.name);
+            if self.module.get_function(&fn_name).is_some() { continue; }
+            let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![target_llvm.into()];
+            for p in &m.params {
+                if let Some(t) = self.llvm_type(&p.ty) { param_types.push(t.into()); }
+            }
+            let fn_val = match &m.return_ty {
+                Some(rt) => match self.llvm_type(rt) {
+                    Some(rty) => self.module.add_function(&fn_name, rty.fn_type(&param_types, false), None),
+                    None      => self.module.add_function(&fn_name, self.ctx.void_type().fn_type(&param_types, false), None),
+                },
+                None => self.module.add_function(&fn_name, self.ctx.void_type().fn_type(&param_types, false), None),
+            };
+            self.fns.insert(fn_name, fn_val);
+        }
+        Ok(())
+    }
+
+    fn compile_extension(&mut self, ext: &ExtensionDecl) -> CgResult<()> {
+        let target_llvm = match ext.target.as_str() {
+            "Integer" | "Long"   => self.ctx.i64_type().as_basic_type_enum(),
+            "Float"   | "Double" => self.ctx.f64_type().as_basic_type_enum(),
+            "Boolean"            => self.ctx.bool_type().as_basic_type_enum(),
+            "String"             => self.ctx.ptr_type(AddressSpace::default()).as_basic_type_enum(),
+            _                    => self.ctx.ptr_type(AddressSpace::default()).as_basic_type_enum(),
+        };
+        for m in &ext.methods {
+            if m.body.is_none() { continue; }
+            let fn_name = format!("{}_{}", ext.target, m.name);
+            let fn_val = match self.fns.get(&fn_name).copied()
+                .or_else(|| self.module.get_function(&fn_name)) {
+                Some(f) => f,
+                None    => continue,
+            };
+            let entry = self.ctx.append_basic_block(fn_val, "entry");
+            self.builder.position_at_end(entry);
+            self.cur_fn = Some(fn_val);
+            self.push_scope();
+
+            if let Some(this_val) = fn_val.get_nth_param(0) {
+                let alloca = self.builder.build_alloca(target_llvm, "this")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(alloca, this_val)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.define_var("this", alloca, target_llvm);
+            }
+
+            for (i, p) in m.params.iter().enumerate() {
+                if let Some(llvm_ty) = self.llvm_type(&p.ty) {
+                    if let Some(pv) = fn_val.get_nth_param((i + 1) as u32) {
+                        let alloca = self.builder.build_alloca(llvm_ty, &p.name)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        self.builder.build_store(alloca, pv)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        self.define_var(&p.name, alloca, llvm_ty);
+                    }
+                }
+            }
+
+            let body = m.body.as_ref().unwrap();
+            let mut returned = false;
+            for stmt in body {
+                if self.compile_stmt(stmt)? { returned = true; break; }
+            }
+            if !returned && !self.current_block_terminated() {
+                match fn_val.get_type().get_return_type() {
+                    None => { self.builder.build_return(None).map_err(|e| CodeGenError::new(e.to_string()))?; }
+                    Some(_) => {
+                        let zero = self.ctx.i64_type().const_int(0, false);
+                        self.builder.build_return(Some(&zero)).map_err(|e| CodeGenError::new(e.to_string()))?;
+                    }
+                }
+            }
+            self.pop_scope();
+            self.cur_fn = None;
+            fn_val.verify(true);
         }
         Ok(())
     }
@@ -812,7 +910,15 @@ impl<'ctx> CodeGen<'ctx> {
                     self.module.add_function(&fn_name, fn_ty, None)
                 }
             };
-            self.fns.insert(fn_name, fn_val);
+            self.fns.insert(fn_name.clone(), fn_val);
+
+            // Store default param expressions
+            let defaults: Vec<Option<Expr>> = m.params.iter()
+                .map(|p| p.default.clone())
+                .collect();
+            if defaults.iter().any(|d| d.is_some()) {
+                self.default_params.insert(fn_name, defaults);
+            }
         }
         Ok(())
     }
@@ -2211,6 +2317,32 @@ impl<'ctx> CodeGen<'ctx> {
                         if obj_class.is_none() || obj_class.as_deref() == Some("String") {
                             let args_cloned = args.to_vec();
                             return self.compile_string_method(v, method, &args_cloned);
+                        }
+                    }
+                }
+                // Extension method dispatch for primitive types
+                {
+                    let obj_val = self.compile_expr(object)?;
+                    if let Some(ov) = obj_val {
+                        let type_prefix = match ov {
+                            BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => Some("Boolean"),
+                            BasicValueEnum::IntValue(_)  => Some("Integer"),
+                            BasicValueEnum::FloatValue(_) => Some("Float"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = type_prefix {
+                            let fn_name = format!("{}_{}", prefix, method);
+                            if let Some(ext_fn) = self.fns.get(&fn_name).copied()
+                                .or_else(|| self.module.get_function(&fn_name))
+                            {
+                                let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![ov.into()];
+                                for a in args {
+                                    if let Some(v) = self.compile_expr(a)? { call_args.push(v.into()); }
+                                }
+                                let call = self.builder.build_call(ext_fn, &call_args, "ext_call")
+                                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                                return Ok(call.try_as_basic_value().basic());
+                            }
                         }
                     }
                 }
@@ -4388,9 +4520,25 @@ impl<'ctx> CodeGen<'ctx> {
         if let Some(fn_val) = self.fns.get(&fn_name).copied()
             .or_else(|| self.module.get_function(&fn_name))
         {
-            let compiled_args: Vec<BasicValueEnum<'ctx>> = args.iter()
+            let expected = fn_val.count_params() as usize;
+            let mut compiled_args: Vec<BasicValueEnum<'ctx>> = args.iter()
                 .filter_map(|a| self.compile_expr(a).ok().flatten())
                 .collect();
+            // Apply default parameters if fewer args were provided
+            if compiled_args.len() < expected {
+                let defaults = self.default_params.get(&fn_name).cloned();
+                if let Some(defs) = defaults {
+                    let start = compiled_args.len();
+                    for i in start..expected.min(defs.len()) {
+                        if let Some(Some(def_expr)) = defs.get(i) {
+                            let def_expr_clone = def_expr.clone();
+                            if let Some(v) = self.compile_expr(&def_expr_clone)? {
+                                compiled_args.push(v);
+                            }
+                        }
+                    }
+                }
+            }
             let meta_args: Vec<inkwell::values::BasicMetadataValueEnum> =
                 compiled_args.iter().map(|v| (*v).into()).collect();
             let call = self.builder.build_call(fn_val, &meta_args, "call")

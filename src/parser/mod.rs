@@ -270,6 +270,10 @@ impl Parser {
             return self.parse_type_alias_item();
         }
 
+        if self.check(&Token::Extend) {
+            return self.parse_extension();
+        }
+
         let visibility = self.parse_visibility()?;
         let abstract_  = self.eat(&Token::Abstract);
 
@@ -1141,8 +1145,13 @@ impl Parser {
     fn parse_param(&mut self) -> ParseResult<Param> {
         let name = self.expect_ident()?;
         self.expect(&Token::Colon)?;
-        let ty   = self.parse_type()?;
-        Ok(Param { name, ty })
+        let ty = self.parse_type()?;
+        let default = if self.eat(&Token::Eq) {
+            Some(self.parse_expr(0)?)
+        } else {
+            None
+        };
+        Ok(Param { name, ty, default })
     }
 
     fn parse_generics_decl(&mut self) -> ParseResult<Vec<GenericParam>> {
@@ -2011,5 +2020,36 @@ impl Parser {
         };
 
         Ok(MatchPattern::Variant { enum_name, variant, bindings })
+    }
+
+    fn parse_extension(&mut self) -> ParseResult<Item> {
+        self.expect(&Token::Extend)?;
+        let target = match self.current().clone() {
+            Token::Ident(s) => { self.advance(); s }
+            Token::TypeInteger => { self.advance(); "Integer".to_string() }
+            Token::TypeFloat   => { self.advance(); "Float".to_string() }
+            Token::TypeBoolean => { self.advance(); "Boolean".to_string() }
+            Token::TypeString  => { self.advance(); "String".to_string() }
+            _ => {
+                let (line, col) = self.current_span();
+                return Err(ParseError::new("expected type name after 'extend'", line, col));
+            }
+        };
+        self.expect(&Token::LBrace)?;
+
+        let mut methods = Vec::new();
+        while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
+            let vis       = self.parse_visibility()?;
+            let static_   = self.eat(&Token::Static);
+            let method_name = self.expect_ident()?;
+            let method = self.parse_method_body(
+                vis, static_, false, false, false, false, false, false,
+                None, false, Vec::new(), Vec::new(), None, None,
+                method_name, None,
+            )?;
+            methods.push(method);
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Item::Extension(ExtensionDecl { target, methods }))
     }
 }

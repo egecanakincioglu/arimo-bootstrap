@@ -305,8 +305,9 @@ pub struct Field {
 
 #[derive(Debug, Clone)]
 pub struct Param {
-    pub name : String,
-    pub ty   : Type,
+    pub name    : String,
+    pub ty      : Type,
+    pub default : Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -460,4 +461,11 @@ pub enum Item {
     TypeAlias(TypeAliasDecl),
     Union(UnionDecl),
     Extern(ExternBlock),
+    Extension(ExtensionDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtensionDecl {
+    pub target  : String,
+    pub methods : Vec<Method>,
 }
