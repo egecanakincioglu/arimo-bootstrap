@@ -1,0 +1,50 @@
+package test;
+
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+
+enum Status {
+    Active,
+    Inactive,
+    Pending
+}
+
+class Main {
+    static Void main() {
+        // --- substring ---
+        String s = "Hello, World!";
+        String sub1 = s.substring(0, 5);
+        IO.println(sub1);
+
+        String sub2 = s.substring(7, 12);
+        IO.println(sub2);
+
+        // --- replace (match) ---
+        String original = "foo bar foo";
+        String replaced = original.replace("foo", "baz");
+        IO.println(replaced);
+
+        // --- replace (no match) ---
+        String noMatch = "hello world";
+        String noChange = noMatch.replace("xyz", "abc");
+        IO.println(noChange);
+
+        // --- enum -> string interpolation ---
+        Direction d = Direction.North;
+        IO.println("Direction: ${d}");
+
+        Direction d2 = Direction.East;
+        IO.println("Going: ${d2}");
+
+        Status st = Status.Pending;
+        IO.println("Status: ${st}");
+
+        // --- enum -> string in string var ---
+        String label = "Current: ${d}";
+        IO.println(label);
+    }
+}
