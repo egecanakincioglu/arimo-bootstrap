@@ -1,4 +1,4 @@
-module arimo.codegenbasic;
+package arimo.codegenbasic;
 
 public class Application {
     public static main() : Void {

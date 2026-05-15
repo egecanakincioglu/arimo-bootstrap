@@ -25,9 +25,7 @@ pub enum Token {
     Ident(String),
 
     Package,
-    Module,
     Import,
-    Exports,
 
     Public,
     Private,
@@ -308,8 +306,6 @@ impl<'a> Lexer<'a> {
         }
         match word.as_str() {
             "package"     => Token::Package,
-            "module"      => Token::Module,
-            "exports"     => Token::Exports,
             "import"      => Token::Import,
             "public"      => Token::Public,
             "private"     => Token::Private,

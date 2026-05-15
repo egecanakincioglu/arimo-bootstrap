@@ -1,4 +1,4 @@
-module arimo.codegentypes;
+package arimo.codegentypes;
 
 public class Application {
     public static main() : Void {

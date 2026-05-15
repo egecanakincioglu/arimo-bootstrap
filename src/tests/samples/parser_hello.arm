@@ -1,4 +1,4 @@
-module arimo.hello;
+package arimo.hello;
 
 import arimo.io;
 

@@ -1,4 +1,4 @@
-module arimo.test.generics;
+package arimo.test.generics;
 
 public enum Shape {
     Circle(Float),

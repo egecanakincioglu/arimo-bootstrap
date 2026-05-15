@@ -1,4 +1,4 @@
-module arimo.test.collections;
+package arimo.test.collections;
 
 public class CollectionsTest {
 

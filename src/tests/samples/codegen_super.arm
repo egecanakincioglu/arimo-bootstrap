@@ -1,4 +1,4 @@
-module arimo.codegensuper;
+package arimo.codegensuper;
 
 public abstract class Shape {
     private readonly color : Integer;

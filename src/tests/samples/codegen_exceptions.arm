@@ -1,4 +1,4 @@
-module arimo.exceptions_test;
+package arimo.exceptions_test;
 
 public class RuntimeException extends Exception {
     private message : String;

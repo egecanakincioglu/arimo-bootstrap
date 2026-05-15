@@ -1,4 +1,4 @@
-module arimo.codegenstatic;
+package arimo.codegenstatic;
 
 public class Config {
     public static readonly VERSION  : Integer = 14;

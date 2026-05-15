@@ -1,4 +1,4 @@
-module arimo.codegeninherit;
+package arimo.codegeninherit;
 
 public abstract class Animal {
     private readonly name : String;

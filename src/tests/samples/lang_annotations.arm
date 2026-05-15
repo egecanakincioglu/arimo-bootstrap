@@ -1,4 +1,4 @@
-module arimo.test.annotations;
+package arimo.test.annotations;
 
 @Deprecated("Use NewService instead")
 public class OldService {

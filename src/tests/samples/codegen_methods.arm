@@ -1,4 +1,4 @@
-module arimo.codegenmethods;
+package arimo.codegenmethods;
 
 public class MathUtils {
     public static add(a: Integer, b: Integer) : Integer {
