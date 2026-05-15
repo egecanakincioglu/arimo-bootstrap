@@ -1523,6 +1523,7 @@ impl Parser {
             }
 
             if self.check(&Token::Question) {
+                if 2 < min_bp { break; }
                 self.advance();
                 let then  = self.parse_expr(0)?;
                 self.expect(&Token::Colon)?;

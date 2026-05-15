@@ -1,0 +1,26 @@
+package test.bugfix;
+
+public class Main {
+    public static main() : Void {
+        // Bug 1: Boolean interpolation
+        Boolean t = true;
+        Boolean f = false;
+        IO.println("true: ${t}");
+        IO.println("false: ${f}");
+
+        // Bug 2: IO.println no double newline
+        IO.println("line1");
+        IO.println("line2");
+
+        // Bug 3: ternary precedence
+        Integer a = 5;
+        Integer b = 3;
+        Integer result = a > b ? 1 : 0;
+        IO.println("5>3 ternary: ${result}");
+
+        Integer result2 = a < b ? 1 : 0;
+        IO.println("5<3 ternary: ${result2}");
+
+        IO.println("bugfix: OK");
+    }
+}
