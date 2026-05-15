@@ -1,0 +1,44 @@
+package arimo.test.bootstrap_prereq;
+
+public class Token {
+    private kind  : Integer;
+    private value : String;
+
+    public constructor(kind: Integer, value: String) {
+        this.kind  = kind;
+        this.value = value;
+    }
+
+    public getKind()  : Integer { return this.kind; }
+    public getValue() : String  { return this.value; }
+}
+
+public class BootstrapTest {
+    public static main() : Void {
+
+        IO.println("=== charCodeAt / charAt ===");
+        String s = "Hello";
+        Integer code = s.charCodeAt(0);
+        IO.println("H code: ${code}");
+        String ch = s.charAt(1);
+        IO.println("charAt(1): ${ch}");
+
+        IO.println("=== List<Token> ===");
+        List<Token> tokens = List();
+        tokens.append(Token(1, "package"));
+        tokens.append(Token(2, "arimo"));
+        tokens.append(Token(3, ";"));
+
+        Token t0 = tokens.get(0);
+        Token t1 = tokens.get(1);
+        IO.println("token[0] kind: ${t0.getKind()} value: ${t0.getValue()}");
+        IO.println("token[1] kind: ${t1.getKind()} value: ${t1.getValue()}");
+        IO.println("token count: ${tokens.length()}");
+
+        IO.println("=== Process.exec ===");
+        Integer code2 = Process.exec("echo arc-arimo ready");
+        IO.println("exit code: ${code2}");
+
+        IO.println("bootstrap_prereq: OK");
+    }
+}

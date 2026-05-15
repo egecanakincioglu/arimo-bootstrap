@@ -1798,6 +1798,8 @@ impl TypeChecker {
             "padStart"   => Type::Str,
             "padEnd"     => Type::Str,
             "chars"      => Type::List(Box::new(Type::Str)),
+            "charCodeAt" => Type::Integer,
+            "charAt"     => Type::Str,
             _ => {
                 self.error(format!("unknown String method '{}'", method));
                 Type::Named("Error".to_string())
@@ -2040,7 +2042,9 @@ impl TypeChecker {
             ("String" | "Str", "endsWith")   => Some(Type::Boolean),
             ("String" | "Str", "toUpper")    => Some(Type::Str),
             ("String" | "Str", "toLower")    => Some(Type::Str),
-            ("String" | "Str", "trim")       => Some(Type::Str),
+            ("String" | "Str", "trim")        => Some(Type::Str),
+            ("String" | "Str", "charCodeAt") => Some(Type::Integer),
+            ("String" | "Str", "charAt")     => Some(Type::Str),
             ("String" | "Str", "split")      => Some(Type::List(Box::new(Type::Str))),
 
             ("Pair", "getFirst") => {

@@ -3083,7 +3083,8 @@ impl<'ctx> CodeGen<'ctx> {
                          "compareTo" | "toUpper" | "toLower" | "trim" |
                          "split" | "indexOf" | "substring" | "replace" |
                          "parseInt" | "parseFloat" | "isEmpty" | "isBlank" |
-                         "repeat" | "padStart" | "padEnd" | "chars" | "concat")
+                         "repeat" | "padStart" | "padEnd" | "chars" | "concat" |
+                         "charCodeAt" | "charAt")
     }
 
     fn compile_string_method(
@@ -3228,6 +3229,51 @@ impl<'ctx> CodeGen<'ctx> {
             "toLower" => {
                 let result = self.build_str_case_convert(str_ptr, false)?;
                 Ok(Some(result.into()))
+            }
+
+            "charCodeAt" => {
+                let idx = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
+                    .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
+                    .unwrap_or(i64_ty.const_int(0, false));
+                let i8_ty = self.ctx.i8_type();
+                let ch_ptr = unsafe {
+                    self.builder.build_gep(i8_ty, str_ptr, &[idx], "ch_ptr")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                };
+                let ch = self.builder.build_load(i8_ty, ch_ptr, "ch")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+                let ch64 = self.builder.build_int_z_extend(ch, i64_ty, "ch64")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(Some(ch64.into()))
+            }
+
+            "charAt" => {
+                let idx = args.first().and_then(|a| self.compile_expr(a).ok().flatten())
+                    .and_then(|v| if let BasicValueEnum::IntValue(iv) = v { Some(iv) } else { None })
+                    .unwrap_or(i64_ty.const_int(0, false));
+                let i8_ty  = self.ctx.i8_type();
+                let malloc = self.module.get_function("malloc").unwrap();
+                let buf_call = self.builder.build_call(malloc, &[i64_ty.const_int(2, false).into()], "ch_buf")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let buf_ptr = match buf_call.try_as_basic_value().basic() {
+                    Some(BasicValueEnum::PointerValue(p)) => p,
+                    _ => return Ok(None),
+                };
+                let ch_ptr = unsafe {
+                    self.builder.build_gep(i8_ty, str_ptr, &[idx], "ch_src")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                };
+                let ch = self.builder.build_load(i8_ty, ch_ptr, "ch_v")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_store(buf_ptr, ch)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let null_gep = unsafe {
+                    self.builder.build_gep(i8_ty, buf_ptr, &[i64_ty.const_int(1, false)], "ch_null")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                };
+                self.builder.build_store(null_gep, i8_ty.const_int(0, false))
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(Some(buf_ptr.into()))
             }
 
             "indexOf" => {
@@ -6612,7 +6658,8 @@ impl<'ctx> CodeGen<'ctx> {
                 let raw = r.try_as_basic_value().basic();
                 let elem_is_ptr = if let Expr::Ident(n) = object {
                     self.lookup_var(n).and_then(|s| s.elem_class.as_deref()
-                        .map(|ec| matches!(ec, "String" | "Str"))
+                        .map(|ec| matches!(ec, "String" | "Str")
+                             || self.struct_types.contains_key(ec))
                     ).unwrap_or(false)
                 } else { false };
                 if elem_is_ptr {

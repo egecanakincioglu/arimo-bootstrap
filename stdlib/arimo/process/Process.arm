@@ -1,0 +1,21 @@
+package arimo.process;
+
+extern "C" {
+    system(cmd: String) : Integer;
+}
+
+public class Process {
+    public static exec(cmd: String) : Integer {
+        return system(cmd);
+    }
+
+    public static execArgs(program: String, args: String) : Integer {
+        String full = program.concat(" ").concat(args);
+        return system(full);
+    }
+
+    public static success(cmd: String) : Boolean {
+        Integer code = system(cmd);
+        return code == 0;
+    }
+}
