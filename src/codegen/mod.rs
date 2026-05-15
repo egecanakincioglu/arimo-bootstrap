@@ -607,8 +607,13 @@ impl<'ctx> CodeGen<'ctx> {
         for f in c.fields.iter().filter(|f| !f.static_) {
             let type_name = match &f.ty {
                 Type::Named(n) => n.clone(),
+                Type::List(_) => "__List".to_string(),
+                Type::HashMap(..) | Type::Map(..) | Type::TreeMap(..) => "__HashMap".to_string(),
+                Type::Pair(..) => "__Pair".to_string(),
                 Type::Nullable(inner) => match inner.as_ref() {
                     Type::Named(n) => n.clone(),
+                    Type::List(_) => "__List".to_string(),
+                    Type::HashMap(..) | Type::Map(..) | Type::TreeMap(..) => "__HashMap".to_string(),
                     other => format!("{:?}", other),
                 },
                 other => format!("{:?}", other),

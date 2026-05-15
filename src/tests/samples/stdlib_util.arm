@@ -1,0 +1,43 @@
+package arimo.test.stdlib_util;
+
+public class UtilTest {
+    public static main() : Void {
+
+        IO.println("=== Optional ===");
+        Optional opt1 = Optional.of(42);
+        IO.println("isPresent: ${opt1.isPresent()}");
+        IO.println("get: ${opt1.get()}");
+        IO.println("orElse: ${opt1.orElse(99)}");
+
+        Optional opt2 = Optional.empty();
+        IO.println("isEmpty: ${opt2.isEmpty()}");
+        IO.println("orElse: ${opt2.orElse(99)}");
+
+        IO.println("=== ArrayList ===");
+        ArrayList list = ArrayList();
+        list.add(10);
+        list.add(20);
+        list.add(30);
+        IO.println("size: ${list.size()}");
+        IO.println("get(0): ${list.get(0)}");
+        IO.println("get(2): ${list.get(2)}");
+        IO.println("contains(20): ${list.contains(20)}");
+        IO.println("contains(99): ${list.contains(99)}");
+        IO.println("isEmpty: ${list.isEmpty()}");
+        list.remove(1);
+        IO.println("after remove(1) size: ${list.size()}");
+        IO.println("get(1): ${list.get(1)}");
+
+        IO.println("=== Random ===");
+        Random.seed(42);
+        Integer r1 = Random.nextInt(100);
+        Integer r2 = Random.nextInt(100);
+        Integer r3 = Random.nextInt(100);
+        IO.println("nextInt(100) x3: ${r1} ${r2} ${r3}");
+        Boolean b1 = Random.nextBoolean();
+        Boolean b2 = Random.nextBoolean();
+        IO.println("nextBoolean x2: ${b1} ${b2}");
+
+        IO.println("stdlib_util: OK");
+    }
+}

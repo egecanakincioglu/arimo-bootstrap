@@ -1,0 +1,41 @@
+package arimo.util;
+
+public class Optional {
+    private value  : Integer;
+    private hasVal : Boolean;
+
+    private constructor(v: Integer, present: Boolean) {
+        this.value  = v;
+        this.hasVal = present;
+    }
+
+    public static of(v: Integer) : Optional {
+        return Optional(v, true);
+    }
+
+    public static empty() : Optional {
+        return Optional(0, false);
+    }
+
+    public isPresent() : Boolean { return this.hasVal; }
+    public isEmpty()   : Boolean { return !this.hasVal; }
+
+    public get() : Integer {
+        if (!this.hasVal) {
+            throw IllegalStateException("Optional is empty");
+        }
+        return this.value;
+    }
+
+    public orElse(other: Integer) : Integer {
+        if (this.hasVal) { return this.value; }
+        return other;
+    }
+
+    public toString() : String {
+        if (this.hasVal) {
+            return "Optional(${this.value})";
+        }
+        return "Optional.empty()";
+    }
+}

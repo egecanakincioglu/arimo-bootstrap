@@ -154,8 +154,9 @@ Alt klasörde olsa bile `[[İsim]]` yeterli.
 ## Kritik Teknik Bilgiler (Her Session Geçerli)
 
 ### Sıradaki Görev
-**4.19-B — Lambda Closure Capture**
-Detay: `brain/proje/Görev-Kuyruğu.md`
+**5-C — arimo.io stdlib**
+InputStream, BufferedReader
+Detay: `brain/proje/Görev-Kuyruğu.md` | `brain/stdlib/Stdlib-Plan.md`
 
 ### En Kritik Tuzaklar (ezber)
 1. `build_store(ptr, value)` — pointer ÖNCE, değer SONRA (inkwell'in tersi!)

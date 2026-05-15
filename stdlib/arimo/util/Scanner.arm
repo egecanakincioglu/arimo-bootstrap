@@ -1,0 +1,24 @@
+package arimo.util;
+
+extern "C" {
+    malloc(n: Integer) : RawPtr<Void>;
+    scanf(fmt: String, buf: RawPtr<Void>) : Integer;
+}
+
+public class Scanner {
+    public static nextLine() : String {
+        RawPtr<Void> buf = malloc(1024);
+        scanf("%1023[^\n]%*c", buf);
+        return buf as String;
+    }
+
+    public static nextInt() : Integer {
+        String line = Scanner.nextLine();
+        return line.parseInt();
+    }
+
+    public static nextFloat() : Float {
+        String line = Scanner.nextLine();
+        return line.parseFloat();
+    }
+}

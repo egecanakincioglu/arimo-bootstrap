@@ -1,0 +1,37 @@
+package arimo.util;
+
+extern "C" {
+    rand()             : Integer;
+    srand(seed: Integer) : Void;
+    time(t: RawPtr<Void>) : Integer;
+}
+
+public class Random {
+    public static seed(s: Integer) : Void {
+        srand(s);
+    }
+
+    public static seedTime() : Void {
+        Integer t = time(null);
+        srand(t);
+    }
+
+    public static nextInt(max: Integer) : Integer {
+        Integer r = rand();
+        if (r < 0) { r = -r; }
+        return r % max;
+    }
+
+    public static nextFloat() : Float {
+        Integer r = rand();
+        if (r < 0) { r = -r; }
+        Integer n = r % 10000;
+        Float f = n as Float;
+        return f / 10000.0;
+    }
+
+    public static nextBoolean() : Boolean {
+        Integer r = rand();
+        return (r % 2) == 0;
+    }
+}

@@ -1,0 +1,45 @@
+package arimo.util;
+
+public class ArrayList {
+    private items : List<Integer>;
+
+    public constructor() {
+        this.items = List();
+    }
+
+    public add(item: Integer) : Void {
+        this.items.append(item);
+    }
+
+    public get(index: Integer) : Integer {
+        return this.items.get(index);
+    }
+
+    public size() : Integer {
+        return this.items.length();
+    }
+
+    public remove(index: Integer) : Void {
+        this.items.removeAt(index);
+    }
+
+    public contains(item: Integer) : Boolean {
+        Integer i = 0;
+        Integer s = this.items.length();
+        while (i < s) {
+            if (this.items.get(i) == item) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    public isEmpty() : Boolean {
+        return this.items.length() == 0;
+    }
+
+    public clear() : Void {
+        this.items = List();
+    }
+}
