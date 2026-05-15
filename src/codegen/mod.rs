@@ -60,6 +60,7 @@ struct VarSlot<'ctx> {
     ty         : BasicTypeEnum<'ctx>,
     class_name : Option<String>,
     elem_class : Option<String>,
+    enum_name  : Option<String>,
 }
 
 pub struct CodeGen<'ctx> {
@@ -303,7 +304,13 @@ impl<'ctx> CodeGen<'ctx> {
         class_name : Option<String>,
     ) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), VarSlot { ptr, ty, class_name, elem_class: None });
+            scope.insert(name.to_string(), VarSlot { ptr, ty, class_name, elem_class: None, enum_name: None });
+        }
+    }
+
+    fn define_enum_var(&mut self, name: &str, ptr: PointerValue<'ctx>, ty: BasicTypeEnum<'ctx>, enum_name: String) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), VarSlot { ptr, ty, class_name: None, elem_class: None, enum_name: Some(enum_name) });
         }
     }
 
@@ -316,7 +323,7 @@ impl<'ctx> CodeGen<'ctx> {
         elem_class : Option<String>,
     ) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), VarSlot { ptr, ty, class_name, elem_class });
+            scope.insert(name.to_string(), VarSlot { ptr, ty, class_name, elem_class, enum_name: None });
         }
     }
 
@@ -797,6 +804,8 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn compile_enum(&mut self, e: &EnumDecl) -> CgResult<()> {
+        let variant_names: Vec<String> = e.variants.iter().map(|v| v.name.clone()).collect();
+        self.generate_enum_label_fn(&e.name.clone(), &variant_names);
         self.cur_class = Some(e.name.clone());
         for m in &e.methods.clone() {
             if m.body.is_none() { continue; }
@@ -804,6 +813,60 @@ impl<'ctx> CodeGen<'ctx> {
         }
         self.cur_class = None;
         Ok(())
+    }
+
+    fn generate_enum_label_fn(&mut self, enum_name: &str, variant_names: &[String]) {
+        let fn_name = format!("{}_label", enum_name);
+        if self.module.get_function(&fn_name).is_some() { return; }
+        let prev_block = self.builder.get_insert_block();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let i32_ty = self.ctx.i32_type();
+        let ft = ptr_ty.fn_type(&[i32_ty.into()], false);
+        let fn_val = self.module.add_function(&fn_name, ft, None);
+        let entry_bb  = self.ctx.append_basic_block(fn_val, "entry");
+        let default_bb = self.ctx.append_basic_block(fn_val, "sw.default");
+        let end_bb    = self.ctx.append_basic_block(fn_val, "sw.end");
+        self.builder.position_at_end(entry_bb);
+        let param = fn_val.get_first_param().unwrap().into_int_value();
+        let mut arm_bbs: Vec<inkwell::basic_block::BasicBlock<'ctx>> = Vec::new();
+        let mut switch_cases: Vec<(inkwell::values::IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+        for i in 0..variant_names.len() {
+            let arm_bb = self.ctx.append_basic_block(fn_val, &format!("sw.{}", i));
+            arm_bbs.push(arm_bb);
+            switch_cases.push((i32_ty.const_int(i as u64, false), arm_bb));
+        }
+        self.builder.build_switch(param, default_bb, &switch_cases).unwrap();
+        let mut arm_str_ptrs: Vec<PointerValue<'ctx>> = Vec::new();
+        for (i, vname) in variant_names.iter().enumerate() {
+            self.builder.position_at_end(arm_bbs[i]);
+            let sp = self.build_global_string(vname).unwrap();
+            arm_str_ptrs.push(sp);
+            self.builder.build_unconditional_branch(end_bb).unwrap();
+        }
+        self.builder.position_at_end(default_bb);
+        let unknown_ptr = self.build_global_string("<unknown>").unwrap();
+        self.builder.build_unconditional_branch(end_bb).unwrap();
+        self.builder.position_at_end(end_bb);
+        let phi = self.builder.build_phi(ptr_ty, "lbl").unwrap();
+        for (i, sp) in arm_str_ptrs.iter().enumerate() {
+            phi.add_incoming(&[(sp, arm_bbs[i])]);
+        }
+        phi.add_incoming(&[(&unknown_ptr, default_bb)]);
+        self.builder.build_return(Some(&phi.as_basic_value())).unwrap();
+        if let Some(bb) = prev_block { self.builder.position_at_end(bb); }
+    }
+
+    fn try_enum_label(&mut self, expr: &Expr) -> Option<PointerValue<'ctx>> {
+        let vname = match expr { Expr::Ident(n) => n.clone(), _ => return None };
+        let slot = self.lookup_var(&vname).cloned()?;
+        let en = slot.enum_name.clone()?;
+        let label_fn = self.module.get_function(&format!("{}_label", en))?;
+        let val = self.builder.build_load(slot.ty, slot.ptr, "enum_load_lbl").ok()?;
+        let res = self.builder.build_call(label_fn, &[val.into()], "enum_lbl").ok()?;
+        match res.try_as_basic_value().basic() {
+            Some(BasicValueEnum::PointerValue(p)) => Some(p),
+            _ => None,
+        }
     }
 
     fn compile_enum_method(&mut self, enum_name: &str, m: &Method) -> CgResult<()> {
@@ -1182,6 +1245,13 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                     if elem_class.is_some() || matches!(class_name.as_deref(), Some("__List" | "__HashMap" | "__Pair")) {
                         self.define_collection_var(name, alloca, llvm_ty, class_name, elem_class);
+                    } else if let Type::Named(n) = ty {
+                        let n = n.clone();
+                        if self.is_enum(&n) {
+                            self.define_enum_var(name, alloca, llvm_ty, n);
+                        } else {
+                            self.define_var_with_class(name, alloca, llvm_ty, class_name);
+                        }
                     } else {
                         self.define_var_with_class(name, alloca, llvm_ty, class_name);
                     }
@@ -2281,7 +2351,10 @@ impl<'ctx> CodeGen<'ctx> {
                     fmt_str.push_str(&t.replace('%', "%%"));
                 }
                 StringPart::Interp(inner_expr) => {
-                    if let Some(val) = self.compile_expr(inner_expr)? {
+                    if let Some(ep) = self.try_enum_label(inner_expr) {
+                        fmt_str.push_str("%s");
+                        interp_vals.push(ep.into());
+                    } else if let Some(val) = self.compile_expr(inner_expr)? {
                         let spec = match val {
                             BasicValueEnum::IntValue(iv) => {
                                 match iv.get_type().get_bit_width() {
@@ -2805,15 +2878,28 @@ impl<'ctx> CodeGen<'ctx> {
                 let strlen = self.module.get_function("strlen").unwrap();
                 let strstr = self.module.get_function("strstr").unwrap();
                 let malloc = self.module.get_function("malloc").unwrap();
-                let strcpy = self.module.get_function("strcpy").unwrap();
                 let strcat = self.module.get_function("strcat").unwrap();
+                let cur_fn = match self.cur_fn { Some(f) => f, None => return Ok(None) };
 
-                let found_call = self.builder.build_call(strstr, &[str_ptr.into(), old_str.into()], "rep_found")
+                let found_call = self.builder.build_call(strstr, &[str_ptr.into(), old_str.into()], "rep_search")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 let found_ptr = match found_call.try_as_basic_value().basic() {
                     Some(BasicValueEnum::PointerValue(p)) => p,
                     _ => return Ok(Some(str_ptr.into())),
                 };
+                let rep_found_bb   = self.ctx.append_basic_block(cur_fn, "rep.found");
+                let rep_nofound_bb = self.ctx.append_basic_block(cur_fn, "rep.nofound");
+                let rep_end_bb     = self.ctx.append_basic_block(cur_fn, "rep.end");
+                let is_null = self.builder.build_is_null(found_ptr, "rep_isnull")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_conditional_branch(is_null, rep_nofound_bb, rep_found_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                self.builder.position_at_end(rep_nofound_bb);
+                self.builder.build_unconditional_branch(rep_end_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                self.builder.position_at_end(rep_found_bb);
                 let found_i  = self.builder.build_ptr_to_int(found_ptr, i64_ty, "rep_fi")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 let src_i    = self.builder.build_ptr_to_int(str_ptr, i64_ty, "rep_si")
@@ -2844,7 +2930,7 @@ impl<'ctx> CodeGen<'ctx> {
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 let buf_ptr = match buf_call.try_as_basic_value().basic() {
                     Some(BasicValueEnum::PointerValue(p)) => p,
-                    _ => return Ok(Some(str_ptr.into())),
+                    _ => { self.builder.build_unconditional_branch(rep_end_bb).map_err(|e| CodeGenError::new(e.to_string()))?; return Ok(Some(str_ptr.into())); },
                 };
                 let i8_ty = self.ctx.i8_type();
                 let memcpy_fn = self.module.get_function("memcpy").unwrap_or_else(|| {
@@ -2867,7 +2953,14 @@ impl<'ctx> CodeGen<'ctx> {
                 };
                 self.builder.build_call(strcat, &[buf_ptr.into(), old_end.into()], "")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
-                Ok(Some(buf_ptr.into()))
+                self.builder.build_unconditional_branch(rep_end_bb)
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                self.builder.position_at_end(rep_end_bb);
+                let phi = self.builder.build_phi(ptr_ty, "rep_result")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                phi.add_incoming(&[(&str_ptr, rep_nofound_bb), (&buf_ptr, rep_found_bb)]);
+                Ok(Some(phi.as_basic_value()))
             }
 
             _ => {
@@ -3688,7 +3781,10 @@ impl<'ctx> CodeGen<'ctx> {
                             fmt_str.push_str(&t.replace('%', "%%"));
                         }
                         StringPart::Interp(inner_expr) => {
-                            if let Some(val) = self.compile_expr(inner_expr)? {
+                            if let Some(ep) = self.try_enum_label(inner_expr) {
+                                fmt_str.push_str("%s");
+                                interp_vals.push(ep.into());
+                            } else if let Some(val) = self.compile_expr(inner_expr)? {
                                 let spec = match val {
                                     BasicValueEnum::IntValue(iv) => {
                                         match iv.get_type().get_bit_width() {
@@ -4234,6 +4330,7 @@ impl<'ctx> CodeGen<'ctx> {
                                     ty: slot.ty,
                                     class_name: Some(cn.clone()),
                                     elem_class: None,
+                                    enum_name: None,
                                 })?;
                                 if rhs_needs_retain {
                                     if let BasicValueEnum::PointerValue(new_ptr) = coerced {
