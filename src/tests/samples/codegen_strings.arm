@@ -1,4 +1,4 @@
-module arimo.test.strings;
+package arimo.test.strings;
 
 public class StringsTest {
 

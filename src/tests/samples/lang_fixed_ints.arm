@@ -1,4 +1,4 @@
-module arimo.test.fixed_ints;
+package arimo.test.fixed_ints;
 
 type NodeId   = u32;
 type ByteFlag = u8;

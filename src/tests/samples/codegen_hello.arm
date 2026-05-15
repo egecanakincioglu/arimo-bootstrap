@@ -1,4 +1,4 @@
-module arimo.codegentest;
+package arimo.codegentest;
 
 public class Application {
     public static main() : Void {

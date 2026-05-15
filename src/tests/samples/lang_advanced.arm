@@ -1,4 +1,4 @@
-module arimo.test.advanced;
+package arimo.test.advanced;
 
 public class Counter {
     private count : Integer;

@@ -1,4 +1,4 @@
-module arimo.test.comprehensive;
+package arimo.test.comprehensive;
 
 public enum TaskStatus {
     Todo,

@@ -1,4 +1,4 @@
-module arimo.test.simd;
+package arimo.test.simd;
 
 public class VectorMath {
     public static addVectors(a: Vec4f, b: Vec4f) : Vec4f {

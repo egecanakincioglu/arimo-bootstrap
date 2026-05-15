@@ -1,4 +1,4 @@
-module arimo.test.closure;
+package arimo.test.closure;
 
 public class ClosureTest {
 

@@ -1,4 +1,4 @@
-module arimo.codegenenum;
+package arimo.codegenenum;
 
 public enum Direction {
     North,

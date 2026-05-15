@@ -1,4 +1,4 @@
-module arimo.codegenclass;
+package arimo.codegenclass;
 
 public class Counter {
     private count : Integer;

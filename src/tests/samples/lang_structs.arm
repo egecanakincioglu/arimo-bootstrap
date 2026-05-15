@@ -1,4 +1,4 @@
-module arimo.test.structs;
+package arimo.test.structs;
 
 public struct Vec3 {
     x : Float;

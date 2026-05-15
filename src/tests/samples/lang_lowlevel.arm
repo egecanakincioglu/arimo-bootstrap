@@ -1,4 +1,4 @@
-module arimo.test.lowlevel;
+package arimo.test.lowlevel;
 
 @Packed
 public struct PacketHeader {

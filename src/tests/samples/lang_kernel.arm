@@ -1,5 +1,5 @@
 @Freestanding
-module kernel.boot;
+package kernel.boot;
 
 @Packed
 public struct PacketHeader {

@@ -1,4 +1,4 @@
-module arimo.test.arrays;
+package arimo.test.arrays;
 
 type Mat4  = Array<Float, 16>;
 type Bytes = Slice<u8>;

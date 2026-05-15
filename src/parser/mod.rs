@@ -169,11 +169,7 @@ impl Parser {
     }
 
     fn parse_module_decl(&mut self) -> ParseResult<String> {
-        if self.check(&Token::Package) {
-            self.advance();
-        } else {
-            self.expect(&Token::Module)?;
-        }
+        self.expect(&Token::Package)?;
         let path = self.parse_dotted_path()?;
         self.expect(&Token::Semicolon)?;
         Ok(path)
