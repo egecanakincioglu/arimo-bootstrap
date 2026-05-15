@@ -154,8 +154,8 @@ Alt klasörde olsa bile `[[İsim]]` yeterli.
 ## Kritik Teknik Bilgiler (Her Session Geçerli)
 
 ### Sıradaki Görev
-**5-C — arimo.io stdlib**
-InputStream, BufferedReader
+**5-D — arimo.env stdlib**
+args(), exit(Integer), platform()
 Detay: `brain/proje/Görev-Kuyruğu.md` | `brain/stdlib/Stdlib-Plan.md`
 
 ### En Kritik Tuzaklar (ezber)

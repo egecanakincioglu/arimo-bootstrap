@@ -1,0 +1,40 @@
+package arimo.io;
+
+extern "C" {
+    fopen(path: String, mode: String) : RawPtr<Void>;
+    fgets(buf: RawPtr<Void>, size: Integer, stream: RawPtr<Void>) : RawPtr<Void>;
+    fclose(f: RawPtr<Void>) : Integer;
+    malloc(n: Integer) : RawPtr<Void>;
+}
+
+@ManualMemory
+public class BufferedReader {
+    private handle : RawPtr<Void>;
+
+    public constructor(path: String) {
+        this.handle = fopen(path, "r");
+    }
+
+    public isOpen() : Boolean {
+        if (this.handle != null) { return true; }
+        return false;
+    }
+
+    public readLine() : String {
+        if (this.handle != null) {
+            RawPtr<Void> buf = malloc(4096);
+            RawPtr<Void> result = fgets(buf, 4096, this.handle);
+            if (result != null) {
+                String s = buf as String;
+                return s.trim();
+            }
+        }
+        return "";
+    }
+
+    public close() : Void {
+        if (this.handle != null) {
+            fclose(this.handle);
+        }
+    }
+}

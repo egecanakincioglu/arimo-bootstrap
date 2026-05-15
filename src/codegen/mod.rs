@@ -3024,11 +3024,155 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(buf_ptr.into()))
             }
 
+            "trim" => {
+                let result = self.build_str_trim(str_ptr)?;
+                Ok(Some(result.into()))
+            }
+
             _ => {
                 for a in args { self.compile_expr(a)?; }
                 Ok(None)
             }
         }
+    }
+
+    fn build_str_trim(
+        &mut self,
+        src_ptr : inkwell::values::PointerValue<'ctx>,
+    ) -> CgResult<inkwell::values::PointerValue<'ctx>> {
+        let i8_ty  = self.ctx.i8_type();
+        let i64_ty = self.ctx.i64_type();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let strlen = self.module.get_function("strlen").unwrap();
+        let malloc = self.module.get_function("malloc").unwrap();
+        let memcpy_fn = self.module.get_function("memcpy").unwrap_or_else(|| {
+            let ft = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
+            self.module.add_function("memcpy", ft, None)
+        });
+        let cur_fn = match self.cur_fn { Some(f) => f, None => return Ok(src_ptr) };
+
+        let len_call = self.builder.build_call(strlen, &[src_ptr.into()], "trim_len")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let len = match len_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::IntValue(v)) => v,
+            _ => return Ok(src_ptr),
+        };
+
+        let start_alloca = self.builder.build_alloca(i64_ty, "trim_s")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let end_alloca   = self.builder.build_alloca(i64_ty, "trim_e")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let init_end = self.builder.build_int_sub(len, i64_ty.const_int(1, false), "init_e")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(start_alloca, i64_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(end_alloca, init_end)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        macro_rules! is_ws {
+            ($c:expr) => {{
+                let sp = self.builder.build_int_compare(inkwell::IntPredicate::EQ, $c, i8_ty.const_int(32, false), "ws_sp").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let tb = self.builder.build_int_compare(inkwell::IntPredicate::EQ, $c, i8_ty.const_int(9, false), "ws_tb").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let lf = self.builder.build_int_compare(inkwell::IntPredicate::EQ, $c, i8_ty.const_int(10, false), "ws_lf").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let cr = self.builder.build_int_compare(inkwell::IntPredicate::EQ, $c, i8_ty.const_int(13, false), "ws_cr").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let w1 = self.builder.build_or(sp, tb, "w1").map_err(|e| CodeGenError::new(e.to_string()))?;
+                let w2 = self.builder.build_or(lf, cr, "w2").map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_or(w1, w2, "ws").map_err(|e| CodeGenError::new(e.to_string()))?
+            }};
+        }
+
+        // Forward scan: skip leading whitespace
+        let fwd_cond = self.ctx.append_basic_block(cur_fn, "trim.fwd_cond");
+        let fwd_body = self.ctx.append_basic_block(cur_fn, "trim.fwd_body");
+        let rev_cond = self.ctx.append_basic_block(cur_fn, "trim.rev_cond");
+        let rev_body = self.ctx.append_basic_block(cur_fn, "trim.rev_body");
+        let trim_out = self.ctx.append_basic_block(cur_fn, "trim.out");
+
+        self.builder.build_unconditional_branch(fwd_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(fwd_cond);
+        let si = self.builder.build_load(i64_ty, start_alloca, "si")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let fwd_in = self.builder.build_int_compare(inkwell::IntPredicate::SLT, si, len, "fwd_in")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let fwd_char_ptr = unsafe { self.builder.build_gep(i8_ty, src_ptr, &[si], "fwd_cp")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        let fwd_c = self.builder.build_load(i8_ty, fwd_char_ptr, "fwd_c")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let fwd_ws = is_ws!(fwd_c);
+        let fwd_cont = self.builder.build_and(fwd_in, fwd_ws, "fwd_cont")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(fwd_cont, fwd_body, rev_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(fwd_body);
+        let si2 = self.builder.build_int_add(si, i64_ty.const_int(1, false), "si_inc")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(start_alloca, si2)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(fwd_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // Reverse scan: skip trailing whitespace
+        self.builder.position_at_end(rev_cond);
+        let si_final = self.builder.build_load(i64_ty, start_alloca, "si_f")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let ei_cur = self.builder.build_load(i64_ty, end_alloca, "ei_c")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let rev_pos = self.builder.build_int_compare(inkwell::IntPredicate::SGE, ei_cur, si_final, "rev_pos")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let rev_char_ptr = unsafe { self.builder.build_gep(i8_ty, src_ptr, &[ei_cur], "rev_cp")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        let rev_c = self.builder.build_load(i8_ty, rev_char_ptr, "rev_c")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let rev_ws = is_ws!(rev_c);
+        let rev_cont = self.builder.build_and(rev_pos, rev_ws, "rev_cont")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(rev_cont, rev_body, trim_out)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        self.builder.position_at_end(rev_body);
+        let ei2 = self.builder.build_int_sub(ei_cur, i64_ty.const_int(1, false), "ei_dec")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_store(end_alloca, ei2)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        self.builder.build_unconditional_branch(rev_cond)
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+        // Build result string
+        self.builder.position_at_end(trim_out);
+        let si_out = self.builder.build_load(i64_ty, start_alloca, "si_out")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let ei_out = self.builder.build_load(i64_ty, end_alloca, "ei_out")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let trimmed_len = self.builder.build_int_sub(
+            self.builder.build_int_add(ei_out, i64_ty.const_int(1, false), "trim_len1")
+                .map_err(|e| CodeGenError::new(e.to_string()))?,
+            si_out, "trim_len2"
+        ).map_err(|e| CodeGenError::new(e.to_string()))?;
+        let is_empty = self.builder.build_int_compare(
+            inkwell::IntPredicate::SLE, trimmed_len, i64_ty.const_int(0, false), "trim_empty"
+        ).map_err(|e| CodeGenError::new(e.to_string()))?;
+        let safe_len = self.builder.build_select(is_empty, i64_ty.const_int(0, false), trimmed_len, "safe_len")
+            .map_err(|e| CodeGenError::new(e.to_string()))?.into_int_value();
+        let alloc_len = self.builder.build_int_add(safe_len, i64_ty.const_int(1, false), "alloc_l")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let buf_call = self.builder.build_call(malloc, &[alloc_len.into()], "trim_buf")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let buf_ptr = match buf_call.try_as_basic_value().basic() {
+            Some(BasicValueEnum::PointerValue(p)) => p,
+            _ => return Ok(src_ptr),
+        };
+        let src_start = unsafe { self.builder.build_gep(i8_ty, src_ptr, &[si_out], "trim_src")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        self.builder.build_call(memcpy_fn, &[buf_ptr.into(), src_start.into(), safe_len.into()], "")
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        let null_gep = unsafe { self.builder.build_gep(i8_ty, buf_ptr, &[safe_len], "trim_null")
+            .map_err(|e| CodeGenError::new(e.to_string()))? };
+        self.builder.build_store(null_gep, i8_ty.const_int(0, false))
+            .map_err(|e| CodeGenError::new(e.to_string()))?;
+        Ok(buf_ptr)
     }
 
     fn build_str_case_convert(
@@ -4653,6 +4797,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn build_eq(&mut self, l: BasicValueEnum<'ctx>, r: BasicValueEnum<'ctx>)
         -> CgResult<inkwell::values::IntValue<'ctx>>
     {
+        let i64_ty = self.ctx.i64_type();
         match (l, r) {
             (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) =>
                 self.builder.build_int_compare(inkwell::IntPredicate::EQ, a, b, "eq")
@@ -4660,6 +4805,24 @@ impl<'ctx> CodeGen<'ctx> {
             (BasicValueEnum::FloatValue(a), BasicValueEnum::FloatValue(b)) =>
                 self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, a, b, "feq")
                     .map_err(|e| CodeGenError::new(e.to_string())),
+            (BasicValueEnum::PointerValue(a), BasicValueEnum::PointerValue(b)) => {
+                let ai = self.builder.build_ptr_to_int(a, i64_ty, "eq_pi_a")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let bi = self.builder.build_ptr_to_int(b, i64_ty, "eq_pi_b")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_int_compare(inkwell::IntPredicate::EQ, ai, bi, "ptr_eq")
+                    .map_err(|e| CodeGenError::new(e.to_string()))
+            }
+            (BasicValueEnum::IntValue(a), BasicValueEnum::PointerValue(b)) => {
+                let bi = self.builder.build_ptr_to_int(b, i64_ty, "eq_pi_b")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let a64 = if a.get_type().get_bit_width() < 64 {
+                    self.builder.build_int_z_extend(a, i64_ty, "zext_a")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                } else { a };
+                self.builder.build_int_compare(inkwell::IntPredicate::EQ, a64, bi, "pi_eq")
+                    .map_err(|e| CodeGenError::new(e.to_string()))
+            }
             _ => Ok(self.ctx.bool_type().const_int(0, false)),
         }
     }
@@ -4667,10 +4830,22 @@ impl<'ctx> CodeGen<'ctx> {
     fn build_ne(&mut self, l: BasicValueEnum<'ctx>, r: BasicValueEnum<'ctx>)
         -> CgResult<inkwell::values::IntValue<'ctx>>
     {
+        let i64_ty = self.ctx.i64_type();
         match (l, r) {
             (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) =>
                 self.builder.build_int_compare(inkwell::IntPredicate::NE, a, b, "ne")
                     .map_err(|e| CodeGenError::new(e.to_string())),
+            (BasicValueEnum::FloatValue(a), BasicValueEnum::FloatValue(b)) =>
+                self.builder.build_float_compare(inkwell::FloatPredicate::ONE, a, b, "fne")
+                    .map_err(|e| CodeGenError::new(e.to_string())),
+            (BasicValueEnum::PointerValue(a), BasicValueEnum::PointerValue(b)) => {
+                let ai = self.builder.build_ptr_to_int(a, i64_ty, "ne_pi_a")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let bi = self.builder.build_ptr_to_int(b, i64_ty, "ne_pi_b")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_int_compare(inkwell::IntPredicate::NE, ai, bi, "ptr_ne")
+                    .map_err(|e| CodeGenError::new(e.to_string()))
+            }
             _ => Ok(self.ctx.bool_type().const_int(1, false)),
         }
     }

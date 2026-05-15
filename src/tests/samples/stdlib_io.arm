@@ -1,0 +1,33 @@
+package arimo.test.stdlib_io;
+
+public class IoTest {
+    public static main() : Void {
+        IO.println("=== BufferedReader ===");
+
+        File.write("stdlib_io_test.txt", "hello\nworld\narimo\n");
+
+        BufferedReader reader = BufferedReader("stdlib_io_test.txt");
+        IO.println("isOpen: ${reader.isOpen()}");
+
+        String l1 = reader.readLine();
+        String l2 = reader.readLine();
+        String l3 = reader.readLine();
+        String l4 = reader.readLine();
+
+        IO.println("line1: ${l1}");
+        IO.println("line2: ${l2}");
+        IO.println("line3: ${l3}");
+        IO.println("eof: ${l4}");
+
+        reader.close();
+
+        IO.println("=== InputStream ===");
+        InputStream is = InputStream("stdlib_io_test.txt");
+        IO.println("isOpen: ${is.isOpen()}");
+        is.close();
+
+        File.delete("stdlib_io_test.txt");
+
+        IO.println("stdlib_io: OK");
+    }
+}
