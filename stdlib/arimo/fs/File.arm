@@ -1,5 +1,7 @@
 package arimo.fs;
 
+import arimo.fs.IOException;
+
 extern "C" {
     fopen(path: String, mode: String) : RawPtr<Void>;
     fread(buf: RawPtr<Void>, size: Integer, n: Integer, f: RawPtr<Void>) : Integer;

@@ -29,180 +29,127 @@ use parser::Parser;
 use typechecker::TypeChecker;
 use borrow::BorrowChecker;
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
+// ─── arc.toml config ──────────────────────────────────────────────────────────
 
-    if args.len() < 2 {
-        eprintln!("arc v0.4.0");
-        eprintln!("Usage: arc <file.arm> [file2.arm ...] [--emit-ir] [-c] [-O2]");
-        process::exit(1);
-    }
+struct ArcConfig {
+    name     : String,
+    version  : String,
+    entry    : String,
+    target   : String,
+    stdlib   : Vec<String>,
+    optimize : bool,
+}
 
-    let emit_ir  = args.contains(&"--emit-ir".to_string());
-    let only_obj = args.contains(&"-c".to_string());
-    let optimize = args.contains(&"-O2".to_string()) || args.contains(&"-O3".to_string());
-
-    let arm_files: Vec<&str> = args.iter()
-        .skip(1)
-        .filter(|a| a.ends_with(".arm"))
-        .map(|s| s.as_str())
-        .collect();
-
-    if arm_files.is_empty() {
-        eprintln!("error: no .arm source file provided");
-        process::exit(1);
-    }
-
-    // Discover all modules starting from entry files, following imports
-    let all_paths = discover_modules(&arm_files);
-
-    // Parse all discovered files
-    let mut modules: Vec<(String, ast::Module)> = Vec::new();
-    for path in &all_paths {
-        let source = fs::read_to_string(path).unwrap_or_else(|e| {
-            eprintln!("error: could not read '{}': {}", path, e);
-            process::exit(1);
-        });
-        let mut lexer = Lexer::new(&source);
-        let tokens = lexer.tokenize();
-        println!("arc: parsing '{}'", path);
-        let mut parser = Parser::new(tokens);
-        match parser.parse() {
-            Ok(m) => {
-                println!("arc: parse OK — module '{}'", m.path);
-                modules.push((path.clone(), m));
-            }
-            Err(e) => {
-                eprintln!("arc: parse error in '{}' at {}:{} — {}", path, e.line, e.col, e.message);
-                process::exit(1);
-            }
-        }
-    }
-
-    if modules.len() > 1 {
-        println!("");
-        println!("arc: {} modules loaded", modules.len());
-    } else {
-        let (_, m) = &modules[0];
-        println!("");
-        println!("Module   : {}", m.path);
-        println!("Imports  : {:?}", m.imports);
-        println!("Items    : {}", m.items.len());
-        println!("");
-        print_module_summary(m);
-    }
-
-    // Topological sort by import dependencies
-    let sorted_indices = topological_sort(&modules);
-
-    // Type check all modules with a shared checker (dependencies first)
-    println!("");
-    let mut tc = TypeChecker::new();
-    for &i in &sorted_indices {
-        tc.check(&modules[i].1);
-    }
-    for warn in &tc.warnings {
-        println!("arc: {}", warn);
-    }
-    if tc.errors.is_empty() {
-        println!("arc: type check OK");
-    } else {
-        for err in &tc.errors {
-            eprintln!("arc: {}", err);
-        }
-        process::exit(1);
-    }
-
-    // Borrow check each module independently
-    let mut total_drops = 0;
-    for &i in &sorted_indices {
-        let mut bc = BorrowChecker::new();
-        let errors = bc.check(&modules[i].1);
-        if !errors.is_empty() {
-            for err in errors {
-                eprintln!("arc: {}", err);
-            }
-            process::exit(1);
-        }
-        total_drops += bc.drops.len();
-    }
-    println!("arc: borrow check OK");
-    println!("arc: drop schedule — {} scope(s) tracked", total_drops);
-
-    // Determine output name from entry file
-    let entry_path = arm_files[0];
-    let stem = Path::new(entry_path).file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    let exe_path = format!("{}.exe", stem);
-
-    // Sorted module refs for codegen
-    let sorted_modules: Vec<&ast::Module> = sorted_indices.iter()
-        .map(|&i| &modules[i].1)
-        .collect();
-
-    if emit_ir {
-        match codegen::emit_ir_multi(&sorted_modules, stem) {
-            Ok(text) => { println!("\n; === LLVM IR ===\n{}", text); }
-            Err(e)   => { eprintln!("arc: ir error — {}", e); process::exit(1); }
-        }
-        return;
-    }
-
-    let obj_out = if only_obj {
-        format!("{}.o", stem)
-    } else {
-        std::env::temp_dir()
-            .join(format!("{}.o", stem))
-            .to_string_lossy()
-            .to_string()
-    };
-
-    print!("arc: compiling  ...");
-    match codegen::compile_to_object_multi(&sorted_modules, stem, Path::new(&obj_out), optimize) {
-        Ok(()) => {
-            if only_obj {
-                println!(" OK");
-                println!("arc: → {}", obj_out);
-                return;
-            }
-            print!(" linking ...");
-            let linker_status = std::process::Command::new("gcc")
-                .args([&obj_out, "-o", &exe_path, "-lm"])
-                .status();
-            let _ = fs::remove_file(&obj_out);
-            match linker_status {
-                Ok(s) if s.success() => {
-                    println!(" OK");
-                    println!("arc: → {}", exe_path);
-                }
-                Ok(s) => {
-                    eprintln!("\narc: linker failed (exit {})", s);
-                    process::exit(1);
-                }
-                Err(e) => {
-                    eprintln!("\narc: linker not found — {}", e);
-                    process::exit(1);
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("\narc: codegen error — {}", e);
-            process::exit(1);
+impl Default for ArcConfig {
+    fn default() -> Self {
+        ArcConfig {
+            name     : "project".to_string(),
+            version  : "0.1.0".to_string(),
+            entry    : "src/Main.arm".to_string(),
+            target   : "x86_64-pc-windows-gnu".to_string(),
+            stdlib   : Vec::new(),
+            optimize : false,
         }
     }
 }
 
-/// Resolve `arimo.fs.File` → `<base_dir>/arimo/fs/File.arm`
-fn resolve_import(import_str: &str, base_dir: &Path) -> Option<PathBuf> {
+/// Minimal TOML parser — handles only what arc.toml needs.
+fn parse_arc_toml(content: &str) -> ArcConfig {
+    let mut cfg = ArcConfig::default();
+    let mut section = String::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('#') || line.is_empty() { continue; }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len()-1].trim().to_string();
+            continue;
+        }
+
+        if let Some(eq) = line.find('=') {
+            let key = line[..eq].trim();
+            let val = line[eq+1..].trim();
+
+            match (section.as_str(), key) {
+                ("project", "name")    => cfg.name    = unquote(val),
+                ("project", "version") => cfg.version = unquote(val),
+                ("project", "entry")   => cfg.entry   = unquote(val),
+                ("project", "target")  => cfg.target  = unquote(val),
+                ("build",   "optimize")=> cfg.optimize = val.trim() == "true",
+                ("stdlib",  "include") => cfg.stdlib   = parse_toml_array(val),
+                _ => {}
+            }
+        }
+    }
+    cfg
+}
+
+fn unquote(s: &str) -> String {
+    let s = s.trim();
+    if (s.starts_with('"') && s.ends_with('"'))
+    || (s.starts_with('\'') && s.ends_with('\'')) {
+        s[1..s.len()-1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+fn parse_toml_array(s: &str) -> Vec<String> {
+    let s = s.trim().trim_start_matches('[').trim_end_matches(']');
+    s.split(',')
+        .map(|item| unquote(item.trim()))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+// ─── stdlib discovery ─────────────────────────────────────────────────────────
+
+/// Find the stdlib/ dir adjacent to arc.exe.
+fn find_stdlib_dir() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let stdlib = exe_dir.join("stdlib");
+    if stdlib.exists() { Some(stdlib) } else { None }
+}
+
+/// Collect all .arm files under stdlib/ for the given package (e.g. "arimo.fs").
+fn stdlib_files_for(stdlib_dir: &Path, pkg: &str) -> Vec<PathBuf> {
+    let rel = pkg.replace('.', "/");
+    let pkg_dir = stdlib_dir.join(&rel);
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(&pkg_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("arm") {
+                files.push(p);
+            }
+        }
+    }
+    files
+}
+
+// ─── import resolution ────────────────────────────────────────────────────────
+
+/// Resolve `arimo.fs.File` → path, checking source dir first, then stdlib dir.
+fn resolve_import(import_str: &str, base_dir: &Path, stdlib_dir: Option<&Path>) -> Option<PathBuf> {
     if import_str.ends_with(".*") { return None; }
     let rel = import_str.replace('.', "/") + ".arm";
-    let full = base_dir.join(&rel);
-    if full.exists() { Some(full) } else { None }
+
+    let local = base_dir.join(&rel);
+    if local.exists() { return Some(local); }
+
+    if let Some(stdlib) = stdlib_dir {
+        let from_stdlib = stdlib.join(&rel);
+        if from_stdlib.exists() { return Some(from_stdlib); }
+    }
+
+    None
 }
 
-/// BFS discovery: start from entry files, follow imports, collect unique paths in order.
-fn discover_modules(entry_files: &[&str]) -> Vec<String> {
+// ─── BFS + topo sort ──────────────────────────────────────────────────────────
+
+fn discover_modules(entry_files: &[&str], stdlib_dir: Option<&Path>) -> Vec<String> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut order: Vec<String> = Vec::new();
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
@@ -231,7 +178,7 @@ fn discover_modules(entry_files: &[&str]) -> Vec<String> {
             Err(_) => continue,
         };
         for imp in &module.imports {
-            if let Some(dep_path) = resolve_import(imp, base_dir) {
+            if let Some(dep_path) = resolve_import(imp, base_dir, stdlib_dir) {
                 let canonical = fs::canonicalize(&dep_path).unwrap_or(dep_path.clone());
                 let key = canonical.to_string_lossy().to_string();
                 if visited.insert(key) {
@@ -245,9 +192,7 @@ fn discover_modules(entry_files: &[&str]) -> Vec<String> {
     order
 }
 
-/// DFS topological sort. Returns indices into `modules` in dependency-first order.
-fn topological_sort(modules: &[(String, ast::Module)]) -> Vec<usize> {
-    // Build path → index map
+fn topological_sort(modules: &[(String, ast::Module)], stdlib_dir: Option<&Path>) -> Vec<usize> {
     let path_to_idx: HashMap<String, usize> = modules.iter()
         .enumerate()
         .map(|(i, (p, _))| {
@@ -256,12 +201,11 @@ fn topological_sort(modules: &[(String, ast::Module)]) -> Vec<usize> {
         })
         .collect();
 
-    // Build adjacency: index → dependency indices
     let mut deps: Vec<Vec<usize>> = vec![Vec::new(); modules.len()];
     for (i, (path, module)) in modules.iter().enumerate() {
         let base_dir = Path::new(path).parent().unwrap_or(Path::new("."));
         for imp in &module.imports {
-            if let Some(dep_path) = resolve_import(imp, base_dir) {
+            if let Some(dep_path) = resolve_import(imp, base_dir, stdlib_dir) {
                 let canonical = fs::canonicalize(&dep_path).unwrap_or(dep_path.clone());
                 let key = canonical.to_string_lossy().to_string();
                 if let Some(&j) = path_to_idx.get(&key) {
@@ -271,24 +215,349 @@ fn topological_sort(modules: &[(String, ast::Module)]) -> Vec<usize> {
         }
     }
 
-    // DFS post-order
     let mut visited = vec![false; modules.len()];
     let mut result: Vec<usize> = Vec::new();
 
     fn dfs(node: usize, deps: &[Vec<usize>], visited: &mut Vec<bool>, result: &mut Vec<usize>) {
         if visited[node] { return; }
         visited[node] = true;
-        for &dep in &deps[node] {
-            dfs(dep, deps, visited, result);
-        }
+        for &dep in &deps[node] { dfs(dep, deps, visited, result); }
         result.push(node);
     }
 
-    for i in 0..modules.len() {
-        dfs(i, &deps, &mut visited, &mut result);
+    for i in 0..modules.len() { dfs(i, &deps, &mut visited, &mut result); }
+    result
+}
+
+// ─── compile pipeline ─────────────────────────────────────────────────────────
+
+struct CompileOptions<'a> {
+    entry_files  : Vec<String>,
+    stdlib_dir   : Option<&'a Path>,
+    emit_ir      : bool,
+    only_obj     : bool,
+    optimize     : bool,
+    out_stem     : Option<String>,
+    check_only   : bool,
+}
+
+fn run_pipeline(opts: CompileOptions) -> i32 {
+    let entry_refs: Vec<&str> = opts.entry_files.iter().map(|s| s.as_str()).collect();
+    let all_paths = discover_modules(&entry_refs, opts.stdlib_dir);
+
+    let mut modules: Vec<(String, ast::Module)> = Vec::new();
+    for path in &all_paths {
+        let source = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("arc: error: could not read '{}': {}", path, e);
+                return 1;
+            }
+        };
+        let mut lexer = Lexer::new(&source);
+        let tokens = lexer.tokenize();
+        println!("arc: parsing '{}'", path);
+        let mut parser = Parser::new(tokens);
+        match parser.parse() {
+            Ok(m) => {
+                println!("arc: parse OK — module '{}'", m.path);
+                modules.push((path.clone(), m));
+            }
+            Err(e) => {
+                eprintln!("arc: parse error in '{}' at {}:{} — {}", path, e.line, e.col, e.message);
+                return 1;
+            }
+        }
     }
 
-    result
+    if modules.len() > 1 {
+        println!("\narc: {} modules loaded", modules.len());
+    } else if modules.len() == 1 {
+        let (_, m) = &modules[0];
+        println!("\nModule   : {}", m.path);
+        println!("Imports  : {:?}", m.imports);
+        println!("Items    : {}", m.items.len());
+        println!();
+        print_module_summary(m);
+    } else {
+        eprintln!("arc: error: no modules to compile");
+        return 1;
+    }
+
+    let sorted_indices = topological_sort(&modules, opts.stdlib_dir);
+
+    println!();
+    let mut tc = TypeChecker::new();
+    for &i in &sorted_indices { tc.check(&modules[i].1); }
+    for warn in &tc.warnings { println!("arc: {}", warn); }
+    if tc.errors.is_empty() {
+        println!("arc: type check OK");
+    } else {
+        for err in &tc.errors { eprintln!("arc: {}", err); }
+        return 1;
+    }
+
+    let mut total_drops = 0;
+    for &i in &sorted_indices {
+        let mut bc = BorrowChecker::new();
+        let errors = bc.check(&modules[i].1);
+        if !errors.is_empty() {
+            for err in errors { eprintln!("arc: {}", err); }
+            return 1;
+        }
+        total_drops += bc.drops.len();
+    }
+    println!("arc: borrow check OK");
+    println!("arc: drop schedule — {} scope(s) tracked", total_drops);
+
+    if opts.check_only { return 0; }
+
+    let stem = opts.out_stem.as_deref().unwrap_or_else(|| {
+        entry_refs[0].trim_end_matches(".arm").rsplit(['/', '\\']).next().unwrap_or("output")
+    });
+    let stem_owned = stem.to_string();
+
+    let sorted_modules: Vec<&ast::Module> = sorted_indices.iter()
+        .map(|&i| &modules[i].1)
+        .collect();
+
+    if opts.emit_ir {
+        match codegen::emit_ir_multi(&sorted_modules, &stem_owned) {
+            Ok(text) => { println!("\n; === LLVM IR ===\n{}", text); }
+            Err(e)   => { eprintln!("arc: ir error — {}", e); return 1; }
+        }
+        return 0;
+    }
+
+    let obj_out = if opts.only_obj {
+        format!("{}.o", stem_owned)
+    } else {
+        std::env::temp_dir()
+            .join(format!("{}.o", stem_owned))
+            .to_string_lossy()
+            .to_string()
+    };
+
+    print!("arc: compiling  ...");
+    match codegen::compile_to_object_multi(&sorted_modules, &stem_owned, Path::new(&obj_out), opts.optimize) {
+        Ok(()) => {
+            if opts.only_obj {
+                println!(" OK\narc: → {}", obj_out);
+                return 0;
+            }
+            let exe_path = format!("{}.exe", stem_owned);
+            print!(" linking ...");
+            let status = std::process::Command::new("gcc")
+                .args([&obj_out, "-o", &exe_path, "-lm"])
+                .status();
+            let _ = fs::remove_file(&obj_out);
+            match status {
+                Ok(s) if s.success() => {
+                    println!(" OK\narc: → {}", exe_path);
+                    0
+                }
+                Ok(s) => { eprintln!("\narc: linker failed (exit {})", s); 1 }
+                Err(e) => { eprintln!("\narc: linker not found — {}", e); 1 }
+            }
+        }
+        Err(e) => { eprintln!("\narc: codegen error — {}", e); 1 }
+    }
+}
+
+// ─── subcommands ──────────────────────────────────────────────────────────────
+
+fn cmd_init(name: &str) {
+    let dir = PathBuf::from(name);
+    if dir.exists() {
+        eprintln!("arc: '{}' already exists", name);
+        process::exit(1);
+    }
+    fs::create_dir_all(dir.join("src")).unwrap_or_else(|e| {
+        eprintln!("arc: could not create project: {}", e); process::exit(1);
+    });
+
+    let toml = format!(
+r#"[project]
+name    = "{name}"
+version = "0.1.0"
+entry   = "src/Main.arm"
+
+[stdlib]
+include = []
+
+[build]
+optimize = false
+"#
+    );
+    fs::write(dir.join("arc.toml"), toml).unwrap();
+
+    let main_arm = format!(
+r#"package {name};
+
+public class Main {{
+    public static main() : Void {{
+        IO.println("Hello from {name}!");
+    }}
+}}
+"#
+    );
+    fs::write(dir.join("src/Main.arm"), main_arm).unwrap();
+
+    println!("arc: created project '{}'", name);
+    println!("arc: → {}/arc.toml", name);
+    println!("arc: → {}/src/Main.arm", name);
+    println!("\nRun: cd {} && arc build", name);
+}
+
+fn cmd_clean() {
+    let mut removed = 0usize;
+    for entry in fs::read_dir(".").unwrap_or_else(|_| { process::exit(0) }).flatten() {
+        let p = entry.path();
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if matches!(ext, "exe" | "o") {
+            if fs::remove_file(&p).is_ok() { removed += 1; }
+        }
+    }
+    println!("arc: clean — removed {} file(s)", removed);
+}
+
+// ─── main ─────────────────────────────────────────────────────────────────────
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let version = "arc v0.5.0 (Arimo Compiler)";
+
+    if args.len() < 2 {
+        println!("{}", version);
+        println!("Usage:");
+        println!("  arc build            compile project (arc.toml)");
+        println!("  arc run              compile + run project");
+        println!("  arc check            type-check only");
+        println!("  arc clean            remove build artifacts");
+        println!("  arc init <name>      create new project");
+        println!("  arc <file.arm> ...   compile files directly");
+        process::exit(0);
+    }
+
+    let stdlib_dir = find_stdlib_dir();
+    let stdlib_opt: Option<&Path> = stdlib_dir.as_deref();
+
+    match args[1].as_str() {
+        "init" => {
+            let name = args.get(2).map(|s| s.as_str()).unwrap_or("myproject");
+            cmd_init(name);
+        }
+
+        "clean" => {
+            cmd_clean();
+        }
+
+        "build" | "run" | "check" => {
+            let toml_path = PathBuf::from("arc.toml");
+            if !toml_path.exists() {
+                eprintln!("arc: arc.toml not found — run 'arc init <name>' to create a project");
+                eprintln!("     or compile directly: arc <file.arm>");
+                process::exit(1);
+            }
+            let toml_content = fs::read_to_string(&toml_path).unwrap_or_default();
+            let cfg = parse_arc_toml(&toml_content);
+
+            // Collect stdlib files
+            let mut entry_files: Vec<String> = Vec::new();
+
+            if let Some(ref stdlib) = stdlib_dir {
+                for pkg in &cfg.stdlib {
+                    for f in stdlib_files_for(stdlib, pkg) {
+                        entry_files.push(f.to_string_lossy().to_string());
+                    }
+                }
+            }
+
+            // Add the entry file last
+            let entry_path = PathBuf::from(&cfg.entry);
+            if !entry_path.exists() {
+                eprintln!("arc: entry file '{}' not found", cfg.entry);
+                process::exit(1);
+            }
+            entry_files.push(cfg.entry.clone());
+
+            let check_only = args[1] == "check";
+            let emit_ir    = args.contains(&"--emit-ir".to_string());
+            let only_obj   = args.contains(&"-c".to_string());
+            let optimize   = cfg.optimize || args.contains(&"-O2".to_string());
+
+            println!("{}", version);
+            println!("arc: building '{}'  v{}  ({})", cfg.name, cfg.version, cfg.target);
+
+            let entry_refs: Vec<&str> = entry_files.iter().map(|s| s.as_str()).collect();
+            // Use entry .arm stem for output name
+            let stem = Path::new(&cfg.entry)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&cfg.name)
+                .to_string();
+            let out_stem = cfg.name.clone();
+
+            let opts = CompileOptions {
+                entry_files: entry_refs.iter().map(|s| s.to_string()).collect(),
+                stdlib_dir: stdlib_opt,
+                emit_ir,
+                only_obj,
+                optimize,
+                out_stem: Some(out_stem.clone()),
+                check_only,
+            };
+
+            let code = run_pipeline(opts);
+
+            if code == 0 && args[1] == "run" && !check_only {
+                println!("\narc: running '{}.exe'", out_stem);
+                println!("{}", "─".repeat(40));
+                let status = std::process::Command::new(format!("./{}.exe", out_stem))
+                    .status()
+                    .unwrap_or_else(|e| {
+                        eprintln!("arc: could not run: {}", e);
+                        process::exit(1);
+                    });
+                process::exit(status.code().unwrap_or(0));
+            }
+
+            process::exit(code);
+        }
+
+        "version" | "--version" | "-v" => {
+            println!("{}", version);
+        }
+
+        _ => {
+            // Legacy direct-file mode: arc file.arm [file2.arm ...] [flags]
+            let emit_ir  = args.contains(&"--emit-ir".to_string());
+            let only_obj = args.contains(&"-c".to_string());
+            let optimize = args.contains(&"-O2".to_string()) || args.contains(&"-O3".to_string());
+
+            let arm_files: Vec<String> = args.iter()
+                .skip(1)
+                .filter(|a| a.ends_with(".arm"))
+                .map(|s| s.clone())
+                .collect();
+
+            if arm_files.is_empty() {
+                eprintln!("arc: unknown command '{}' — try 'arc build' or 'arc <file.arm>'", args[1]);
+                process::exit(1);
+            }
+
+            let opts = CompileOptions {
+                entry_files: arm_files,
+                stdlib_dir: stdlib_opt,
+                emit_ir,
+                only_obj,
+                optimize,
+                out_stem: None,
+                check_only: false,
+            };
+            process::exit(run_pipeline(opts));
+        }
+    }
 }
 
 fn print_module_summary(m: &ast::Module) {
@@ -312,33 +581,19 @@ fn print_module_summary(m: &ast::Module) {
                 }
                 println!("  }}");
             }
-            ast::Item::Interface(i) => {
-                println!("  interface {} ({} methods)", i.name, i.methods.len());
-            }
-            ast::Item::Enum(e) => {
-                println!("  enum {} {:?}", e.name, e.variants);
-            }
-            ast::Item::Exception(e) => {
-                println!("  exception {} extends {}", e.name, e.extends);
-            }
+            ast::Item::Interface(i) => println!("  interface {} ({} methods)", i.name, i.methods.len()),
+            ast::Item::Enum(e)      => println!("  enum {} {:?}", e.name, e.variants),
+            ast::Item::Exception(e) => println!("  exception {} extends {}", e.name, e.extends),
             ast::Item::Struct(s) => {
                 println!("  struct {} {{", s.name);
                 println!("    fields  : {}", s.fields.len());
                 println!("    methods : {}", s.methods.len());
                 println!("  }}");
             }
-            ast::Item::TypeAlias(a) => {
-                println!("  type {} = {:?}", a.name, a.ty);
-            }
-            ast::Item::Union(u) => {
-                println!("  union {} ({} fields)", u.name, u.fields.len());
-            }
-            ast::Item::Extern(e) => {
-                println!("  extern \"{}\" ({} decls)", e.abi, e.decls.len());
-            }
-            ast::Item::Extension(e) => {
-                println!("  extend {} ({} methods)", e.target, e.methods.len());
-            }
+            ast::Item::TypeAlias(a)  => println!("  type {} = {:?}", a.name, a.ty),
+            ast::Item::Union(u)      => println!("  union {} ({} fields)", u.name, u.fields.len()),
+            ast::Item::Extern(e)     => println!("  extern \"{}\" ({} decls)", e.abi, e.decls.len()),
+            ast::Item::Extension(e)  => println!("  extend {} ({} methods)", e.target, e.methods.len()),
         }
     }
 }

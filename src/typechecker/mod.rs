@@ -813,11 +813,15 @@ impl TypeChecker {
             }
 
             Stmt::Throw(e) => {
+                let pre_errors = self.errors.len();
                 let ty = self.infer_expr(e);
-                if !self.is_throwable(&ty) {
-                    self.error(format!(
-                        "can only throw exception types, found {:?}", ty
-                    ));
+                // If the thrown type is unknown (not yet registered), don't error — EH
+                // is setjmp/longjmp based and doesn't need the class to be registered.
+                if matches!(ty, Type::Named(ref n) if n == "Error" || n == "Unknown") {
+                    self.errors.truncate(pre_errors);
+                } else if !self.is_throwable(&ty) {
+                    self.errors.truncate(pre_errors);
+                    self.error(format!("can only throw exception types, found {:?}", ty));
                 }
             }
 
