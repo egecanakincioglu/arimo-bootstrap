@@ -1,0 +1,19 @@
+package math;
+
+public class Vector2 {
+    public x : Float;
+    public y : Float;
+
+    public constructor(nx: Float, ny: Float) {
+        this.x = nx;
+        this.y = ny;
+    }
+
+    public length() : Float {
+        return Math.sqrt(this.x * this.x + this.y * this.y);
+    }
+
+    public print() : Void {
+        IO.println("Vector2(${this.x}, ${this.y})");
+    }
+}

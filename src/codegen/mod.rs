@@ -6730,3 +6730,30 @@ pub fn compile_to_object_opts(
     cg.verify_module()?;
     cg.emit_object_file_opts(out_path, optimize)
 }
+
+pub fn compile_to_object_multi(
+    modules     : &[&crate::ast::Module],
+    module_name : &str,
+    out_path    : &Path,
+    optimize    : bool,
+) -> Result<(), CodeGenError> {
+    let ctx = Context::create();
+    let mut cg = CodeGen::new(&ctx, module_name);
+    for m in modules {
+        cg.compile_module(m)?;
+    }
+    cg.verify_module()?;
+    cg.emit_object_file_opts(out_path, optimize)
+}
+
+pub fn emit_ir_multi(
+    modules     : &[&crate::ast::Module],
+    module_name : &str,
+) -> Result<String, CodeGenError> {
+    let ctx = Context::create();
+    let mut cg = CodeGen::new(&ctx, module_name);
+    for m in modules {
+        cg.compile_module(m)?;
+    }
+    Ok(cg.emit_ir())
+}

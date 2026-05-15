@@ -1,0 +1,13 @@
+package main;
+
+public class Main {
+    public static main() : Void {
+        Vector2 v = Vector2(3.0, 4.0);
+        v.print();
+        Float len = v.length();
+        IO.println("Length: ${len}");
+
+        Vector2 v2 = Vector2(1.0, 0.0);
+        v2.print();
+    }
+}
