@@ -240,17 +240,42 @@ fn stdlib_files_for(stdlib_dir: &Path, pkg: &str) -> Vec<PathBuf> {
 
 // ─── import resolution ────────────────────────────────────────────────────────
 
-/// Resolve `arimo.fs.File` → path, checking source dir first, then stdlib dir.
-fn resolve_import(import_str: &str, base_dir: &Path, stdlib_dir: Option<&Path>) -> Option<PathBuf> {
+/// Resolve `arimo.fs.File` → path.
+/// Search order:
+///   1. Relative to the importing file's directory
+///   2. Relative to the project root (arc.toml location)
+///   3. From the stdlib directory (arc.exe/stdlib/)
+fn resolve_import(
+    import_str  : &str,
+    base_dir    : &Path,
+    project_root: Option<&Path>,
+    stdlib_dir  : Option<&Path>,
+) -> Option<PathBuf> {
     if import_str.ends_with(".*") { return None; }
     let rel = import_str.replace('.', "/") + ".arm";
 
+    // 1. Relative to the importing file's directory
     let local = base_dir.join(&rel);
     if local.exists() { return Some(local); }
 
+    // 2. Relative to project root (enables `import myproject.Lexer` → `myproject/Lexer.arm`)
+    if let Some(root) = project_root {
+        let from_root = root.join(&rel);
+        if from_root.exists() { return Some(from_root); }
+    }
+
+    // 3. From stdlib
     if let Some(stdlib) = stdlib_dir {
         let from_stdlib = stdlib.join(&rel);
         if from_stdlib.exists() { return Some(from_stdlib); }
+    }
+
+    // 4. Flat project: try just the class filename in project root
+    //    e.g. `import myapp.Greeter` → `Greeter.arm` in project root
+    if let Some(root) = project_root {
+        let class_name = import_str.split('.').last().unwrap_or(import_str);
+        let flat = root.join(format!("{}.arm", class_name));
+        if flat.exists() { return Some(flat); }
     }
 
     None
@@ -258,7 +283,7 @@ fn resolve_import(import_str: &str, base_dir: &Path, stdlib_dir: Option<&Path>) 
 
 // ─── BFS + topo sort ──────────────────────────────────────────────────────────
 
-fn discover_modules(entry_files: &[&str], stdlib_dir: Option<&Path>) -> Vec<String> {
+fn discover_modules(entry_files: &[&str], project_root: Option<&Path>, stdlib_dir: Option<&Path>) -> Vec<String> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut order: Vec<String> = Vec::new();
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
@@ -287,7 +312,7 @@ fn discover_modules(entry_files: &[&str], stdlib_dir: Option<&Path>) -> Vec<Stri
             Err(_) => continue,
         };
         for imp in &module.imports {
-            if let Some(dep_path) = resolve_import(imp, base_dir, stdlib_dir) {
+            if let Some(dep_path) = resolve_import(imp, base_dir, project_root, stdlib_dir) {
                 let canonical = fs::canonicalize(&dep_path).unwrap_or(dep_path.clone());
                 let key = canonical.to_string_lossy().to_string();
                 if visited.insert(key) {
@@ -301,7 +326,7 @@ fn discover_modules(entry_files: &[&str], stdlib_dir: Option<&Path>) -> Vec<Stri
     order
 }
 
-fn topological_sort(modules: &[(String, ast::Module)], stdlib_dir: Option<&Path>) -> Vec<usize> {
+fn topological_sort(modules: &[(String, ast::Module)], project_root: Option<&Path>, stdlib_dir: Option<&Path>) -> Vec<usize> {
     let path_to_idx: HashMap<String, usize> = modules.iter()
         .enumerate()
         .map(|(i, (p, _))| {
@@ -314,7 +339,7 @@ fn topological_sort(modules: &[(String, ast::Module)], stdlib_dir: Option<&Path>
     for (i, (path, module)) in modules.iter().enumerate() {
         let base_dir = Path::new(path).parent().unwrap_or(Path::new("."));
         for imp in &module.imports {
-            if let Some(dep_path) = resolve_import(imp, base_dir, stdlib_dir) {
+            if let Some(dep_path) = resolve_import(imp, base_dir, project_root, stdlib_dir) {
                 let canonical = fs::canonicalize(&dep_path).unwrap_or(dep_path.clone());
                 let key = canonical.to_string_lossy().to_string();
                 if let Some(&j) = path_to_idx.get(&key) {
@@ -342,6 +367,7 @@ fn topological_sort(modules: &[(String, ast::Module)], stdlib_dir: Option<&Path>
 
 struct CompileOptions<'a> {
     entry_files  : Vec<String>,
+    project_root : Option<&'a Path>,
     stdlib_dir   : Option<&'a Path>,
     emit_ir      : bool,
     only_obj     : bool,
@@ -352,7 +378,7 @@ struct CompileOptions<'a> {
 
 fn run_pipeline(opts: CompileOptions) -> i32 {
     let entry_refs: Vec<&str> = opts.entry_files.iter().map(|s| s.as_str()).collect();
-    let all_paths = discover_modules(&entry_refs, opts.stdlib_dir);
+    let all_paths = discover_modules(&entry_refs, opts.project_root, opts.stdlib_dir);
 
     let mut modules: Vec<(String, ast::Module)> = Vec::new();
     for path in &all_paths {
@@ -393,7 +419,7 @@ fn run_pipeline(opts: CompileOptions) -> i32 {
         return 1;
     }
 
-    let sorted_indices = topological_sort(&modules, opts.stdlib_dir);
+    let sorted_indices = topological_sort(&modules, opts.project_root, opts.stdlib_dir);
 
     println!();
     let mut tc = TypeChecker::new();
@@ -647,8 +673,12 @@ fn main() {
                 .to_string();
             let out_stem = cfg.name.clone();
 
+            let project_root = fs::canonicalize(".").ok();
+            let project_root_ref: Option<&Path> = project_root.as_deref();
+
             let opts = CompileOptions {
                 entry_files: entry_refs.iter().map(|s| s.to_string()).collect(),
+                project_root: project_root_ref,
                 stdlib_dir: stdlib_opt,
                 emit_ir,
                 only_obj,
@@ -697,6 +727,7 @@ fn main() {
 
             let opts = CompileOptions {
                 entry_files: arm_files,
+                project_root: None,
                 stdlib_dir: stdlib_opt,
                 emit_ir,
                 only_obj,
