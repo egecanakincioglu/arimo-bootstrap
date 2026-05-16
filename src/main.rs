@@ -31,58 +31,60 @@ use borrow::BorrowChecker;
 
 // ─── arc.toml config ──────────────────────────────────────────────────────────
 
+#[derive(Default, Debug)]
+struct Author {
+    name  : String,
+    email : String,
+}
+
 struct ArcConfig {
-    name     : String,
-    version  : String,
-    entry    : String,
-    target   : String,
-    stdlib   : Vec<String>,
-    optimize : bool,
+    // [project]
+    name        : String,
+    version     : String,
+    description : String,
+    entry       : String,
+    license     : String,
+    readme      : String,
+    keywords    : Vec<String>,
+    homepage    : String,
+    repository  : String,
+    authors     : Vec<Author>,
+    // [build]
+    target      : String,
+    // [profiles.release] / [profiles.dev]
+    optimize_release : bool,
+    optimize_dev     : bool,
+    // [stdlib]
+    stdlib      : Vec<String>,
+    // [dependencies]
+    dependencies     : Vec<(String, String)>,
+    dev_dependencies : Vec<(String, String)>,
+    // [scripts]
+    scripts     : Vec<(String, String)>,
 }
 
 impl Default for ArcConfig {
     fn default() -> Self {
         ArcConfig {
-            name     : "project".to_string(),
-            version  : "0.1.0".to_string(),
-            entry    : "src/Main.arm".to_string(),
-            target   : "x86_64-pc-windows-gnu".to_string(),
-            stdlib   : Vec::new(),
-            optimize : false,
+            name             : "project".to_string(),
+            version          : "0.1.0".to_string(),
+            description      : String::new(),
+            entry            : "Main.arm".to_string(),
+            license          : "MIT".to_string(),
+            readme           : "README.md".to_string(),
+            keywords         : Vec::new(),
+            homepage         : String::new(),
+            repository       : String::new(),
+            authors          : Vec::new(),
+            target           : "x86_64-pc-windows-gnu".to_string(),
+            optimize_release : true,
+            optimize_dev     : false,
+            stdlib           : Vec::new(),
+            dependencies     : Vec::new(),
+            dev_dependencies : Vec::new(),
+            scripts          : Vec::new(),
         }
     }
-}
-
-/// Minimal TOML parser — handles only what arc.toml needs.
-fn parse_arc_toml(content: &str) -> ArcConfig {
-    let mut cfg = ArcConfig::default();
-    let mut section = String::new();
-
-    for raw_line in content.lines() {
-        let line = raw_line.trim();
-        if line.starts_with('#') || line.is_empty() { continue; }
-
-        if line.starts_with('[') && line.ends_with(']') {
-            section = line[1..line.len()-1].trim().to_string();
-            continue;
-        }
-
-        if let Some(eq) = line.find('=') {
-            let key = line[..eq].trim();
-            let val = line[eq+1..].trim();
-
-            match (section.as_str(), key) {
-                ("project", "name")    => cfg.name    = unquote(val),
-                ("project", "version") => cfg.version = unquote(val),
-                ("project", "entry")   => cfg.entry   = unquote(val),
-                ("project", "target")  => cfg.target  = unquote(val),
-                ("build",   "optimize")=> cfg.optimize = val.trim() == "true",
-                ("stdlib",  "include") => cfg.stdlib   = parse_toml_array(val),
-                _ => {}
-            }
-        }
-    }
-    cfg
 }
 
 fn unquote(s: &str) -> String {
@@ -96,11 +98,118 @@ fn unquote(s: &str) -> String {
 }
 
 fn parse_toml_array(s: &str) -> Vec<String> {
-    let s = s.trim().trim_start_matches('[').trim_end_matches(']');
-    s.split(',')
+    let inner = s.trim().trim_start_matches('[').trim_end_matches(']');
+    inner.split(',')
         .map(|item| unquote(item.trim()))
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Full arc.toml parser.
+fn parse_arc_toml(content: &str) -> ArcConfig {
+    let mut cfg = ArcConfig::default();
+    let mut section = String::new();
+    let mut cur_author: Option<Author> = None;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('#') || line.is_empty() { continue; }
+
+        // Array-of-tables header: [[project.authors]]
+        if line.starts_with("[[") && line.ends_with("]]") {
+            // Flush pending author
+            if let Some(a) = cur_author.take() {
+                cfg.authors.push(a);
+            }
+            let inner = line[2..line.len()-2].trim();
+            section = inner.to_string();
+            if inner == "project.authors" {
+                cur_author = Some(Author::default());
+            }
+            continue;
+        }
+
+        // Table header: [section]
+        if line.starts_with('[') && line.ends_with(']') {
+            if let Some(a) = cur_author.take() {
+                cfg.authors.push(a);
+            }
+            section = line[1..line.len()-1].trim().to_string();
+            continue;
+        }
+
+        let Some(eq) = line.find('=') else { continue };
+        let key = line[..eq].trim();
+        let val = line[eq+1..].trim();
+
+        // Skip commented-out lines (value starts with #)
+        if val.starts_with('#') { continue; }
+
+        match section.as_str() {
+            "project" => match key {
+                "name"        => cfg.name        = unquote(val),
+                "version"     => cfg.version      = unquote(val),
+                "description" => cfg.description  = unquote(val),
+                "entry"       => cfg.entry        = unquote(val),
+                "license"     => cfg.license      = unquote(val),
+                "readme"      => cfg.readme       = unquote(val),
+                "homepage"    => cfg.homepage     = unquote(val),
+                "repository"  => cfg.repository   = unquote(val),
+                "keywords"    => cfg.keywords     = parse_toml_array(val),
+                _ => {}
+            },
+            "project.authors" => {
+                if let Some(ref mut a) = cur_author {
+                    match key {
+                        "name"  => a.name  = unquote(val),
+                        "email" => a.email = unquote(val),
+                        _ => {}
+                    }
+                }
+            },
+            "build" => match key {
+                "target" => cfg.target = unquote(val),
+                _ => {}
+            },
+            "profiles.release" => match key {
+                "optimize" => cfg.optimize_release = val == "true",
+                _ => {}
+            },
+            "profiles.dev" => match key {
+                "optimize" => cfg.optimize_dev = val == "true",
+                _ => {}
+            },
+            "stdlib" => match key {
+                "include" => cfg.stdlib = parse_toml_array(val),
+                _ => {}
+            },
+            "dependencies" => {
+                let pkg = key.to_string();
+                let ver = unquote(val);
+                if !pkg.is_empty() && !ver.is_empty() {
+                    cfg.dependencies.push((pkg, ver));
+                }
+            },
+            "dev-dependencies" => {
+                let pkg = key.to_string();
+                let ver = unquote(val);
+                if !pkg.is_empty() && !ver.is_empty() {
+                    cfg.dev_dependencies.push((pkg, ver));
+                }
+            },
+            "scripts" => {
+                cfg.scripts.push((key.to_string(), unquote(val)));
+            },
+            _ => {}
+        }
+    }
+
+    // Flush last pending author
+    if let Some(a) = cur_author {
+        cfg.authors.push(a);
+    }
+
+    cfg
 }
 
 // ─── stdlib discovery ─────────────────────────────────────────────────────────
@@ -372,21 +481,58 @@ fn cmd_init(name: &str) {
         eprintln!("arc: '{}' already exists", name);
         process::exit(1);
     }
-    fs::create_dir_all(dir.join("src")).unwrap_or_else(|e| {
+    fs::create_dir_all(&dir).unwrap_or_else(|e| {
         eprintln!("arc: could not create project: {}", e); process::exit(1);
     });
+    fs::create_dir_all(dir.join("tests")).unwrap_or_else(|_| {});
 
     let toml = format!(
-r#"[project]
-name    = "{name}"
-version = "0.1.0"
-entry   = "src/Main.arm"
+r#"# arc.toml -- Arimo project manifest
+
+[project]
+name        = "{name}"
+version     = "0.1.0"
+description = ""
+entry       = "Main.arm"
+license     = "MIT"
+readme      = "README.md"
+keywords    = []
+homepage    = ""
+repository  = ""
+
+[[project.authors]]
+name  = ""
+email = ""
+
+# -- Build --------------------------------------------------------------------
+
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[profiles.release]
+optimize = true
+
+[profiles.dev]
+optimize = false
+
+# -- Stdlib -------------------------------------------------------------------
 
 [stdlib]
 include = []
 
-[build]
-optimize = false
+# -- Dependencies -------------------------------------------------------------
+
+[dependencies]
+# arimo-http = "1.0.0"
+
+[dev-dependencies]
+# arimo-test = "0.1.0"
+
+# -- Scripts ------------------------------------------------------------------
+
+[scripts]
+# lint = "arc check --strict"
+# docs = "arc doc"
 "#
     );
     fs::write(dir.join("arc.toml"), toml).unwrap();
@@ -401,11 +547,12 @@ public class Main {{
 }}
 "#
     );
-    fs::write(dir.join("src/Main.arm"), main_arm).unwrap();
+    fs::write(dir.join("Main.arm"), main_arm).unwrap();
 
     println!("arc: created project '{}'", name);
     println!("arc: → {}/arc.toml", name);
-    println!("arc: → {}/src/Main.arm", name);
+    println!("arc: → {}/Main.arm", name);
+    println!("arc: → {}/tests/", name);
     println!("\nRun: cd {} && arc build", name);
 }
 
@@ -484,7 +631,9 @@ fn main() {
             let check_only = args[1] == "check";
             let emit_ir    = args.contains(&"--emit-ir".to_string());
             let only_obj   = args.contains(&"-c".to_string());
-            let optimize   = cfg.optimize || args.contains(&"-O2".to_string());
+            let is_release = args.contains(&"--release".to_string());
+            let optimize   = (if is_release { cfg.optimize_release } else { cfg.optimize_dev })
+                             || args.contains(&"-O2".to_string());
 
             println!("{}", version);
             println!("arc: building '{}'  v{}  ({})", cfg.name, cfg.version, cfg.target);
