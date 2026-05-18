@@ -76,7 +76,9 @@ pub struct CodeGen<'ctx> {
     default_params: HashMap<String, Vec<Option<Expr>>>,
     enum_variants : HashMap<String, HashMap<String, u32>>,
     static_fields : HashMap<String, inkwell::values::GlobalValue<'ctx>>,
-    field_arimo_types : HashMap<String, HashMap<String, String>>,
+    field_arimo_types  : HashMap<String, HashMap<String, String>>,
+    field_elem_classes : HashMap<String, HashMap<String, String>>,
+    fn_return_class    : HashMap<String, String>,
     lambda_counter    : usize,
     loop_exit_bbs     : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
     loop_continue_bbs : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
@@ -105,6 +107,8 @@ impl<'ctx> CodeGen<'ctx> {
             enum_variants : HashMap::new(),
             static_fields         : HashMap::new(),
             field_arimo_types     : HashMap::new(),
+            field_elem_classes    : HashMap::new(),
+            fn_return_class       : HashMap::new(),
             lambda_counter        : 0,
             loop_exit_bbs         : Vec::new(),
             loop_continue_bbs     : Vec::new(),
@@ -729,6 +733,27 @@ impl<'ctx> CodeGen<'ctx> {
         }
         self.field_arimo_types.insert(c.name.clone(), arimo_types);
 
+        let mut elem_classes: HashMap<String, String> = HashMap::new();
+        if let Some(parent_name) = &c.extends {
+            if let Some(parent_ec) = self.field_elem_classes.get(parent_name).cloned() {
+                elem_classes.extend(parent_ec);
+            }
+        }
+        for f in c.fields.iter().filter(|f| !f.static_) {
+            if let Type::List(inner) = &f.ty {
+                let ec = match inner.as_ref() {
+                    Type::Named(n)  => Some(n.clone()),
+                    Type::Str       => Some("String".to_string()),
+                    Type::Integer   => Some("Integer".to_string()),
+                    Type::Float     => Some("Float".to_string()),
+                    Type::Boolean   => Some("Boolean".to_string()),
+                    _ => None,
+                };
+                if let Some(ec) = ec { elem_classes.insert(f.name.clone(), ec); }
+            }
+        }
+        self.field_elem_classes.insert(c.name.clone(), elem_classes);
+
         for f in c.fields.iter().filter(|f| f.static_) {
             let global_name = format!("{}_{}", c.name, f.name);
             if self.module.get_global(&global_name).is_some() { continue; }
@@ -911,6 +936,10 @@ impl<'ctx> CodeGen<'ctx> {
                 }
             };
             self.fns.insert(fn_name.clone(), fn_val);
+
+            if let Some(Type::Named(ret_class)) = &m.return_ty {
+                self.fn_return_class.insert(fn_name.clone(), ret_class.clone());
+            }
 
             // Store default param expressions
             let defaults: Vec<Option<Expr>> = m.params.iter()
@@ -1228,7 +1257,43 @@ impl<'ctx> CodeGen<'ctx> {
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     self.builder.build_store(alloca, pv)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
-                    self.define_var(&p.name, alloca, llvm_ty);
+                    let (class_name, elem_class) = match &p.ty {
+                        Type::Named(n) => (Some(n.clone()), None),
+                        Type::Nullable(inner) => match inner.as_ref() {
+                            Type::Named(n) => (Some(n.clone()), None),
+                            Type::List(li) => {
+                                let ec = match li.as_ref() {
+                                    Type::Named(n)  => Some(n.clone()),
+                                    Type::Str       => Some("String".to_string()),
+                                    _ => None,
+                                };
+                                (Some("__List".to_string()), ec)
+                            }
+                            _ => (None, None),
+                        },
+                        Type::List(inner) => {
+                            let ec = match inner.as_ref() {
+                                Type::Named(n)  => Some(n.clone()),
+                                Type::Str       => Some("String".to_string()),
+                                Type::Integer   => Some("Integer".to_string()),
+                                Type::Float     => Some("Float".to_string()),
+                                Type::Boolean   => Some("Boolean".to_string()),
+                                _ => None,
+                            };
+                            (Some("__List".to_string()), ec)
+                        }
+                        Type::HashMap(..) | Type::Map(..) | Type::TreeMap(..) =>
+                            (Some("__HashMap".to_string()), None),
+                        Type::Pair(..) => (Some("__Pair".to_string()), None),
+                        _ => (None, None),
+                    };
+                    if elem_class.is_some() || matches!(class_name.as_deref(), Some("__List" | "__HashMap" | "__Pair")) {
+                        self.define_collection_var(&p.name, alloca, llvm_ty, class_name, elem_class);
+                    } else if class_name.is_some() {
+                        self.define_var_with_class(&p.name, alloca, llvm_ty, class_name);
+                    } else {
+                        self.define_var(&p.name, alloca, llvm_ty);
+                    }
                 }
             }
         }
@@ -1336,6 +1401,20 @@ impl<'ctx> CodeGen<'ctx> {
                     Type::Named(n) if self.struct_types.contains_key(n.as_str()) => {
                         (Some(n.clone()), None)
                     }
+                    Type::Nullable(inner) => match inner.as_ref() {
+                        Type::Named(n) if self.struct_types.contains_key(n.as_str()) => {
+                            (Some(n.clone()), None)
+                        }
+                        Type::List(li) => {
+                            let ec = match li.as_ref() {
+                                Type::Named(n)  => Some(n.clone()),
+                                Type::Str       => Some("String".to_string()),
+                                _ => None,
+                            };
+                            (Some("__List".to_string()), ec)
+                        }
+                        _ => (None, None),
+                    },
                     Type::List(inner) => {
                         let ec = match inner.as_ref() {
                             Type::Named(n)   => Some(n.clone()),
@@ -1790,7 +1869,11 @@ impl<'ctx> CodeGen<'ctx> {
     ) -> CgResult<bool> {
         let cur_fn = self.cur_fn.unwrap();
         let cond_val = self.compile_expr(cond)?
-            .ok_or_else(|| CodeGenError::new("if condition has no value"))?;
+            .ok_or_else(|| CodeGenError::new(format!(
+                "if condition has no value — fn: {}, cond: {:?}",
+                self.cur_fn.map(|f| f.get_name().to_str().unwrap_or("?").to_string()).unwrap_or_default(),
+                cond
+            )))?;
         let cond_bool = self.to_bool(cond_val)?;
 
         let then_bb  = self.ctx.append_basic_block(cur_fn, "if.then");
@@ -1873,7 +1956,11 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.builder.position_at_end(cond_bb);
         let cond_val = self.compile_expr(cond)?
-            .ok_or_else(|| CodeGenError::new("while condition has no value"))?;
+            .ok_or_else(|| CodeGenError::new(format!(
+                "while condition has no value — fn: {}, cond: {:?}",
+                self.cur_fn.map(|f| f.get_name().to_str().unwrap_or("?").to_string()).unwrap_or_default(),
+                cond
+            )))?;
         let cond_bool = self.to_bool(cond_val)?;
         self.builder.build_conditional_branch(cond_bool, body_bb, exit_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -4704,10 +4791,24 @@ impl<'ctx> CodeGen<'ctx> {
             }
         };
 
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let param_types: Vec<inkwell::types::BasicTypeEnum> = fn_val.get_type()
+            .get_param_types().into_iter()
+            .filter_map(|t| t.try_into().ok())
+            .collect();
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![this_ptr.into()];
-        for a in args {
+        for (idx, a) in args.iter().enumerate() {
             if let Some(v) = self.compile_expr(a)? {
-                call_args.push(v.into());
+                let expected = param_types.get(idx + 1);
+                let coerced = if let (
+                    BasicValueEnum::IntValue(iv),
+                    Some(BasicTypeEnum::PointerType(_))
+                ) = (v, expected) {
+                    self.builder.build_int_to_ptr(iv, ptr_ty, "arg_cast")
+                        .map(|p| BasicValueEnum::PointerValue(p))
+                        .unwrap_or(v)
+                } else { v };
+                call_args.push(coerced.into());
             }
         }
 
@@ -4876,6 +4977,59 @@ impl<'ctx> CodeGen<'ctx> {
                     .get(&owner_class)?
                     .get(field.as_str())
                     .cloned()
+            }
+            Expr::MethodCall { object, method, .. } => {
+                let owner_class = self.infer_object_class(object)?;
+                if matches!(owner_class.as_str(), "__List" | "__HashMap" | "__Pair") {
+                    if method == "get" {
+                        return self.infer_list_elem_class(object);
+                    }
+                    return None;
+                }
+                let fn_name = format!("{}_{}", owner_class, method);
+                self.fn_return_class.get(&fn_name).cloned()
+            }
+            Expr::StaticCall { class, method, .. } => {
+                let obj_expr = Expr::Ident(class.to_string());
+                let owner_class = self.infer_object_class(&obj_expr)?;
+                if matches!(owner_class.as_str(), "__List" | "__HashMap" | "__Pair") {
+                    if method == "get" {
+                        for scope in self.scopes.iter().rev() {
+                            if let Some(slot) = scope.get(class.as_str()) {
+                                if let Some(ec) = &slot.elem_class {
+                                    if self.struct_types.contains_key(ec.as_str()) {
+                                        return Some(ec.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return None;
+                }
+                let fn_name = format!("{}_{}", owner_class, method);
+                self.fn_return_class.get(&fn_name).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    fn infer_list_elem_class(&self, list_expr: &Expr) -> Option<String> {
+        match list_expr {
+            Expr::Ident(n) => {
+                for scope in self.scopes.iter().rev() {
+                    if let Some(slot) = scope.get(n.as_str()) {
+                        if let Some(ec) = &slot.elem_class {
+                            if self.struct_types.contains_key(ec.as_str()) {
+                                return Some(ec.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::FieldAccess { object, field } => {
+                let owner = self.infer_object_class(object)?;
+                self.field_elem_classes.get(&owner)?.get(field.as_str()).cloned()
             }
             _ => None,
         }
@@ -6656,12 +6810,28 @@ impl<'ctx> CodeGen<'ctx> {
                 let r = self.builder.build_call(f, &[list_ptr.into(), idx.into()], "list_get")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 let raw = r.try_as_basic_value().basic();
-                let elem_is_ptr = if let Expr::Ident(n) = object {
-                    self.lookup_var(n).and_then(|s| s.elem_class.as_deref()
-                        .map(|ec| matches!(ec, "String" | "Str")
-                             || self.struct_types.contains_key(ec))
-                    ).unwrap_or(false)
-                } else { false };
+                let elem_is_ptr = match object {
+                    Expr::Ident(n) => {
+                        self.lookup_var(n).and_then(|s| s.elem_class.as_deref()
+                            .map(|ec| matches!(ec, "String" | "Str")
+                                 || self.struct_types.contains_key(ec))
+                        ).unwrap_or(false)
+                    }
+                    Expr::FieldAccess { object: inner, field } => {
+                        let cn = if matches!(inner.as_ref(), Expr::This) {
+                            self.cur_class.clone()
+                        } else {
+                            self.infer_object_class(inner)
+                        };
+                        cn.and_then(|owner| {
+                            self.field_elem_classes.get(&owner)
+                                .and_then(|m| m.get(field.as_str()))
+                                .map(|ec| matches!(ec.as_str(), "String" | "Str")
+                                     || self.struct_types.contains_key(ec.as_str()))
+                        }).unwrap_or(false)
+                    }
+                    _ => false,
+                };
                 if elem_is_ptr {
                     if let Some(BasicValueEnum::IntValue(iv)) = raw {
                         let ptr = self.builder.build_int_to_ptr(iv, ptr_ty, "list_get_ptr")
