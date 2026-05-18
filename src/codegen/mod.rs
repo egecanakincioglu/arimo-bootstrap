@@ -79,6 +79,8 @@ pub struct CodeGen<'ctx> {
     field_arimo_types  : HashMap<String, HashMap<String, String>>,
     field_elem_classes : HashMap<String, HashMap<String, String>>,
     fn_return_class    : HashMap<String, String>,
+    param_class_map    : HashMap<String, String>,
+    param_elem_map     : HashMap<String, String>,
     lambda_counter    : usize,
     loop_exit_bbs     : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
     loop_continue_bbs : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
@@ -109,6 +111,8 @@ impl<'ctx> CodeGen<'ctx> {
             field_arimo_types     : HashMap::new(),
             field_elem_classes    : HashMap::new(),
             fn_return_class       : HashMap::new(),
+            param_class_map       : HashMap::new(),
+            param_elem_map        : HashMap::new(),
             lambda_counter        : 0,
             loop_exit_bbs         : Vec::new(),
             loop_continue_bbs     : Vec::new(),
@@ -1101,18 +1105,22 @@ impl<'ctx> CodeGen<'ctx> {
         self.cur_fn = Some(fn_val);
         self.push_scope();
 
-        let malloc = self.module.get_function("malloc")
-            .ok_or_else(|| CodeGenError::new("malloc not declared"))?;
         let struct_ty = self.struct_types.get(&c.name).copied()
             .ok_or_else(|| CodeGenError::new(format!("struct type not found: {}", c.name)))?;
         let size = struct_ty.size_of()
             .ok_or_else(|| CodeGenError::new("struct has no size"))?;
+        // Use calloc to zero-initialize: prevents ARC release of garbage field values
+        let calloc_fn = if let Some(f) = self.module.get_function("calloc") { f } else {
+            let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+            let i64_ty = self.ctx.i64_type();
+            self.module.add_function("calloc", ptr_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false), None)
+        };
         let obj_ptr = self.builder
-            .build_call(malloc, &[size.into()], "obj")
+            .build_call(calloc_fn, &[self.ctx.i64_type().const_int(1, false).into(), size.into()], "obj")
             .map_err(|e| CodeGenError::new(e.to_string()))?
             .try_as_basic_value()
             .basic()
-            .ok_or_else(|| CodeGenError::new("malloc returned void"))?;
+            .ok_or_else(|| CodeGenError::new("calloc returned void"))?;
 
         if !self.manual_memory_classes.contains(&c.name) {
             if let Some(&rc_idx) = self.refcount_indices.get(&c.name) {
@@ -1224,6 +1232,8 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.cur_fn = Some(fn_val);
         self.try_saved_tops.clear();
+        self.param_class_map.clear();
+        self.param_elem_map.clear();
         self.push_scope();
 
         if is_entry {
@@ -1287,12 +1297,13 @@ impl<'ctx> CodeGen<'ctx> {
                         Type::Pair(..) => (Some("__Pair".to_string()), None),
                         _ => (None, None),
                     };
-                    if elem_class.is_some() || matches!(class_name.as_deref(), Some("__List" | "__HashMap" | "__Pair")) {
-                        self.define_collection_var(&p.name, alloca, llvm_ty, class_name, elem_class);
-                    } else if class_name.is_some() {
-                        self.define_var_with_class(&p.name, alloca, llvm_ty, class_name);
-                    } else {
-                        self.define_var(&p.name, alloca, llvm_ty);
+                    // Always define_var (no ARC for params), but store type info separately
+                    self.define_var(&p.name, alloca, llvm_ty);
+                    if let Some(cn) = class_name {
+                        self.param_class_map.insert(p.name.clone(), cn);
+                    }
+                    if let Some(ec) = elem_class {
+                        self.param_elem_map.insert(p.name.clone(), ec);
                     }
                 }
             }
@@ -2368,6 +2379,15 @@ impl<'ctx> CodeGen<'ctx> {
                     let printf = self.module.get_function("printf").unwrap();
                     self.builder.build_call(printf, &[newline.into()], "")
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    // flush stdout so output is visible even if crash follows
+                    let fflush_fn = if let Some(f) = self.module.get_function("fflush") { f } else {
+                        let i32_ty = self.ctx.i32_type();
+                        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                        self.module.add_function("fflush", i32_ty.fn_type(&[ptr_ty.into()], false), None)
+                    };
+                    let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                    self.builder.build_call(fflush_fn, &[ptr_ty.const_null().into()], "")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
                 }
                 Ok(None)
             }
@@ -2880,8 +2900,75 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(None)
             }
             ("IO", "read") => {
-                let s = self.build_global_string("")?;
-                Ok(Some(s.into()))
+                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                let i64_ty = self.ctx.i64_type();
+                let i32_ty = self.ctx.i32_type();
+                let i8_ty  = self.ctx.i8_type();
+
+                let scanf_fn = if let Some(f) = self.module.get_function("scanf") { f } else {
+                    self.module.add_function("scanf",
+                        i32_ty.fn_type(&[ptr_ty.into()], true), None)
+                };
+                let strlen_fn = if let Some(f) = self.module.get_function("strlen") { f } else {
+                    self.module.add_function("strlen",
+                        i64_ty.fn_type(&[ptr_ty.into()], false), None)
+                };
+                let malloc_fn = self.module.get_function("malloc")
+                    .ok_or_else(|| CodeGenError::new("malloc not declared"))?;
+                let memcpy_fn = if let Some(f) = self.module.get_function("memcpy") { f } else {
+                    self.module.add_function("memcpy",
+                        ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false), None)
+                };
+
+                let buf_alloca = self.builder.build_alloca(i8_ty.array_type(4096), "io_rbuf")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let buf_ptr = self.builder.build_pointer_cast(buf_alloca, ptr_ty, "buf")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                // zero-init buffer so empty input returns ""
+                let memset_fn = if let Some(f) = self.module.get_function("memset") { f } else {
+                    self.module.add_function("memset",
+                        ptr_ty.fn_type(&[ptr_ty.into(), i32_ty.into(), i64_ty.into()], false), None)
+                };
+                self.builder.build_call(memset_fn, &[
+                    buf_ptr.into(),
+                    i32_ty.const_int(0, false).into(),
+                    i64_ty.const_int(4096, false).into(),
+                ], "").map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                // scanf("%4095[^\n]", buf) — reads up to newline, strips it
+                let fmt = self.build_global_string("%4095[^\n]")?;
+                let fmt_ptr = self.builder.build_pointer_cast(fmt, ptr_ty, "fmt_ptr")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_call(scanf_fn, &[fmt_ptr.into(), buf_ptr.into()], "sc")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                // consume the newline
+                let nl_fmt = self.build_global_string("%*c")?;
+                let nl_fmt_ptr = self.builder.build_pointer_cast(nl_fmt, ptr_ty, "nlfmt")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                self.builder.build_call(scanf_fn, &[nl_fmt_ptr.into()], "sc_nl")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+
+                // malloc + memcpy → heap string
+                let slen_call = self.builder.build_call(strlen_fn, &[buf_ptr.into()], "slen")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let slen = match slen_call.try_as_basic_value().basic() {
+                    Some(BasicValueEnum::IntValue(iv)) =>
+                        self.builder.build_int_z_extend_or_bit_cast(iv, i64_ty, "slen64")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?,
+                    _ => i64_ty.const_int(0, false),
+                };
+                let asz = self.builder.build_int_add(slen, i64_ty.const_int(1, false), "asz")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let heap_call = self.builder.build_call(malloc_fn, &[asz.into()], "rdh")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let heap_ptr = match heap_call.try_as_basic_value().basic() {
+                    Some(BasicValueEnum::PointerValue(p)) => p,
+                    _ => ptr_ty.const_null(),
+                };
+                self.builder.build_call(memcpy_fn, &[heap_ptr.into(), buf_ptr.into(), asz.into()], "")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(Some(heap_ptr.into()))
             }
 
             ("Math", "sqrt") => {
@@ -4791,24 +4878,10 @@ impl<'ctx> CodeGen<'ctx> {
             }
         };
 
-        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
-        let param_types: Vec<inkwell::types::BasicTypeEnum> = fn_val.get_type()
-            .get_param_types().into_iter()
-            .filter_map(|t| t.try_into().ok())
-            .collect();
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![this_ptr.into()];
-        for (idx, a) in args.iter().enumerate() {
+        for a in args.iter() {
             if let Some(v) = self.compile_expr(a)? {
-                let expected = param_types.get(idx + 1);
-                let coerced = if let (
-                    BasicValueEnum::IntValue(iv),
-                    Some(BasicTypeEnum::PointerType(_))
-                ) = (v, expected) {
-                    self.builder.build_int_to_ptr(iv, ptr_ty, "arg_cast")
-                        .map(|p| BasicValueEnum::PointerValue(p))
-                        .unwrap_or(v)
-                } else { v };
-                call_args.push(coerced.into());
+                call_args.push(v.into());
             }
         }
 
@@ -4969,7 +5042,7 @@ impl<'ctx> CodeGen<'ctx> {
                         }
                     }
                 }
-                None
+                self.param_class_map.get(name.as_str()).cloned()
             }
             Expr::FieldAccess { object, field } => {
                 let owner_class = self.infer_object_class(object)?;
@@ -5003,6 +5076,11 @@ impl<'ctx> CodeGen<'ctx> {
                                 }
                             }
                         }
+                        if let Some(ec) = self.param_elem_map.get(class.as_str()) {
+                            if self.struct_types.contains_key(ec.as_str()) {
+                                return Some(ec.clone());
+                            }
+                        }
                     }
                     return None;
                 }
@@ -5025,7 +5103,7 @@ impl<'ctx> CodeGen<'ctx> {
                         }
                     }
                 }
-                None
+                self.param_elem_map.get(n.as_str()).cloned()
             }
             Expr::FieldAccess { object, field } => {
                 let owner = self.infer_object_class(object)?;
@@ -5447,12 +5525,28 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, a, b, "feq")
                     .map_err(|e| CodeGenError::new(e.to_string())),
             (BasicValueEnum::PointerValue(a), BasicValueEnum::PointerValue(b)) => {
-                let ai = self.builder.build_ptr_to_int(a, i64_ty, "eq_pi_a")
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-                let bi = self.builder.build_ptr_to_int(b, i64_ty, "eq_pi_b")
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-                self.builder.build_int_compare(inkwell::IntPredicate::EQ, ai, bi, "ptr_eq")
-                    .map_err(|e| CodeGenError::new(e.to_string()))
+                // null check: pointer comparison; string comparison: strcmp
+                if a.is_null() || b.is_null() {
+                    let ai = self.builder.build_ptr_to_int(a, i64_ty, "eq_pi_a")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let bi = self.builder.build_ptr_to_int(b, i64_ty, "eq_pi_b")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_int_compare(inkwell::IntPredicate::EQ, ai, bi, "ptr_eq")
+                        .map_err(|e| CodeGenError::new(e.to_string()))
+                } else {
+                    self.declare_strcmp();
+                    let strcmp = self.module.get_function("strcmp").unwrap();
+                    let i32_ty = self.ctx.i32_type();
+                    let cmp = self.builder.build_call(strcmp, &[a.into(), b.into()], "streq_cmp")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let cmp_i = match cmp.try_as_basic_value().basic() {
+                        Some(BasicValueEnum::IntValue(iv)) => iv,
+                        _ => i32_ty.const_int(0, false),
+                    };
+                    self.builder.build_int_compare(
+                        inkwell::IntPredicate::EQ, cmp_i, i32_ty.const_int(0, false), "str_eq")
+                        .map_err(|e| CodeGenError::new(e.to_string()))
+                }
             }
             (BasicValueEnum::IntValue(a), BasicValueEnum::PointerValue(b)) => {
                 let bi = self.builder.build_ptr_to_int(b, i64_ty, "eq_pi_b")
@@ -5480,12 +5574,27 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_float_compare(inkwell::FloatPredicate::ONE, a, b, "fne")
                     .map_err(|e| CodeGenError::new(e.to_string())),
             (BasicValueEnum::PointerValue(a), BasicValueEnum::PointerValue(b)) => {
-                let ai = self.builder.build_ptr_to_int(a, i64_ty, "ne_pi_a")
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-                let bi = self.builder.build_ptr_to_int(b, i64_ty, "ne_pi_b")
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-                self.builder.build_int_compare(inkwell::IntPredicate::NE, ai, bi, "ptr_ne")
-                    .map_err(|e| CodeGenError::new(e.to_string()))
+                if a.is_null() || b.is_null() {
+                    let ai = self.builder.build_ptr_to_int(a, i64_ty, "ne_pi_a")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let bi = self.builder.build_ptr_to_int(b, i64_ty, "ne_pi_b")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    self.builder.build_int_compare(inkwell::IntPredicate::NE, ai, bi, "ptr_ne")
+                        .map_err(|e| CodeGenError::new(e.to_string()))
+                } else {
+                    self.declare_strcmp();
+                    let strcmp = self.module.get_function("strcmp").unwrap();
+                    let i32_ty = self.ctx.i32_type();
+                    let cmp = self.builder.build_call(strcmp, &[a.into(), b.into()], "strne_cmp")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    let cmp_i = match cmp.try_as_basic_value().basic() {
+                        Some(BasicValueEnum::IntValue(iv)) => iv,
+                        _ => i32_ty.const_int(0, false),
+                    };
+                    self.builder.build_int_compare(
+                        inkwell::IntPredicate::NE, cmp_i, i32_ty.const_int(0, false), "str_ne")
+                        .map_err(|e| CodeGenError::new(e.to_string()))
+                }
             }
             _ => Ok(self.ctx.bool_type().const_int(1, false)),
         }
@@ -6812,10 +6921,15 @@ impl<'ctx> CodeGen<'ctx> {
                 let raw = r.try_as_basic_value().basic();
                 let elem_is_ptr = match object {
                     Expr::Ident(n) => {
-                        self.lookup_var(n).and_then(|s| s.elem_class.as_deref()
+                        let from_scope = self.lookup_var(n).and_then(|s| s.elem_class.as_deref()
                             .map(|ec| matches!(ec, "String" | "Str")
                                  || self.struct_types.contains_key(ec))
-                        ).unwrap_or(false)
+                        ).unwrap_or(false);
+                        let from_param = self.param_elem_map.get(n.as_str())
+                            .map(|ec| matches!(ec.as_str(), "String" | "Str")
+                                 || self.struct_types.contains_key(ec.as_str()))
+                            .unwrap_or(false);
+                        from_scope || from_param
                     }
                     Expr::FieldAccess { object: inner, field } => {
                         let cn = if matches!(inner.as_ref(), Expr::This) {
