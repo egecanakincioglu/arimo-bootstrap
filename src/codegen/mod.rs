@@ -1928,18 +1928,30 @@ impl<'ctx> CodeGen<'ctx> {
         let mut else_returned = false;
         if else_bb != merge_bb {
             self.builder.position_at_end(else_bb);
-            self.push_scope();
-            if let Some(eb) = else_ {
-                for s in eb {
-                    if self.compile_stmt(s)? { else_returned = true; break; }
+            if !else_if.is_empty() {
+                // compile else-if chain as nested if inside else block
+                let (ei_cond, ei_body) = &else_if[0];
+                let remaining = &else_if[1..];
+                let ei_returned = self.compile_if(None, ei_cond, ei_body, remaining, else_)?;
+                if ei_returned { else_returned = true; }
+                // compile_if positions builder at its own merge_bb; we need to link to outer merge
+                if !else_returned && !self.current_block_terminated() {
+                    self.builder.build_unconditional_branch(merge_bb)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                }
+            } else {
+                self.push_scope();
+                if let Some(eb) = else_ {
+                    for s in eb {
+                        if self.compile_stmt(s)? { else_returned = true; break; }
+                    }
+                }
+                self.pop_scope();
+                if !else_returned {
+                    self.builder.build_unconditional_branch(merge_bb)
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
                 }
             }
-            self.pop_scope();
-            if !else_returned {
-                self.builder.build_unconditional_branch(merge_bb)
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-            }
-        } else {
         }
 
         self.builder.position_at_end(merge_bb);
@@ -2895,6 +2907,42 @@ impl<'ctx> CodeGen<'ctx> {
         args   : &[Expr],
     ) -> CgResult<Option<BasicValueEnum<'ctx>>> {
         match (class, method) {
+            ("IO", "error") => {
+                // print to stderr
+                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                let i32_ty = self.ctx.i32_type();
+                let fprintf_fn = if let Some(f) = self.module.get_function("fprintf") { f } else {
+                    self.module.add_function("fprintf",
+                        i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], true), None)
+                };
+                let iob_fn = if let Some(f) = self.module.get_function("__acrt_iob_func") { f } else {
+                    self.module.add_function("__acrt_iob_func",
+                        ptr_ty.fn_type(&[i32_ty.into()], false), None)
+                };
+                let stderr_call = self.builder.build_call(iob_fn,
+                    &[i32_ty.const_int(2, false).into()], "stderr_v")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                let stderr_ptr = match stderr_call.try_as_basic_value().basic() {
+                    Some(BasicValueEnum::PointerValue(p)) => p,
+                    _ => ptr_ty.const_null(),
+                };
+                for a in args {
+                    if let Some(v) = self.compile_expr(a)? {
+                        if let BasicValueEnum::PointerValue(sp) = v {
+                            let fmt_s = self.build_global_string("%s\n")?;
+                            self.builder.build_call(fprintf_fn, &[stderr_ptr.into(), fmt_s.into(), sp.into()], "")
+                                .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        }
+                    }
+                }
+                let fflush_fn = if let Some(f) = self.module.get_function("fflush") { f } else {
+                    self.module.add_function("fflush",
+                        i32_ty.fn_type(&[ptr_ty.into()], false), None)
+                };
+                self.builder.build_call(fflush_fn, &[ptr_ty.const_null().into()], "")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?;
+                Ok(None)
+            }
             ("IO", "print") => {
                 self.compile_io_print(args)?;
                 Ok(None)
@@ -6897,15 +6945,27 @@ impl<'ctx> CodeGen<'ctx> {
 
         match (collection, method) {
             ("__List", "append") => {
-                let item_val = if let Some(a) = args.first() {
-                    self.compile_expr(a)?.map(|v| self.value_to_i64(v)).transpose()?
-                        .unwrap_or_else(|| i64_ty.const_int(0, false))
-                } else {
-                    i64_ty.const_int(0, false)
-                };
+                let raw_item = args.first()
+                    .and_then(|a| self.compile_expr(a).ok().flatten());
+                let item_val = raw_item
+                    .map(|v| self.value_to_i64(v)).transpose()?
+                    .unwrap_or_else(|| i64_ty.const_int(0, false));
                 let f = self.module.get_function("arc_list_append").unwrap();
                 self.builder.build_call(f, &[list_ptr.into(), item_val.into()], "")
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
+                // retain class elements so they survive scope exit of local vars
+                let elem_class = self.infer_list_elem_class(object);
+                if let Some(ec) = elem_class {
+                    if self.refcount_indices.contains_key(&ec)
+                        && !self.manual_memory_classes.contains(&ec)
+                    {
+                        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                        let item_ptr = self.builder.build_int_to_ptr(item_val, ptr_ty, "app_ptr")
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        let ec_owned = ec.clone();
+                        self.arc_retain_ptr(item_ptr, &ec_owned)?;
+                    }
+                }
                 Ok(None)
             }
 
@@ -6950,6 +7010,16 @@ impl<'ctx> CodeGen<'ctx> {
                     if let Some(BasicValueEnum::IntValue(iv)) = raw {
                         let ptr = self.builder.build_int_to_ptr(iv, ptr_ty, "list_get_ptr")
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        // retain so callers can safely release without double-free
+                        let elem_class = self.infer_list_elem_class(object);
+                        if let Some(ec) = elem_class {
+                            if self.refcount_indices.contains_key(&ec)
+                                && !self.manual_memory_classes.contains(&ec)
+                            {
+                                let ec_owned = ec.clone();
+                                self.arc_retain_ptr(ptr, &ec_owned)?;
+                            }
+                        }
                         return Ok(Some(ptr.into()));
                     }
                 }
