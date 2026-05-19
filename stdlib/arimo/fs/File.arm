@@ -10,6 +10,7 @@ extern "C" {
     fseek(f: RawPtr<Void>, offset: Integer, whence: Integer) : Integer;
     ftell(f: RawPtr<Void>) : Integer;
     remove(path: String) : Integer;
+    calloc(n: Integer, size: Integer) : RawPtr<Void>;
 }
 
 public class File {
@@ -22,14 +23,14 @@ public class File {
     }
 
     public static read(path: String) : String {
-        RawPtr<Void> f = fopen(path, "r");
+        RawPtr<Void> f = fopen(path, "rb");
         if (f == null) {
             throw IOException("cannot open file: ${path}");
         }
         fseek(f, 0, 2);
         Integer size = ftell(f);
         fseek(f, 0, 0);
-        RawPtr<Void> buf = Memory.alloc(size + 1);
+        RawPtr<Void> buf = calloc(size + 1, 1);
         fread(buf, 1, size, f);
         fclose(f);
         return buf as String;
