@@ -423,6 +423,7 @@ fn run_pipeline(opts: CompileOptions) -> i32 {
 
     println!();
     let mut tc = TypeChecker::new();
+    for &i in &sorted_indices { tc.register(&modules[i].1); }
     for &i in &sorted_indices { tc.check(&modules[i].1); }
     for warn in &tc.warnings { println!("arc: {}", warn); }
     if tc.errors.is_empty() {
