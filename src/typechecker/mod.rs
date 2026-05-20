@@ -162,6 +162,10 @@ impl TypeChecker {
         tc
     }
 
+    pub fn register(&mut self, module: &Module) {
+        self.collect_symbols(module);
+    }
+
     pub fn check(&mut self, module: &Module) -> &[TypeError] {
         self.collect_symbols(module);
         for item in &module.items {
