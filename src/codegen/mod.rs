@@ -4095,6 +4095,9 @@ impl<'ctx> CodeGen<'ctx> {
         decl!("arc_pair_second", i64,  [ptr_ty.into()]);
     }
 
+    // Layout: header = {length:i64, capacity:i64, data_ptr_as_i64:i64}
+    // data = separately malloc'd i64 array
+
     fn gen_arc_list_new(&mut self) {
         let fn_val = match self.module.get_function("arc_list_new") {
             Some(f) if f.count_basic_blocks() > 0 => return,
@@ -4102,18 +4105,31 @@ impl<'ctx> CodeGen<'ctx> {
             None => return,
         };
         let i64_ty = self.ctx.i64_type();
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
         let malloc  = self.module.get_function("malloc").unwrap();
-
         let entry = self.ctx.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(entry);
-
-        let sz = i64_ty.const_int(8 * 65537, false);
-        let ptr = self.builder.build_call(malloc, &[sz.into()], "list_ptr")
-            .unwrap().try_as_basic_value().basic().unwrap();
-        if let inkwell::values::BasicValueEnum::PointerValue(p) = ptr {
-            self.builder.build_store(p, i64_ty.const_int(0, false)).unwrap();
-            self.builder.build_return(Some(&p)).unwrap();
-        }
+        // Alloc header: 3 * 8 = 24 bytes
+        let hdr_sz = i64_ty.const_int(24, false);
+        let hdr = self.builder.build_call(malloc, &[hdr_sz.into()], "hdr")
+            .unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
+        // Alloc initial data: 8 * 8 = 64 bytes (capacity=8)
+        let init_cap: u64 = 8;
+        let data_sz = i64_ty.const_int(init_cap * 8, false);
+        let data = self.builder.build_call(malloc, &[data_sz.into()], "data")
+            .unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
+        // header[0] = 0 (length)
+        let slot0 = unsafe { self.builder.build_gep(i64_ty, hdr, &[i64_ty.const_int(0,false)], "s0").unwrap() };
+        self.builder.build_store(slot0, i64_ty.const_int(0, false)).unwrap();
+        // header[1] = init_cap (capacity)
+        let slot1 = unsafe { self.builder.build_gep(i64_ty, hdr, &[i64_ty.const_int(1,false)], "s1").unwrap() };
+        self.builder.build_store(slot1, i64_ty.const_int(init_cap, false)).unwrap();
+        // header[2] = ptrtoint(data)
+        let slot2 = unsafe { self.builder.build_gep(i64_ty, hdr, &[i64_ty.const_int(2,false)], "s2").unwrap() };
+        let data_int = self.builder.build_ptr_to_int(data, i64_ty, "di").unwrap();
+        self.builder.build_store(slot2, data_int).unwrap();
+        let _ = ptr_ty;
+        self.builder.build_return(Some(&hdr)).unwrap();
     }
 
     fn gen_arc_list_append(&mut self) {
@@ -4123,25 +4139,56 @@ impl<'ctx> CodeGen<'ctx> {
             None => return,
         };
         let i64_ty = self.ctx.i64_type();
-        let entry = self.ctx.append_basic_block(fn_val, "entry");
-        self.builder.position_at_end(entry);
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let malloc  = self.module.get_function("malloc").unwrap();
+        // Get memcpy
+        let memcpy_fn = if let Some(f) = self.module.get_function("memcpy") { f } else {
+            let ft = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
+            self.module.add_function("memcpy", ft, None)
+        };
 
+        let entry_bb = self.ctx.append_basic_block(fn_val, "entry");
+        let grow_bb  = self.ctx.append_basic_block(fn_val, "grow");
+        let store_bb = self.ctx.append_basic_block(fn_val, "store");
+
+        self.builder.position_at_end(entry_bb);
         let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
         let item     = fn_val.get_nth_param(1).unwrap().into_int_value();
 
-        let len = self.builder.build_load(
-            inkwell::types::BasicTypeEnum::IntType(i64_ty), list_ptr, "len"
-        ).unwrap().into_int_value();
+        let slot0 = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[i64_ty.const_int(0,false)], "s0").unwrap() };
+        let slot1 = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[i64_ty.const_int(1,false)], "s1").unwrap() };
 
-        let idx = self.builder.build_int_add(len, i64_ty.const_int(1, false), "idx").unwrap();
-        let elem_ptr = unsafe {
-            self.builder.build_gep(i64_ty, list_ptr, &[idx], "elem_ptr").unwrap()
-        };
-        self.builder.build_store(elem_ptr, item).unwrap();
+        let len = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), slot0, "len").unwrap().into_int_value();
+        let cap = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), slot1, "cap").unwrap().into_int_value();
+        let full = self.builder.build_int_compare(inkwell::IntPredicate::SGE, len, cap, "full").unwrap();
+        self.builder.build_conditional_branch(full, grow_bb, store_bb).unwrap();
 
-        let new_len = self.builder.build_int_add(len, i64_ty.const_int(1, false), "nl").unwrap();
-        self.builder.build_store(list_ptr, new_len).unwrap();
+        // GROW block
+        self.builder.position_at_end(grow_bb);
+        let len_g = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), slot0, "len_g").unwrap().into_int_value();
+        let cap_g = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), slot1, "cap_g").unwrap().into_int_value();
+        let new_cap = self.builder.build_int_mul(cap_g, i64_ty.const_int(2, false), "nc").unwrap();
+        let new_sz  = self.builder.build_int_mul(new_cap, i64_ty.const_int(8, false), "ns").unwrap();
+        let new_data = self.builder.build_call(malloc, &[new_sz.into()], "nd")
+            .unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
+        let old_dp = { let ptr_ty2 = self.ctx.ptr_type(AddressSpace::default()); let s2x = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[i64_ty.const_int(2,false)], "s2x").unwrap() }; let di2 = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), s2x, "di2").unwrap().into_int_value(); self.builder.build_int_to_ptr(di2, ptr_ty2, "odp").unwrap() };
+        let old_sz = self.builder.build_int_mul(len_g, i64_ty.const_int(8, false), "os").unwrap();
+        self.builder.build_call(memcpy_fn, &[new_data.into(), old_dp.into(), old_sz.into()], "").unwrap();
+        self.builder.build_store(slot1, new_cap).unwrap();
+        let slot2g = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[i64_ty.const_int(2,false)], "s2g").unwrap() };
+        let nd_int = self.builder.build_ptr_to_int(new_data, i64_ty, "ndi").unwrap();
+        self.builder.build_store(slot2g, nd_int).unwrap();
+        self.builder.build_unconditional_branch(store_bb).unwrap();
 
+        // STORE block
+        self.builder.position_at_end(store_bb);
+        let len_s = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), slot0, "len_s").unwrap().into_int_value();
+        let data_ptr = { let ptr_ty2 = self.ctx.ptr_type(AddressSpace::default()); let s2x = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[i64_ty.const_int(2,false)], "s2x").unwrap() }; let di2 = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), s2x, "di2").unwrap().into_int_value(); self.builder.build_int_to_ptr(di2, ptr_ty2, "dp").unwrap() };
+        let ep = unsafe { self.builder.build_gep(i64_ty, data_ptr, &[len_s], "ep").unwrap() };
+        self.builder.build_store(ep, item).unwrap();
+        let nl = self.builder.build_int_add(len_s, i64_ty.const_int(1, false), "nl").unwrap();
+        self.builder.build_store(slot0, nl).unwrap();
+        let _ = ptr_ty;
         self.builder.build_return(None).unwrap();
     }
 
@@ -4154,11 +4201,9 @@ impl<'ctx> CodeGen<'ctx> {
         let i64_ty = self.ctx.i64_type();
         let entry = self.ctx.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(entry);
-
         let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
-        let len = self.builder.build_load(
-            inkwell::types::BasicTypeEnum::IntType(i64_ty), list_ptr, "len"
-        ).unwrap();
+        let slot0 = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[i64_ty.const_int(0,false)], "s0").unwrap() };
+        let len = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), slot0, "len").unwrap();
         self.builder.build_return(Some(&len)).unwrap();
     }
 
@@ -4171,17 +4216,11 @@ impl<'ctx> CodeGen<'ctx> {
         let i64_ty = self.ctx.i64_type();
         let entry = self.ctx.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(entry);
-
         let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
-        let idx      = fn_val.get_nth_param(1).unwrap().into_int_value();
-
-        let real_idx = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "ri").unwrap();
-        let elem_ptr = unsafe {
-            self.builder.build_gep(i64_ty, list_ptr, &[real_idx], "ep").unwrap()
-        };
-        let val = self.builder.build_load(
-            inkwell::types::BasicTypeEnum::IntType(i64_ty), elem_ptr, "val"
-        ).unwrap();
+        let idx = fn_val.get_nth_param(1).unwrap().into_int_value();
+        let data_ptr = { let ptr_ty2 = self.ctx.ptr_type(AddressSpace::default()); let s2x = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[i64_ty.const_int(2,false)], "s2x").unwrap() }; let di2 = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), s2x, "di2").unwrap().into_int_value(); self.builder.build_int_to_ptr(di2, ptr_ty2, "dp").unwrap() };
+        let ep = unsafe { self.builder.build_gep(i64_ty, data_ptr, &[idx], "ep").unwrap() };
+        let val = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), ep, "val").unwrap();
         self.builder.build_return(Some(&val)).unwrap();
     }
 
@@ -4204,9 +4243,9 @@ impl<'ctx> CodeGen<'ctx> {
         let list_ptr = fn_val.get_nth_param(0).unwrap().into_pointer_value();
         let idx      = fn_val.get_nth_param(1).unwrap().into_int_value();
         let val      = fn_val.get_nth_param(2).unwrap().into_int_value();
-        let slot     = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "slot").unwrap();
-        let elem_ptr = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[slot], "ep").unwrap() };
-        self.builder.build_store(elem_ptr, val).unwrap();
+        let data_ptr = { let ptr_ty2 = self.ctx.ptr_type(AddressSpace::default()); let s2x = unsafe { self.builder.build_gep(i64_ty, list_ptr, &[i64_ty.const_int(2,false)], "s2x").unwrap() }; let di2 = self.builder.build_load(inkwell::types::BasicTypeEnum::IntType(i64_ty), s2x, "di2").unwrap().into_int_value(); self.builder.build_int_to_ptr(di2, ptr_ty2, "dp").unwrap() };
+        let ep = unsafe { self.builder.build_gep(i64_ty, data_ptr, &[idx], "ep").unwrap() };
+        self.builder.build_store(ep, val).unwrap();
         self.builder.build_return(None).unwrap();
     }
 
