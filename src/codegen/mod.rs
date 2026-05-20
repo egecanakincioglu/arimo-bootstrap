@@ -4107,7 +4107,7 @@ impl<'ctx> CodeGen<'ctx> {
         let entry = self.ctx.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(entry);
 
-        let sz = i64_ty.const_int(8 * 257, false);
+        let sz = i64_ty.const_int(8 * 65537, false);
         let ptr = self.builder.build_call(malloc, &[sz.into()], "list_ptr")
             .unwrap().try_as_basic_value().basic().unwrap();
         if let inkwell::values::BasicValueEnum::PointerValue(p) = ptr {
