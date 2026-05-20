@@ -1468,12 +1468,9 @@ impl<'ctx> CodeGen<'ctx> {
 
                             if let Some(cn) = &class_name {
                                 if !matches!(cn.as_str(), "__List" | "__HashMap" | "__Pair") {
-                                    let needs_retain = matches!(init_expr, Expr::Ident(_));
-                                    if needs_retain {
-                                        if let BasicValueEnum::PointerValue(ptr) = coerced {
-                                            let cn_owned = cn.clone();
-                                            self.arc_retain_ptr(ptr, &cn_owned)?;
-                                        }
+                                    if let BasicValueEnum::PointerValue(ptr) = coerced {
+                                        let cn_owned = cn.clone();
+                                        self.arc_retain_ptr(ptr, &cn_owned)?;
                                     }
                                 }
                             }
@@ -5371,8 +5368,6 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn compile_assign(&mut self, target: &Expr, value: &Expr) -> CgResult<Option<BasicValueEnum<'ctx>>> {
-        let rhs_needs_retain = matches!(value, Expr::Ident(_));
-
         let val = self.compile_expr(value)?;
         if let Some(v) = val {
             match target {
@@ -5389,11 +5384,9 @@ impl<'ctx> CodeGen<'ctx> {
                                     elem_class: None,
                                     enum_name: None,
                                 })?;
-                                if rhs_needs_retain {
-                                    if let BasicValueEnum::PointerValue(new_ptr) = coerced {
-                                        let cn_clone = cn.clone();
-                                        self.arc_retain_ptr(new_ptr, &cn_clone)?;
-                                    }
+                                if let BasicValueEnum::PointerValue(new_ptr) = coerced {
+                                    let cn_clone = cn.clone();
+                                    self.arc_retain_ptr(new_ptr, &cn_clone)?;
                                 }
                             }
                         }
