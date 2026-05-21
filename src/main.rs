@@ -726,9 +726,11 @@ fn main() {
                 process::exit(1);
             }
 
+            let direct_root = fs::canonicalize(".").ok();
+            let direct_root_ref: Option<&Path> = direct_root.as_deref();
             let opts = CompileOptions {
                 entry_files: arm_files,
-                project_root: None,
+                project_root: direct_root_ref,
                 stdlib_dir: stdlib_opt,
                 emit_ir,
                 only_obj,
