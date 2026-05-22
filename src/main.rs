@@ -481,10 +481,17 @@ fn run_pipeline(opts: CompileOptions) -> i32 {
                 println!(" OK\narc: → {}", obj_out);
                 return 0;
             }
-            let exe_path = format!("{}.exe", stem_owned);
+            let exe_ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+            let exe_path = format!("{}{}", stem_owned, exe_ext);
             print!(" linking ...");
+            let mut gcc_args: Vec<String> = vec![
+                obj_out.clone(), "-o".into(), exe_path.clone(), "-lm".into(),
+            ];
+            if !cfg!(target_os = "windows") {
+                gcc_args.push("-no-pie".into());
+            }
             let status = std::process::Command::new("gcc")
-                .args([&obj_out, "-o", &exe_path, "-lm"])
+                .args(&gcc_args)
                 .status();
             let _ = fs::remove_file(&obj_out);
             match status {
@@ -691,9 +698,11 @@ fn main() {
             let code = run_pipeline(opts);
 
             if code == 0 && args[1] == "run" && !check_only {
-                println!("\narc: running '{}.exe'", out_stem);
+                let run_ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+                let run_path = format!("./{}{}", out_stem, run_ext);
+                println!("\narc: running '{}{}'", out_stem, run_ext);
                 println!("{}", "─".repeat(40));
-                let status = std::process::Command::new(format!("./{}.exe", out_stem))
+                let status = std::process::Command::new(&run_path)
                     .status()
                     .unwrap_or_else(|e| {
                         eprintln!("arc: could not run: {}", e);
