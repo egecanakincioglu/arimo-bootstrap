@@ -3166,6 +3166,21 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(Some(s.into()))
             }
 
+            ("Env", "exePath") => {
+                let i64_ty = self.ctx.i64_type();
+                let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+                let argv_gv = self.get_or_create_env_global("__arimo_argv", ptr_ty.into());
+                let argv = self.builder.build_load(ptr_ty, argv_gv.as_pointer_value(), "argv")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_pointer_value();
+                let arg0_ptr_ptr = unsafe {
+                    self.builder.build_gep(ptr_ty, argv, &[i64_ty.const_int(0, false)], "arg0pp")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                };
+                let arg0 = self.builder.build_load(ptr_ty, arg0_ptr_ptr, "arg0")
+                    .map_err(|e| CodeGenError::new(e.to_string()))?.into_pointer_value();
+                Ok(Some(arg0.into()))
+            }
+
             ("Env", "args") => {
                 let i32_ty = self.ctx.i32_type();
                 let i64_ty = self.ctx.i64_type();
