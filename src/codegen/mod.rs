@@ -2912,16 +2912,30 @@ impl<'ctx> CodeGen<'ctx> {
                     self.module.add_function("fprintf",
                         i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], true), None)
                 };
-                let iob_fn = if let Some(f) = self.module.get_function("__acrt_iob_func") { f } else {
-                    self.module.add_function("__acrt_iob_func",
-                        ptr_ty.fn_type(&[i32_ty.into()], false), None)
+                #[cfg(target_os = "windows")]
+                let stderr_ptr = {
+                    let iob_fn = if let Some(f) = self.module.get_function("__acrt_iob_func") { f } else {
+                        self.module.add_function("__acrt_iob_func",
+                            ptr_ty.fn_type(&[i32_ty.into()], false), None)
+                    };
+                    let call = self.builder.build_call(iob_fn,
+                        &[i32_ty.const_int(2, false).into()], "stderr_v")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    match call.try_as_basic_value().basic() {
+                        Some(BasicValueEnum::PointerValue(p)) => p,
+                        _ => ptr_ty.const_null(),
+                    }
                 };
-                let stderr_call = self.builder.build_call(iob_fn,
-                    &[i32_ty.const_int(2, false).into()], "stderr_v")
-                    .map_err(|e| CodeGenError::new(e.to_string()))?;
-                let stderr_ptr = match stderr_call.try_as_basic_value().basic() {
-                    Some(BasicValueEnum::PointerValue(p)) => p,
-                    _ => ptr_ty.const_null(),
+                #[cfg(not(target_os = "windows"))]
+                let stderr_ptr = {
+                    let stderr_global = if let Some(g) = self.module.get_global("stderr") {
+                        g
+                    } else {
+                        self.module.add_global(ptr_ty, None, "stderr")
+                    };
+                    self.builder.build_load(ptr_ty, stderr_global.as_pointer_value(), "stderr_ptr")
+                        .map_err(|e| CodeGenError::new(e.to_string()))?
+                        .into_pointer_value()
                 };
                 for a in args {
                     if let Some(v) = self.compile_expr(a)? {
