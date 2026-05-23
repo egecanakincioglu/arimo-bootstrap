@@ -1457,8 +1457,21 @@ impl<'ctx> CodeGen<'ctx> {
                 };
 
                 if let Some(llvm_ty) = llvm_ty {
-                    let alloca = self.builder.build_alloca(llvm_ty, name)
-                        .map_err(|e| CodeGenError::new(e.to_string()))?;
+                    // Hoist alloca to function entry block so loop-local vars
+                    // don't grow the stack on every iteration (STATUS_STACK_OVERFLOW).
+                    let alloca = {
+                        let cur_block = self.builder.get_insert_block().unwrap();
+                        let entry = self.cur_fn.unwrap().get_first_basic_block().unwrap();
+                        if let Some(first_instr) = entry.get_first_instruction() {
+                            self.builder.position_before(&first_instr);
+                        } else {
+                            self.builder.position_at_end(entry);
+                        }
+                        let a = self.builder.build_alloca(llvm_ty, name)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        self.builder.position_at_end(cur_block);
+                        a
+                    };
                     if let Some(init_expr) = value {
                         if let Some(val) = self.compile_expr(init_expr)? {
                             let coerced = self.coerce_value(val, llvm_ty)?;
