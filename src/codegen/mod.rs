@@ -1399,7 +1399,25 @@ impl<'ctx> CodeGen<'ctx> {
                         }
                     }
                     Some(v) => {
-                        self.builder.build_return(Some(&v))
+                        // Cast return value to match function signature (e.g. i64→i32 for C main)
+                        let final_val: inkwell::values::BasicValueEnum = if let Some(cur_fn) = self.cur_fn {
+                            let fn_ret_ty = cur_fn.get_type().get_return_type();
+                            match (v, fn_ret_ty) {
+                                (inkwell::values::BasicValueEnum::IntValue(iv),
+                                 Some(inkwell::types::BasicTypeEnum::IntType(t)))
+                                    if iv.get_type().get_bit_width() != t.get_bit_width() => {
+                                    if iv.get_type().get_bit_width() > t.get_bit_width() {
+                                        self.builder.build_int_truncate(iv, t, "ret_cast")
+                                            .map_err(|e| CodeGenError::new(e.to_string()))?.into()
+                                    } else {
+                                        self.builder.build_int_s_extend(iv, t, "ret_cast")
+                                            .map_err(|e| CodeGenError::new(e.to_string()))?.into()
+                                    }
+                                }
+                                _ => v,
+                            }
+                        } else { v };
+                        self.builder.build_return(Some(&final_val))
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
                     }
                 }
@@ -5213,6 +5231,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let fn_name = format!("{}_{}", owner_class, method);
                 self.fn_return_class.get(&fn_name).cloned()
             }
+            Expr::ConstructorCall { class, .. } => Some(class.clone()),
             _ => None,
         }
     }
