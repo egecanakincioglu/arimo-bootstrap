@@ -1804,6 +1804,7 @@ impl TypeChecker {
             "chars"      => Type::List(Box::new(Type::Str)),
             "charCodeAt" => Type::Integer,
             "charAt"     => Type::Str,
+            "toString"   => Type::Str,
             _ => {
                 self.error(format!("unknown String method '{}'", method));
                 Type::Named("Error".to_string())
