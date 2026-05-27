@@ -3363,7 +3363,7 @@ impl<'ctx> CodeGen<'ctx> {
                          "split" | "indexOf" | "substring" | "replace" |
                          "parseInt" | "parseFloat" | "isEmpty" | "isBlank" |
                          "repeat" | "padStart" | "padEnd" | "chars" | "concat" |
-                         "charCodeAt" | "charAt")
+                         "charCodeAt" | "charAt" | "toString")
     }
 
     fn compile_string_method(
@@ -3553,6 +3553,10 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_store(null_gep, i8_ty.const_int(0, false))
                     .map_err(|e| CodeGenError::new(e.to_string()))?;
                 Ok(Some(buf_ptr.into()))
+            }
+
+            "toString" => {
+                Ok(Some(str_ptr.into()))
             }
 
             "indexOf" => {
