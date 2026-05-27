@@ -1,7 +1,7 @@
 [target.x86_64-pc-windows-gnu]
 linker = "C:\\msys64\\mingw64\\bin\\gcc.exe"
 ar = "C:\\msys64\\mingw64\\bin\\ar.exe"
-rustflags = ["-C", "link-args=-Wl,--allow-multiple-definition -lwinpthread"]
+rustflags = ["-C", "link-args=-Wl,--allow-multiple-definition -lwinpthread -Wl,--stack,67108864"]
 
 [env]
 LLVM_SYS_211_PREFIX       = "C:\\msys64\\mingw64"
