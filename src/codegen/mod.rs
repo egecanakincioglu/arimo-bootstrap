@@ -1487,6 +1487,17 @@ impl<'ctx> CodeGen<'ctx> {
                         }
                         let a = self.builder.build_alloca(llvm_ty, name)
                             .map_err(|e| CodeGenError::new(e.to_string()))?;
+                        // Zero-initialize to prevent ARC release on garbage stack data
+                        let zero: BasicValueEnum = match llvm_ty {
+                            BasicTypeEnum::IntType(t)     => t.const_int(0, false).into(),
+                            BasicTypeEnum::FloatType(t)   => t.const_float(0.0).into(),
+                            BasicTypeEnum::PointerType(t) => t.const_null().into(),
+                            BasicTypeEnum::StructType(t)  => t.const_zero().into(),
+                            BasicTypeEnum::ArrayType(t)   => t.const_zero().into(),
+                            _ => self.ctx.i64_type().const_int(0, false).into(),
+                        };
+                        self.builder.build_store(a, zero)
+                            .map_err(|e| CodeGenError::new(e.to_string()))?;
                         self.builder.position_at_end(cur_block);
                         a
                     };
