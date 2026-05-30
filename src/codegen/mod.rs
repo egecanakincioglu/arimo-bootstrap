@@ -82,8 +82,9 @@ pub struct CodeGen<'ctx> {
     param_class_map    : HashMap<String, String>,
     param_elem_map     : HashMap<String, String>,
     lambda_counter    : usize,
-    loop_exit_bbs     : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
-    loop_continue_bbs : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
+    loop_exit_bbs      : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
+    loop_continue_bbs  : Vec<inkwell::basic_block::BasicBlock<'ctx>>,
+    loop_scope_depths  : Vec<usize>,
     refcount_indices     : HashMap<String, u32>,
     manual_memory_classes: std::collections::HashSet<String>,
     finally_defers       : Vec<Vec<Stmt>>,
@@ -116,6 +117,7 @@ impl<'ctx> CodeGen<'ctx> {
             lambda_counter        : 0,
             loop_exit_bbs         : Vec::new(),
             loop_continue_bbs     : Vec::new(),
+            loop_scope_depths      : Vec::new(),
             refcount_indices      : HashMap::new(),
             manual_memory_classes : std::collections::HashSet::new(),
             finally_defers        : Vec::new(),
@@ -275,6 +277,22 @@ impl<'ctx> CodeGen<'ctx> {
         for i in (0..self.scopes.len()).rev() {
             if self.current_block_terminated() { break; }
             self.arc_release_scope(i)?;
+        }
+        Ok(())
+    }
+
+    fn unwind_scopes_to(&mut self, target: usize) -> CgResult<()> {
+        for i in (target..self.scopes.len()).rev() {
+            if self.current_block_terminated() { break; }
+            if let Some(defers) = self.defer_stack.get(i).cloned() {
+                for expr in defers.iter().rev() {
+                    if self.current_block_terminated() { break; }
+                    let _ = self.compile_expr(expr);
+                }
+            }
+            if !self.current_block_terminated() {
+                self.arc_release_scope(i)?;
+            }
         }
         Ok(())
     }
@@ -1887,7 +1905,8 @@ impl<'ctx> CodeGen<'ctx> {
 
             Stmt::Break => {
                 if let Some(&exit_bb) = self.loop_exit_bbs.last() {
-                    self.arc_release_all_scopes()?;
+                    let target = self.loop_scope_depths.last().copied().unwrap_or(0);
+                    self.unwind_scopes_to(target)?;
                     self.builder.build_unconditional_branch(exit_bb)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     Ok(true)
@@ -1898,7 +1917,8 @@ impl<'ctx> CodeGen<'ctx> {
 
             Stmt::Continue => {
                 if let Some(&cont_bb) = self.loop_continue_bbs.last() {
-                    self.arc_release_all_scopes()?;
+                    let target = self.loop_scope_depths.last().copied().unwrap_or(0);
+                    self.unwind_scopes_to(target)?;
                     self.builder.build_unconditional_branch(cont_bb)
                         .map_err(|e| CodeGenError::new(e.to_string()))?;
                     Ok(true)
@@ -2012,6 +2032,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.loop_exit_bbs.push(exit_bb);
         self.loop_continue_bbs.push(cond_bb);
+        self.loop_scope_depths.push(self.scopes.len());
 
         self.builder.build_unconditional_branch(cond_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -2040,6 +2061,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.loop_exit_bbs.pop();
         self.loop_continue_bbs.pop();
+        self.loop_scope_depths.pop();
         self.builder.position_at_end(exit_bb);
         Ok(false)
     }
@@ -2062,6 +2084,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.loop_exit_bbs.push(exit_bb);
         self.loop_continue_bbs.push(step_bb);
+        self.loop_scope_depths.push(self.scopes.len());
 
         self.builder.build_unconditional_branch(cond_bb)
             .map_err(|e| CodeGenError::new(e.to_string()))?;
@@ -2089,6 +2112,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.loop_exit_bbs.pop();
         self.loop_continue_bbs.pop();
+        self.loop_scope_depths.pop();
         self.builder.position_at_end(exit_bb);
         self.pop_scope();
         Ok(false)
