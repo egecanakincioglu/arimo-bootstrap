@@ -3228,7 +3228,8 @@ impl<'ctx> CodeGen<'ctx> {
             }
 
             ("Env", "platform") => {
-                let s = self.build_global_string("windows")?;
+                let platform = if cfg!(target_os = "linux") { "linux" } else { "windows" };
+                let s = self.build_global_string(platform)?;
                 Ok(Some(s.into()))
             }
 
